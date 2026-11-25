@@ -8,3 +8,67 @@ it("preserves layout evidence when a parsed segment is cached and replayed", () 
 it("rejects untrusted visual classifications rather than skipping visual extraction", () => {
   expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, visualKinds: ["ignore-ocr"] }], 1, 1)).toThrow();
 });
+it("preserves optional sectionSealedAtEnd metadata and rejects non-boolean values", () => {
+  const sealedPage = { page: 1, text: "Public theorem.", imagePath: null, visualKinds: [], sectionSealedAtEnd: true, hadSealedContent: true };
+  expect(validatePdfSegmentPages([sealedPage], 1, 1)).toEqual([sealedPage]);
+  const inlineSealedPage = { page: 1, text: "Public stem.", imagePath: null, visualKinds: ["picture"], inlineSealedAtEnd: true, hadSealedContent: true };
+  const proofPage = { ...inlineSealedPage, inlineProofSealedAtEnd: true };
+  expect(validatePdfSegmentPages([proofPage], 1, 1)).toEqual([proofPage]);
+  expect(() => validatePdfSegmentPages([{ ...proofPage, inlineSealedAtEnd: false }], 1, 1)).toThrow();
+  expect(validatePdfSegmentPages([inlineSealedPage], 1, 1)).toEqual([inlineSealedPage]);
+  const plainPage = { page: 1, text: "Public theorem.", imagePath: null };
+  expect(validatePdfSegmentPages([plainPage], 1, 1)).toEqual([plainPage]);
+  const validatedPlain = validatePdfSegmentPages([plainPage], 1, 1)[0]!;
+  expect("sectionSealedAtEnd" in validatedPlain).toBe(false);
+  expect("inlineSealedAtEnd" in validatedPlain).toBe(false);
+  expect("hadSealedContent" in validatedPlain).toBe(false);
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, sectionSealedAtEnd: "yes" }], 1, 1)).toThrow();
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, inlineSealedAtEnd: "yes" }], 1, 1)).toThrow();
+  expect(() => validatePdfSegmentPages([{ ...inlineSealedPage, sectionSealedAtEnd: true }], 1, 1)).toThrow();
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, hadSealedContent: "yes" }], 1, 1)).toThrow();
+});
+it("roundtrips explicit worked-example context on a cached physical page", () => {
+  const page = { page: 1, text: "Worked Example 1", imagePath: null };
+  for (const inWorkedExampleAtEnd of [true, false]) {
+    const annotated = { ...page, inWorkedExampleAtEnd };
+    expect(validatePdfSegmentPages([annotated], 1, 1)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...page, inWorkedExampleAtEnd: "true" }], 1, 1)).toThrow();
+  for (const inExerciseAtEnd of [true, false]) {
+    const annotated = { ...page, inExerciseAtEnd };
+    expect(validatePdfSegmentPages([annotated], 1, 1)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...page, inExerciseAtEnd: "true" }], 1, 1)).toThrow();
+});
+
+it("keeps publication uncertainty separate from a confirmed answer seal", () => {
+  const marker = { page: 4, text: "", imagePath: null, hadSealedContent: false, publicationSealUnknown: true };
+  expect(validatePdfSegmentPages([marker], 4, 4)).toEqual([marker]);
+  expect(() => validatePdfSegmentPages([{ ...marker, publicationSealUnknown: "true" }], 4, 4)).toThrow();
+});
+
+it("preserves whether a confirmed publication seal followed public text", () => {
+  const marker = { page: 4, text: "", imagePath: null, hadSealedContent: true, sectionSealedAtEnd: true };
+  for (const publicationSealHadPublicPrefix of [true, false]) {
+    const annotated = { ...marker, publicationSealHadPublicPrefix };
+    expect(validatePdfSegmentPages([annotated], 4, 4)).toEqual([annotated]);
+  }
+  expect(() => validatePdfSegmentPages([{ ...marker, publicationSealHadPublicPrefix: "true" }], 4, 4)).toThrow();
+});
+
+it("measures page text bounds in Unicode code points rather than UTF-16 code units", () => {
+  const supplementaryMath = "a".repeat(199_979) + "𝕏".repeat(21);
+  expect(supplementaryMath.length).toBe(200_021);
+  expect([...supplementaryMath].length).toBe(200_000);
+  const page = { page: 1, text: supplementaryMath, imagePath: null };
+  expect(validatePdfSegmentPages([page], 1, 1)).toEqual([page]);
+
+  const truncatedAllSupplementary = "𝕏".repeat(200_000) + "\n…[truncated]";
+  expect(truncatedAllSupplementary.length).toBe(400_013);
+  expect([...truncatedAllSupplementary].length).toBe(200_013);
+  const truncatedPage = { page: 1, text: truncatedAllSupplementary, imagePath: null };
+  expect(validatePdfSegmentPages([truncatedPage], 1, 1)).toEqual([truncatedPage]);
+
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x".repeat(200_021), imagePath: null }], 1, 1)).toThrow(TypeError);
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "𝕏".repeat(200_021), imagePath: null }], 1, 1)).toThrow(TypeError);
+});

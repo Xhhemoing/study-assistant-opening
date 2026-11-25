@@ -14,6 +14,8 @@ export function decodeParserOutput(text: string): ParsedPage[] {
   const start = text.indexOf("{");
   const value: unknown = JSON.parse(start < 0 ? text : text.slice(start));
   if (!value || typeof value !== "object" || !Array.isArray((value as { pages?: unknown }).pages)) throw new TypeError("invalid parser output");
+  const tracksExerciseContext = (value as { tracksExerciseContext?: unknown }).tracksExerciseContext;
+  if (tracksExerciseContext !== undefined && typeof tracksExerciseContext !== "boolean") throw new TypeError("invalid tracksExerciseContext metadata");
   const pages = (value as { pages: unknown[] }).pages.map((item) => {
     if (!item || typeof item !== "object") throw new TypeError("invalid page");
     const page = item as Record<string, unknown>;
@@ -21,8 +23,34 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (typeof page.text !== "string" || !(page.imagePath === null || typeof page.imagePath === "string")) throw new TypeError("invalid page shape");
     const kinds = page.visualKinds;
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
+    if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
+    if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
+    if (page.inlineEmptyAtEnd !== undefined && (typeof page.inlineEmptyAtEnd !== "boolean" || page.inlineEmptyAtEnd && (!page.inlineSealedAtEnd || page.inlineProofSealedAtEnd))) {
+      throw new TypeError("invalid inlineEmptyAtEnd metadata");
+    }
+    if (page.inlineProofBoundaryPendingAtEnd !== undefined && typeof page.inlineProofBoundaryPendingAtEnd !== "boolean") throw new TypeError("invalid inlineProofBoundaryPendingAtEnd metadata");
+    if (page.completedInlineAnswerDigest !== undefined && (page.inlineProofBoundaryPendingAtEnd !== true
+      || typeof page.completedInlineAnswerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(page.completedInlineAnswerDigest))) {
+      throw new TypeError("invalid completedInlineAnswerDigest metadata");
+    }
+    if (page.inlineProofSealedAtEnd !== undefined && typeof page.inlineProofSealedAtEnd !== "boolean") throw new TypeError("invalid inlineProofSealedAtEnd metadata");
+    if (page.sectionSealedAtEnd && page.inlineSealedAtEnd || page.inlineProofSealedAtEnd && !page.inlineSealedAtEnd) throw new TypeError("conflicting page end seal metadata");
+    if (page.hadSealedContent !== undefined && typeof page.hadSealedContent !== "boolean") throw new TypeError("invalid hadSealedContent metadata");
+    if (page.previousNumberedQuestionAtEnd !== undefined && typeof page.previousNumberedQuestionAtEnd !== "boolean") throw new TypeError("invalid previousNumberedQuestionAtEnd metadata");
+    if (page.inWorkedExampleAtEnd !== undefined && typeof page.inWorkedExampleAtEnd !== "boolean") throw new TypeError("invalid inWorkedExampleAtEnd metadata");
+    if (page.inExerciseAtEnd !== undefined && typeof page.inExerciseAtEnd !== "boolean") throw new TypeError("invalid inExerciseAtEnd metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
-      ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }) };
+      ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
+      ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
+      ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
+      ...(page.inlineEmptyAtEnd === undefined ? {} : { inlineEmptyAtEnd: page.inlineEmptyAtEnd }),
+      ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
+      ...(page.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: page.inlineProofBoundaryPendingAtEnd }),
+      ...(page.completedInlineAnswerDigest === undefined ? {} : { completedInlineAnswerDigest: page.completedInlineAnswerDigest }),
+      ...(page.hadSealedContent === undefined ? {} : { hadSealedContent: page.hadSealedContent }),
+      ...(page.previousNumberedQuestionAtEnd === undefined ? {} : { previousNumberedQuestionAtEnd: page.previousNumberedQuestionAtEnd }),
+      ...(page.inWorkedExampleAtEnd === undefined ? {} : { inWorkedExampleAtEnd: page.inWorkedExampleAtEnd }),
+      ...(page.inExerciseAtEnd !== undefined || tracksExerciseContext ? { inExerciseAtEnd: page.inExerciseAtEnd ?? false } : {}) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;
@@ -33,6 +61,11 @@ export function createDoclingProcess(deps: { run: ParserRunner; maxPages?: numbe
     const timeoutSeconds = input.timeoutSeconds ?? 900;
     const argv = ["-m", "opening_parser", "--input", input.path, "--mime", input.mime, "--max-pages", String(input.maxPages), "--timeout-seconds", String(timeoutSeconds)];
     if (input.pageStart !== undefined && input.pageEnd !== undefined) argv.push("--page-start", String(input.pageStart), "--page-end", String(input.pageEnd));
+    if (input.initialSealMode !== undefined) argv.push("--initial-seal-mode", input.initialSealMode);
+    if (input.initialInlineProofBoundary) argv.push("--initial-inline-proof-boundary");
+    if (input.initialPreviousNumberedQuestion) argv.push("--initial-previous-numbered-question");
+    if (input.initialInWorkedExample) argv.push("--initial-in-worked-example");
+    if (input.initialInExercise) argv.push("--initial-in-exercise");
     // The outer deadline includes imports/model initialization, which the
     // Python conversion thread timeout cannot cover.
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutSeconds * 1000)]);

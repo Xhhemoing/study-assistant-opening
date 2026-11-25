@@ -4,33 +4,47 @@ import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
-import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { filterPublicChunkRows, preserveOpeningKnowledgeDefinitions, publicPdfChunkImageObjectKey, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { commitPdfPageSeals, type PdfSegmentPage } from "./opening-pdf-segments";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
-type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: ApiFailure };
+type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: ApiFailure; allowSealedEmpty?: boolean };
 export type OpeningSourceChunksRepository = {
   replaceChunks(scope: OpeningScope, input: ChunkPublication & { chunks: NewSourceChunk[] }): Promise<void>;
   listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>;
-  listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number, pages?: number[]): Promise<SourceChunk[]>;
+  listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number, pages?: number[],
+    options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]>;
   listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>;
 };
 export type OpeningPdfChunkPublisher = {
   /** The stream must be staged locally before publication, with one chunk per physical page. */
   replacePdfChunks(scope: OpeningScope, input: ChunkPublication & {
     chunks: AsyncIterable<NewSourceChunk>; preservePages: number[];
+    /** Pages whose archived bytes may contain sealed or unverified content. */
+    unsafeLegacyPages?: number[];
+    /** Marker changes whose visibility depends on this exact replacement. */
+    publicationSeals?: PdfSegmentPage[];
     /** Exact page numbers stored with the warning for a same-version retry. */
     warning?: ApiFailure & { pdfTextCap?: number[] };
   }): Promise<void>;
 };
-export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
-async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[]): Promise<SourceChunk[]> {
-  const rows = await sql`SELECT c.* FROM opening_source_chunks c
+export function mapChunk(row: Record<string, unknown>): SourceChunk {
+  const imageObjectKey = ("public_image_object_key" in row ? row.public_image_object_key : row.image_object_key) as string | null;
+  return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey };
+}
+async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[],
+  options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]> {
+  const recovery = options?.unpublishedPdfForRecovery === true;
+  const rows = await sql`
+    ${recovery ? sql`` : publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: [sourceId], sourceVersion: version })}
+    SELECT c.*, ${recovery ? sql`` : sql`${publicPdfChunkImageObjectKey(sql)} AS public_image_object_key,`} s.mime FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id
     WHERE c.source_id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
       AND c.source_version=${version} ${pages ? sql`AND c.page=ANY(${pages}::int[])` : sql``}
+      AND ${recovery ? sql`TRUE` : publicPdfChunkPredicate(sql)}
     ORDER BY c.page NULLS LAST, c.created_at`;
-  return rows.map(mapChunk);
+  return (recovery ? rows : filterPublicChunkRows(rows)).map(mapChunk);
 }
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
   return chunks.some((chunk) => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey?.trim()));
@@ -56,16 +70,30 @@ async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope
         WHERE added.text ~ '[^[:space:]]'))`;
 }
 
-async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication, reconcile: (sourceId: string) => Promise<void>) {
+async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication,
+  reconcile: (sourceId: string, preservePdfDefinitions?: () => Promise<void>) => Promise<void>, preservePages?: number[]) {
   // Privacy takes history before workspace. A rejected execution rolls back the ensure too.
   await lockWorkspaceLearningHistory(tx, scope);
   await lockOpeningJobExecution(tx, scope);
-  await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
+  const withdrawAll = input.allowSealedEmpty && !preservePages?.length;
+  if (preservePages || withdrawAll) {
+    // For PDFs, remove unsafe evidence after taking the workspace and graph locks.
+    const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+    if (!owner) throw new Error("workspace not found");
+    if (preservePages && !withdrawAll) await tx`SELECT course_id FROM opening_course_knowledge
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND source_versions->>${input.sourceId}=${String(input.sourceVersion)}
+      ORDER BY course_id FOR UPDATE`;
+  } else {
+    await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
+  }
   const [source] = await tx`SELECT id,version,upload_state FROM opening_sources
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
   if (!source) throw new Error("source not found");
   if (Number(source.version) !== input.sourceVersion || source.upload_state !== "uploaded") throw new Error("CONFLICT: source version changed during parse");
-  await reconcile(String(source.id));
+  await reconcile(String(source.id), preservePages && !withdrawAll
+    ? () => preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion)
+    : undefined);
   await tx`UPDATE opening_sources SET parse_state='ready',error=${input.warning ? tx.json(input.warning) : null}::jsonb,updated_at=now()
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} AND version=${input.sourceVersion}`;
   await enqueueOpeningSourceIndex(tx, scope, input.sourceId, input.sourceVersion);
@@ -102,13 +130,16 @@ async function stagePdfChunks(tx: TransactionSql, chunks: AsyncIterable<NewSourc
   return readable;
 }
 
-async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sourceId, sourceVersion, preservePages }: ChunkPublication & { preservePages: number[] }, stagedReadable: boolean) {
+async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope,
+  { sourceId, sourceVersion, preservePages, allowSealedEmpty, unsafeLegacyPages = [] }:
+    ChunkPublication & { preservePages: number[]; unsafeLegacyPages?: number[] },
+  stagedReadable: boolean, preserveDefinitions?: () => Promise<void>) {
   // Retained pages are references only. PostgreSQL keeps the original rows and citation IDs.
   if (preservePages.length) await tx`INSERT INTO pg_temp.opening_pdf_chunk_stage (page,matched_id)
     SELECT page,id FROM opening_source_chunks
     WHERE source_id=${sourceId} AND source_version=${sourceVersion} AND page=ANY(${preservePages}::int[])
     ON CONFLICT (page) DO NOTHING`;
-  if (!stagedReadable) {
+  if (!stagedReadable && !allowSealedEmpty) {
     const [retained] = await tx`SELECT EXISTS (
       SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged JOIN opening_source_chunks c ON c.id=staged.matched_id
       WHERE c.text ~ '[^[:space:]]' OR c.image_object_key ~ '[^[:space:]]') AS readable`;
@@ -129,6 +160,24 @@ async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sou
       await backfillLegacyChunkDigest(tx, scope, sourceId, sourceVersion, digest);
     }
   }
+  if (preserveDefinitions) {
+    // Keep ordinary replacements available for legacy definitions, but remove withdrawn or
+    // contaminated rows before the backfill reads evidence. An exact staged match is public.
+    await tx`DELETE FROM opening_source_chunks c
+      WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion}
+        AND NOT EXISTS (SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page AND staged.matched_id=c.id)
+        AND (c.page=ANY(${unsafeLegacyPages}::int[]) OR NOT EXISTS (
+          SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page
+        ) OR EXISTS (
+          SELECT 1 FROM opening_pdf_parse_segments seal
+          WHERE seal.workspace_id=${scope.workspaceId} AND seal.source_id=c.source_id AND seal.source_version=c.source_version
+            AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
+            AND seal.page_start=c.page AND seal.page_end=c.page
+            AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'sectionSealedAtEnd'='true'
+              OR seal.pages->0->>'inlineSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+        ))`;
+    await preserveDefinitions();
+  }
   await tx`DELETE FROM opening_source_chunks c WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion}
     AND NOT EXISTS (SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged WHERE staged.page=c.page AND staged.matched_id=c.id)`;
   await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
@@ -139,7 +188,7 @@ async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sou
 export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository & OpeningPdfChunkPublisher { return {
   async replaceChunks(scope, input) {
     await sql.begin(tx => publishChunks(tx, scope, input, async sourceId => {
-      requireReadableContent(chunksHaveReadableContent(input.chunks));
+      if (!input.allowSealedEmpty) requireReadableContent(chunksHaveReadableContent(input.chunks));
       const existing = await tx`SELECT *, text ~ '[^[:space:]]' AS readable FROM opening_source_chunks
         WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
       const existingChunks = existing.map(row => mapChunk(row));
@@ -172,16 +221,22 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
     await sql.begin(async tx => {
       // Disk staging is complete before this transaction. Hold publication locks only for reconciliation.
       const stagedReadable = await stagePdfChunks(tx, input.chunks);
-      if (!input.preservePages.length) requireReadableContent(stagedReadable);
-      await publishChunks(tx, scope, input, sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable));
+      if (!input.preservePages.length && !input.allowSealedEmpty) requireReadableContent(stagedReadable);
+      await publishChunks(tx, scope, input,
+        async (sourceId, preserveDefinitions) => {
+          await reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable, preserveDefinitions);
+          await commitPdfPageSeals(tx, scope.workspaceId, sourceId, input.sourceVersion, input.publicationSeals ?? []);
+        },
+        input.preservePages);
     });
   },
   async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },
-  listChunksAtVersion: (scope, sourceId, version, pages) => fetchChunks(sql, scope, sourceId, version, pages),
+  listChunksAtVersion: (scope, sourceId, version, pages, options) => fetchChunks(sql, scope, sourceId, version, pages, options),
   async listForSources(scope, sourceIds) {
     if (!sourceIds.length) return [];
     const rows = await sql`
-      SELECT c.* FROM opening_source_chunks c
+      ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds })}
+      SELECT c.*, ${publicPdfChunkImageObjectKey(sql)} AS public_image_object_key, s.mime FROM opening_source_chunks c
       JOIN opening_sources s ON s.id = c.source_id
       JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
@@ -195,9 +250,11 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
             AND j.payload->>'sourceId'=s.id::text AND j.payload->>'sourceVersion'=s.version::text)))
         AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
         AND c.source_version = s.version
+        AND ${publicPdfChunkPredicate(sql)}
         AND c.source_id IN ${sql(sourceIds)}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at
     `;
-    return rows.map((row) => mapChunk(row as Record<string, unknown>));
+    return filterPublicChunkRows(rows).map(mapChunk)
+      .filter(chunk => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey));
   },
 }; }

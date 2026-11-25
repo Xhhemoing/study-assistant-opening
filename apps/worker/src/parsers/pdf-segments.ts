@@ -1,13 +1,96 @@
 import { validatePdfSegmentPages, type OpeningPdfSegmentsRepository, type OpeningScope, type PdfSegmentPage } from "@aistudy/database";
-import { BoundsExceededError, ConversionFailedError, createDoclingProcess } from "./docling-process";
+import { BoundsExceededError, ConversionFailedError, UnsupportedMimeError, UsageError, createDoclingProcess } from "./docling-process";
 import { pdfParserProfile } from "./ocr-health";
-import type { ParserRunner } from "./types";
+import type { ParsedPage, ParserRunner, PdfSealMode } from "./types";
 
 export const DEFAULT_PDF_SEGMENT_PAGES = 10;
 export const DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS = 240;
 export const PDF_EXECUTION_POLL_MS = 1_000;
+export const MAX_PDF_BOOK_PAGES = 2_000;
+export const MAX_PDF_SEGMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_PDF_PAGE_TEXT_BYTES = 1024 * 1024;
+export const MAX_PDF_PAGE_TEXT_LENGTH = 200_020;
+export const MAX_PDF_BOOK_BYTES = 64 * 1024 * 1024;
 
-export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[] };
+export type AcademicDiscourseKind =
+  | "definition"
+  | "theorem"
+  | "proof"
+  | "worked_example"
+  | "exercise"
+  | "solution_sealed"
+  | "narrative"
+  | "figure_caption";
+
+export type DiscourseVisibilityHint = "public" | "hint_gated" | "sealed";
+
+export type PdfDiscourseBlock = {
+  kind: AcademicDiscourseKind;
+  text: string;
+  pageNumber: number;
+  charStart: number | null;
+  charEnd: number | null;
+  rawCharStart?: number | null;
+  rawCharEnd?: number | null;
+  continuedFromPrevPage: boolean;
+  continuesOnNextPage: boolean;
+  visibilityHint: DiscourseVisibilityHint;
+  associatedVisualKind?: "formula" | "table" | "picture" | null;
+  captionRef?: string | null;
+};
+
+export type PdfSegmentBatch = {
+  pageStart: number;
+  pageEnd: number;
+  pages: PdfSegmentPage[];
+  cached: boolean;
+  segmentBytes: number;
+};
+
+type PdfSegmentContinuation = PdfSealMode | null | void | {
+  nextSealMode: PdfSealMode | null;
+  nextInlineProofBoundary?: boolean;
+  nextInWorkedExample?: boolean;
+  nextInExercise?: boolean;
+  nextPreviousNumberedQuestion?: boolean;
+  resumeFromPage?: number;
+};
+type FailedPdfSegment = { pageStart: number; pageEnd: number; initialSealMode?: PdfSealMode };
+export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[]; failedSegments?: FailedPdfSegment[] };
+
+export function pdfPageEndSeal(page: Pick<ParsedPage, "sectionSealedAtEnd" | "inlineSealedAtEnd" | "inlineProofSealedAtEnd"> | undefined): PdfSealMode | undefined {
+  if (page?.sectionSealedAtEnd) return "section_sealed";
+  if (page?.inlineProofSealedAtEnd) return "inline_proof_sealed";
+  if (page?.inlineSealedAtEnd) return "inline_sealed";
+}
+
+function parseInspectOutput(stdout: string): { pageCount?: unknown } {
+  const start = stdout.indexOf("{");
+  return JSON.parse(start < 0 ? stdout : stdout.slice(start)) as { pageCount?: unknown };
+}
+
+function exceedsCodePointLimit(text: string, maxCodePoints: number): boolean {
+  if (text.length <= maxCodePoints) return false;
+  if (text.length > maxCodePoints * 2) return true;
+  let codePoints = 0;
+  for (let i = 0; i < text.length;) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const trail = text.charCodeAt(i + 1);
+      i += trail >= 0xdc00 && trail <= 0xdfff ? 2 : 1;
+    } else {
+      i += 1;
+    }
+    if (++codePoints > maxCodePoints) return true;
+  }
+  return false;
+}
+
+function validatePositiveBound(value: number | undefined, fallback: number, min: number, max: number, label: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isInteger(resolved) || resolved < min || resolved > max) throw new RangeError(`invalid ${label}`);
+  return resolved;
+}
 
 /** Serial polling is only a prompt cancellation signal. Each cache/chunk write
  * still locks and checks the execution transactionally, including the last gap. */
@@ -32,63 +115,227 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
-  runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
-  onPages: (pages: PdfSegmentPage[]) => void | Promise<void>;
+  runner: ParserRunner; segments?: Pick<OpeningPdfSegmentsRepository, "read" | "save">; signal: AbortSignal;
+  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean,
+    initialInWorkedExample?: boolean, cached?: boolean, initialInExercise?: boolean, initialInlineProofBoundary?: boolean,
+    initialPreviousNumberedQuestion?: boolean) =>
+    PdfSegmentContinuation | Promise<PdfSegmentContinuation>;
+  onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
+  shouldRevalidateSegment?: (pageStart: number, pageEnd: number) => Promise<boolean>;
+  onFailedSegment?: (segment: FailedPdfSegment) => readonly PdfSegmentPage[] | void | Promise<readonly PdfSegmentPage[] | void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
+  maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
 }): Promise<PdfSegmentParseResult> {
+  if (!input.onPages && !input.onSegment) throw new TypeError("PDF segment consumer callback is required");
   const size = input.segmentPages ?? DEFAULT_PDF_SEGMENT_PAGES;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS;
-  if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new RangeError("invalid PDF segment bounds");
+  if (!Number.isInteger(size) || size < 1 || size > 100 || !Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+    throw new RangeError("invalid PDF segment bounds");
+  }
+  const maxPages = validatePositiveBound(input.maxPages, MAX_PDF_BOOK_PAGES, 1, MAX_PDF_BOOK_PAGES, "PDF book page bound");
+  const maxSegmentBytes = validatePositiveBound(input.maxSegmentBytes, MAX_PDF_SEGMENT_BYTES, 1024, MAX_PDF_SEGMENT_BYTES, "PDF segment byte bound");
+  const maxPageTextBytes = validatePositiveBound(input.maxPageTextBytes, MAX_PDF_PAGE_TEXT_BYTES, 1024, MAX_PDF_SEGMENT_BYTES, "PDF page text byte bound");
+  const maxBookBytes = validatePositiveBound(input.maxBookBytes, MAX_PDF_BOOK_BYTES, 1024, MAX_PDF_BOOK_BYTES, "PDF book byte bound");
+
   input.signal.throwIfAborted();
   const inspectionSignal = AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]);
-  const inspected = await input.runner(["-m", "opening_parser", "--input", input.path, "--mime", "application/pdf", "--max-pages", "2000", "--inspect-pdf"], inspectionSignal);
+  const inspected = await input.runner(
+    ["-m", "opening_parser", "--input", input.path, "--mime", "application/pdf", "--max-pages", String(maxPages), "--inspect-pdf"],
+    inspectionSignal,
+  );
   inspectionSignal.throwIfAborted();
   if (inspected.exitCode === 5) throw new BoundsExceededError("parser bounds exceeded");
   if (inspected.exitCode !== 0) throw new ConversionFailedError("document conversion failed during PDF inspection");
-  const { pageCount } = JSON.parse(inspected.stdout) as { pageCount?: unknown };
-  if (!Number.isInteger(pageCount) || Number(pageCount) < 1 || Number(pageCount) > 2000) throw new RangeError("invalid PDF page count");
+  const { pageCount } = parseInspectOutput(inspected.stdout);
+  if (typeof pageCount !== "number" || !Number.isInteger(pageCount) || pageCount < 1) {
+    throw new RangeError("invalid PDF page count");
+  }
+  if (pageCount > maxPages) {
+    throw new BoundsExceededError(`PDF page count (${pageCount}) exceeds max (${maxPages})`);
+  }
+
   const parser = createDoclingProcess({ run: input.runner });
-  // The runner bounds stdout for each segment and validation bounds each page.
-  // Consume each batch before fetching the next so cached pages do not count
-  // against the runner's capture budget or require a second document-sized buffer.
+  let cumulativeBookBytes = 0;
+
+  const validateSegment = (rawPages: unknown, start: number, end: number) => {
+    let segmentTextBytes = 0;
+    if (Array.isArray(rawPages)) {
+      for (const rawPage of rawPages) {
+        if (!rawPage || typeof rawPage !== "object") continue;
+        const row = rawPage as Record<string, unknown>;
+        if (typeof row.text !== "string") continue;
+        if (exceedsCodePointLimit(row.text, MAX_PDF_PAGE_TEXT_LENGTH)) {
+          const codePoints = [...row.text].length;
+          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds text length limit (${codePoints} > ${MAX_PDF_PAGE_TEXT_LENGTH})`);
+        }
+        const pageBytes = Buffer.byteLength(row.text, "utf8");
+        if (pageBytes > maxPageTextBytes) {
+          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds per-page text byte limit (${pageBytes} > ${maxPageTextBytes})`);
+        }
+        segmentTextBytes += pageBytes;
+      }
+    }
+    const pages = validatePdfSegmentPages(rawPages, start, end);
+    const segmentBytes = Buffer.byteLength(JSON.stringify({ pages }), "utf8");
+    if (segmentBytes > maxSegmentBytes) {
+      throw new BoundsExceededError(`PDF segment ${start}-${end} exceeds per-segment byte limit (${segmentBytes} > ${maxSegmentBytes})`);
+    }
+    return { pages, segmentBytes, segmentTextBytes };
+  };
+
+  // Enforce the 8 MiB serialized payload cap per individual segment while streaming
+  // segments sequentially so 500-2,000 page books stay bounded in worker memory.
+  const parserProfile = input.parserProfile ?? pdfParserProfile();
+  let initialSealMode: PdfSealMode | undefined;
+  let initialInlineProofBoundary = false;
+  let initialInWorkedExample = false;
+  let initialInExercise = false;
+  let initialPreviousNumberedQuestion = false;
+  let afterFailedSegment = false;
   let parsedPageCount = 0;
-  const failed: string[] = [];
-  for (let start = 1; start <= Number(pageCount); start += size) {
+  const emitSegment = async (pageStart: number, parsed: ReturnType<typeof validateSegment>, cached: boolean, firstOverQuotaPage?: number) => {
+    const { pages, segmentBytes, segmentTextBytes } = parsed;
+    const lastPage = pages.at(-1)!;
+    const pageEnd = lastPage.page;
+    await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
+    const workerEnd = await input.onPages?.(pages, initialSealMode, afterFailedSegment, initialInWorkedExample, cached,
+      initialInExercise, initialInlineProofBoundary, initialPreviousNumberedQuestion);
+    afterFailedSegment = false;
+    const continuation = workerEnd && typeof workerEnd === "object" ? workerEnd : undefined;
+    const resumeFromPage = continuation?.resumeFromPage;
+    if (resumeFromPage !== undefined && (!Number.isInteger(resumeFromPage) || resumeFromPage <= pageStart
+      || resumeFromPage > (firstOverQuotaPage ?? pageEnd))) {
+      throw new RangeError("invalid PDF segment resume page");
+    }
+    const consumed = resumeFromPage === undefined ? pages : pages.slice(0, resumeFromPage - pageStart);
+    cumulativeBookBytes += resumeFromPage === undefined ? segmentTextBytes
+      : consumed.reduce((bytes, page) => bytes + Buffer.byteLength(page.text, "utf8"), 0);
+    parsedPageCount += consumed.length;
+    const doclingEndSeal = pdfPageEndSeal(lastPage);
+    const doclingEndInlineProofBoundary = Boolean(lastPage.inlineProofBoundaryPendingAtEnd);
+    const doclingEndWorkedExample = Boolean(lastPage.inWorkedExampleAtEnd);
+    const doclingEndExercise = Boolean(lastPage.inExerciseAtEnd);
+    const doclingEndNumberedQuestion = Boolean(lastPage.previousNumberedQuestionAtEnd);
+    initialSealMode = continuation ? continuation.nextSealMode ?? undefined
+      : workerEnd === undefined ? doclingEndSeal : typeof workerEnd === "string" ? workerEnd : undefined;
+    initialInWorkedExample = continuation?.nextInWorkedExample
+      ?? (resumeFromPage === undefined && doclingEndWorkedExample);
+    initialInExercise = continuation?.nextInExercise ?? (resumeFromPage === undefined && doclingEndExercise);
+    initialInlineProofBoundary = continuation?.nextInlineProofBoundary ?? (resumeFromPage === undefined && doclingEndInlineProofBoundary);
+    initialPreviousNumberedQuestion = continuation?.nextPreviousNumberedQuestion
+      ?? (resumeFromPage === undefined && doclingEndNumberedQuestion);
+    const changedSeed = workerEnd !== undefined
+      && (initialSealMode !== doclingEndSeal || initialInlineProofBoundary !== doclingEndInlineProofBoundary || initialInWorkedExample !== doclingEndWorkedExample
+        || initialInExercise !== doclingEndExercise || initialPreviousNumberedQuestion !== doclingEndNumberedQuestion);
+    return resumeFromPage ?? (changedSeed ? firstOverQuotaPage : undefined);
+  };
+  const failedSegments: FailedPdfSegment[] = [];
+  for (let start = 1, end = Math.min(pageCount, size); start <= pageCount;) {
     input.signal.throwIfAborted();
-    const end = Math.min(Number(pageCount), start + size - 1);
-    const identity = { sourceId: input.sourceId, sourceVersion: input.sourceVersion,
-      parserProfile: input.parserProfile ?? pdfParserProfile(), pageStart: start, pageEnd: end };
+    const identity = {
+      sourceId: input.sourceId,
+      sourceVersion: input.sourceVersion,
+      // A recovered predecessor can change the text and ending state of a
+      // previously cached range, even when the source version is unchanged.
+      parserProfile: parserProfile + (initialSealMode ? "/from-" + initialSealMode : "")
+        + (initialInWorkedExample ? "/we" : "") + (initialInExercise ? "/exercise" : "")
+        + (initialInlineProofBoundary ? "/proof-boundary" : "")
+        + (initialPreviousNumberedQuestion ? "/numbered-question" : ""),
+      pageStart: start,
+      pageEnd: end,
+    };
     const cached = await input.segments?.read(input.scope, identity);
     input.signal.throwIfAborted();
-    if (cached?.state === "ready") {
-      await input.onPages(validatePdfSegmentPages(cached.pages, start, end));
-      parsedPageCount += cached.pages.length;
-      continue;
-    }
-    let parsed: PdfSegmentPage[] | undefined;
+    const revalidate = cached?.state === "ready" && (cached.requiresRevalidation === true
+      || await input.shouldRevalidateSegment?.(start, end) === true);
+    input.signal.throwIfAborted();
+    const ready = cached?.state === "ready" && !revalidate;
+    let parsed = ready ? validateSegment(cached.pages, start, end) : undefined;
     let error: unknown;
     for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+      input.signal.throwIfAborted();
       try {
-        parsed = validatePdfSegmentPages(await parser.parseDocument({ path: input.path, mime: "application/pdf", maxPages: 2000,
-          pageStart: start, pageEnd: end, timeoutSeconds }, input.signal), start, end);
-      } catch (caught) { error = caught; }
+        const rawPages = await parser.parseDocument({
+          path: input.path,
+          mime: "application/pdf",
+          maxPages,
+          pageStart: start,
+          pageEnd: end,
+          timeoutSeconds,
+          initialSealMode,
+          initialInlineProofBoundary,
+          initialInWorkedExample,
+          initialInExercise,
+          initialPreviousNumberedQuestion,
+        }, input.signal);
+        parsed = validateSegment(rawPages, start, end);
+      } catch (caught) {
+        if (caught instanceof BoundsExceededError || caught instanceof UnsupportedMimeError || caught instanceof UsageError || input.signal.aborted) {
+          throw caught;
+        }
+        error = caught;
+      }
     }
     if (!parsed) {
       // A cancelled/revoked/old execution must not even write a failed segment.
       input.signal.throwIfAborted();
       const errorCode = error instanceof Error && error.name === "TimeoutError" ? "timeout"
         : error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError ? "invalid_output" : "conversion_failed";
-      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal);
-      failed.push(`${start}-${end}`);
-      continue;
+      const failure = { pageStart: start, pageEnd: end, initialSealMode };
+      // Inspect archived coverage first, then publish the failure and its blocker together.
+      const blockingSeals = await input.onFailedSegment?.(failure) ?? [
+        { page: start, text: "", imagePath: null, publicationSealUnknown: true },
+      ];
+      input.signal.throwIfAborted();
+      await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal, blockingSeals, revalidate);
+      failedSegments.push(failure);
+      // Seeing an incomplete range cannot end a confirmed answer seal or extend an example.
+      initialInlineProofBoundary = false;
+      initialInWorkedExample = false;
+      initialInExercise = false;
+      initialPreviousNumberedQuestion = false;
+      afterFailedSegment = true;
+    } else {
+      const remainingBytes = maxBookBytes - cumulativeBookBytes;
+      let resumeFromPage: number | undefined;
+      if (parsed.segmentTextBytes > remainingBytes) {
+        // Recognition can change the seed for a speculative tail. Give it only
+        // the pages already within quota, and cache only complete, bounded windows.
+        let fitCount = 0;
+        let fitBytes = 0;
+        for (const page of parsed.pages) {
+          const pageBytes = Buffer.byteLength(page.text, "utf8");
+          if (fitBytes + pageBytes > remainingBytes) break;
+          fitBytes += pageBytes;
+          fitCount++;
+        }
+        const firstOverQuota = parsed.pages[fitCount]!;
+        const exceededBytes = cumulativeBookBytes + fitBytes + Buffer.byteLength(firstOverQuota.text, "utf8");
+        const limitError = new BoundsExceededError(`PDF whole-book UTF-8 bytes exceed limit (${exceededBytes} > ${maxBookBytes})`);
+        if (fitCount === 0 || !input.onPages) throw limitError;
+        const pages = parsed.pages.slice(0, fitCount);
+        resumeFromPage = await emitSegment(start, {
+          pages, segmentTextBytes: fitBytes, segmentBytes: Buffer.byteLength(JSON.stringify({ pages }), "utf8"),
+        }, ready, firstOverQuota.page);
+        if (resumeFromPage === undefined) throw limitError;
+      } else {
+        if (!ready) {
+          input.signal.throwIfAborted();
+          await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed.pages }, input.signal, [], revalidate);
+          input.signal.throwIfAborted();
+        }
+        resumeFromPage = await emitSegment(start, parsed, ready);
+      }
+      if (resumeFromPage !== undefined) {
+        start = resumeFromPage;
+        continue;
+      }
     }
-    input.signal.throwIfAborted();
-    await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed }, input.signal);
-    input.signal.throwIfAborted();
-    await input.onPages(parsed);
-    parsedPageCount += parsed.length;
+    start = end + 1;
+    end = Math.min(pageCount, start + size - 1);
   }
   input.signal.throwIfAborted();
-  if (!parsedPageCount) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")})`);
-  return { pageCount: parsedPageCount, failedRanges: failed };
+  const failedRanges = failedSegments.map(({ pageStart, pageEnd }) => `${pageStart}-${pageEnd}`);
+  if (!parsedPageCount && !input.onFailedSegment) throw new ConversionFailedError(`PDF segments failed (${failedRanges.join(", ")})`);
+  return { pageCount: parsedPageCount, failedRanges, ...(failedSegments.length ? { failedSegments } : {}) };
 }

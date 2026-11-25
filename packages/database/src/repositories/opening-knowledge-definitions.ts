@@ -1,13 +1,1586 @@
 import type { Scope, SourceChunk } from "@aistudy/contracts";
 import { knowledgeDefinitionHeader, knowledgeNodeDefinition, serializeKnowledgeEvidence } from "@aistudy/domain";
-import type { TransactionSql } from "postgres";
+import type { PendingQuery, Row, Sql, TransactionSql } from "postgres";
 import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
+import { pendingPdfFailureBoundaryPattern } from "./opening-pdf-segments";
 
 const definitionPatchByteLimit = 256 * 1024;
+const pdfHeadingContainer = String.raw`(?:(?:appendix(?: +[\w.]+)?|(?:chapter|section|lecture|lesson|module|part|unit) +[\w.]+|第 *[一二三四五六七八九十百千\d]+ *(?:章节|讲义|部分|单元|章|节|讲)|附录(?: *[A-Z0-9一二三四五六七八九十]+)?)(?: *[:：.\-—–] *| +)|附录)`;
+const englishAnswerQualifier = String.raw`(?:model|selected|official|reference|correct|sample|odd-numbered|even-numbered)`;
+const solutionQualifier = "(?:official|reference|model|selected|correct|odd-numbered|even-numbered)";
+const qualifiedSolution = String.raw`${solutionQualifier} +solutions?`;
+const englishContinuationWord = String.raw`(?:continued|cont(?:['’]?d)?\.?)`;
+const englishContinuation = String.raw`(?: *\( *${englishContinuationWord} *\))?`;
+const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
+const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
+const chineseExplanation = "(?:解答|解析|详解)";
+const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
+const assessmentRange = String.raw` +${assessmentNumber}(?: *[-–—] *| +(?:to|through) +)${assessmentNumber}`;
+const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
+const singularAssessmentTopic = String.raw`(?:review +question|practice +problem|self[- ]check +exercise|exercise|problem|question)`;
+const assessmentTopic = String.raw`(?:(?:review +questions|practice +problems|self[- ]check +exercises|exercises|problems|questions)${assessmentTarget}|${singularAssessmentTopic}(?:${assessmentRange}|(?= *(?:[:：(]|$)))|chapter +\d+|section +\d+(?:\.\d+)*)`;
+const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter +\d+|section +\d+(?:\.\d+)*) +)*`;
+const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
+const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|${solutionQualifier} +solutions|solutions? +manual|answers? +and +solutions?)`;
+const lineStart = String.raw`^ *(?:#{1,6} +)*`;
+const assessmentSolutionsHeading = String.raw`${lineStart}Solutions${englishContinuation} *[:：]? *$`;
+const assessmentSolutionsContext = String.raw`${lineStart}(?:(?:Chapter|Section|Part|Unit|Lecture) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[ :：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?: +Questions?)?|Practice(?: +Problems?)?|Quiz|Drills?|Self[- ]Check)\M(?= *(?:[:：.—–-]|$)| +(?:#?\d|(?:for|of|on|from) +(?:Chapter|Section|Part|Unit)\M))|(?:\d+|[a-z])[.)](?= |$)|[（(] *(?:\d+|[a-z]) *[)）](?= |$))`;
+const standaloneAssessmentItem = String.raw`${lineStart}\d+[.)] *$`;
+// Periods also end prose. Keep these patterns separate from case-insensitive answer labels.
+const inlinePeriodSuffix = String.raw`(?: +${assessmentNumber})?(?: *\( *(?:continued|cont\.?|CONTD?\.?|CONTINUED) *\))? *\.(?= |$)`;
+const inlineAnswerPeriod = String.raw`(?:Answer +[Kk]ey|ANSWER +KEY|Answers?|ANSWERS?|(?:Official|Model|Correct|Sample|Reference) +[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE) +ANSWER)${inlinePeriodSuffix}`;
+const inlineSolutionPeriod = String.raw`(?:(?:Worked|Full|Sample|Official|Reference) +[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE) +SOLUTIONS?|Solutions?|SOLUTIONS?)(?: +(?:to|TO) +(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION) *#?\d*(?:\.\d+)*)?${inlinePeriodSuffix}`;
+const answerPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineAnswerPeriod}`;
+const solutionPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineSolutionPeriod}`;
+const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineAnswerPeriod}|${inlineSolutionPeriod})`;
+// Standalone answer keys and bare "Answers" open a section. Singular "Answer:"
+// and numbered labels can open an inline answer.
+const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
+const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
+const numberedAnswerTarget = String.raw`(?: +to +${assessmentQualifier}${singularAssessmentTopic})`;
+const numberedAnswerSuffix = String.raw` *${assessmentNumber}${englishContinuation} *(?:[:：]|(?:\.(?: |$)|。)|$)`;
+const qualifiedSolutionLabel = String.raw`${lineStart}${qualifiedSolution}(?:${numberedAnswerTarget})?(?: *${assessmentNumber})?${englishContinuation} *(?:[:：] *|\.(?= |$) *|$)`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution}|(?:(?:worked|full|sample) +)?solutions?)${numberedAnswerTarget}${numberedAnswerSuffix}|(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerSuffix}|(?:【 *)?(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|(?:\.(?: |$)|。)|$)`;
+// These labels can also explain a worked example. Qualified keys and explicit
+// assessment targets remain unconditional answers.
+const numberedSolution = String.raw`(?:(?:worked|full|sample) +)?solutions?${numberedAnswerSuffix}`;
+const englishSolutionLabel = String.raw`solution${englishContinuation} *[:：]`;
+const standaloneEnglishSolution = englishSolutionLabel + " *$";
+const standaloneNumberedSolution = String.raw`${lineStart}(?:${standaloneEnglishSolution}|解答${chineseContinuation}[:：] *$)`;
+const numberedQuestion = String.raw`${lineStart}\d+[.)] +[^ ]`;
+const numberedExerciseInstruction = String.raw`${lineStart}\d+[.)] +(?:Find|Solve|Compute|Calculate|Determine|Show|Prove|Evaluate|Explain|Sketch|Draw|Derive|Simplify)\M`;
+const jsStandaloneNumberedSolution = new RegExp(standaloneNumberedSolution, "iu");
+const jsNumberedQuestion = new RegExp(numberedQuestion, "u");
+const jsEnglishSolutionLabel = new RegExp(lineStart + englishSolutionLabel, "iu");
+const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
+const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
+const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:【 *)?(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|(?:\.(?: |$)|。)|$))`;
+const answerLabel = new RegExp(answerLabelLine, "imu");
+const jsQualifiedSolution = new RegExp(qualifiedSolutionLabel, "iu");
+const explanationLabel = new RegExp(explanationLabelLine, "iu");
+const jsAnswerPeriod = new RegExp(answerPeriodLine, "mu");
+const jsSolutionPeriod = new RegExp(solutionPeriodLine, "u");
+const jsAssessmentSolutionsHeading = new RegExp(assessmentSolutionsHeading, "imu");
+const jsAssessmentSolutionsContext = new RegExp(asJsPattern(assessmentSolutionsContext), "iu");
+const jsStandaloneAssessmentItem = new RegExp(standaloneAssessmentItem, "u");
+const horizontalWhitespace = "[ \t\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+";
+const pdfHorizontalWhitespace = new RegExp(horizontalWhitespace, "gu");
 
-async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string) {
+// Reopen at the first content line, so earlier answer text on a physical page
+// cannot become public because a later line happens to look like a heading.
+const markdownTitle = String.raw`#{1,6} +(?!(?:chapters?|sections?|parts?|units?|lectures?|lessons?|modules?|appendix)(?: |$)|第 *[一二三四五六七八九十百千\d]+|附录)[[:alpha:]一-龥]`;
+const backMatterHeading = String.raw`(?:preface|introduction|bibliography|references|works +cited|index|subject +index|author +index|glossary|notation +index|acknowledg(?:e)?ments?|about +the +authors?|afterword|colophon|序言|前言|引言|参考文献|索引|名词索引|主题索引|符号表|词汇表|后记|致谢) *(?:[:：.—–-]|$)`;
+const backMatterLine = lineStart + backMatterHeading;
+const blockedReopeningHeading = [
+  String.raw`${lineStart}(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?)|(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)|[ivxlcdm]+[.。]? *$)(?:[ :：]|$)`,
+  String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
+  String.raw`${lineStart}(?:\d+(?:\.\d+)*[.)]? +)?(?:true|false|yes|no|none|[a-f](?: *, *[a-f])*)[.。]? *$`,
+  String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
+  String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–—-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千零〇]+(?: *(?:[/／–—-]|共) *(?:第 *)?[\d一二三四五六七八九十百千零〇]+)? *[页頁张張]`,
+  String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,
+  String.raw`${lineStart}(?:[\[【(] *)?(?:图表观察描述|识别不确定)`,
+].join("|");
+
+// Only extraction and transcription headers may precede a reopening heading.
+const visionTranscription = String.raw`^ *(?:【原图忠实转写[^】]*】|\[转写\]) *[:：]? *$`;
+const visionAuxiliary = String.raw`^ *(?:【(?:图表观察描述|识别不确定)[^】]*】|\[(?:图片描述|图像描述|图示与版面描述|不确定处)\]) *[:：]? *`;
+const pdfLeadingTextWrappers = String.raw`^ *\[(?:原生提取|本地提取（可能含OCR）|视觉转写与描述)\] *$|${visionTranscription}`;
+const jsVisionTranscription = new RegExp(visionTranscription, "u");
+const jsVisionAuxiliary = new RegExp(visionAuxiliary, "u");
+const jsPdfLeadingTextWrappers = new RegExp(pdfLeadingTextWrappers, "u");
+const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +problems?|(?:problem|question) +\d+)\M|习题|练习题?|思考题|作业题)`;
+const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
+const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
+const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|${numberedSolution} *|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +${assessmentNumber})?${englishContinuation} *(?:[:：] *|$))`;
+const inlineOpenerPrefix = [
+  String.raw`【 *(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)(?: *\d+(?:[.-]\d+)*)?${chineseContinuation}】 *[:：]? *`,
+  String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution}|(?:(?:worked|full|sample) +)?solutions?)(?:${numberedAnswerTarget})?${numberedAnswerSuffix}`,
+  String.raw`${qualifiedSolution}(?:${numberedAnswerTarget})?${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
+  String.raw`(?:【 *)?(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}】? *(?:[:：、]|(?:\.(?: |$)|。)|$)`,
+  String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)${chineseContinuation} *[:：] *`,
+  String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation})${chineseContinuation} *$`,
+  String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +(?:key|section))?|(?:(?:worked|full|sample|official|reference) +)?solutions?)${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
+].join("|");
+const inlineOpenerLinePrefix = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineOpenerPrefix})`;
+
+const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:(?:worked +example|example)(?= +\d| *[(:：.．—–-]| *$)|例题(?= *\d| *[（(:：.．—–-]| *$)|例 *(?=\d|[:：]))`;
+const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
+const englishBlockPrefix = String.raw`${lineStart}${englishBlock}\M`;
+const captionName = String.raw`(?:figure|fig\.?|table|tab\.?|chart|diagram|scheme|algorithm|listing)`;
+const captionPrefix = String.raw`${lineStart}${captionName}(?= |[:：]|$)`;
+const headingId = String.raw`(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)(?=[ :：.．、—–(（-]|$)`;
+const englishBlockReferencePrefix = String.raw`${lineStart}(?:(?:${englishBlock}|${captionName}) +${headingId}|${englishBlock}\M(?= *[(（]))`;
+const englishContainerPrefix = String.raw`${lineStart}(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)|appendix(?: +(?:[a-z](?![a-z\d])|\d+))?)(?=[ |:：.．—–(（-]|$)`;
+const chineseContainerPrefix = String.raw`${lineStart}(?:第 *[一二三四五六七八九十百千\d]+ *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录(?: *(?:[A-Z](?![a-z])|[0-9一二三四五六七八九十]+))?)`;
+const chineseBlocks = "(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明)";
+const chineseCaption = "(?:插图|附表|算法|图|表)";
+const chineseCaptionPrefix = String.raw`${lineStart}${chineseCaption} *\d`;
+const chineseNumberedBlock = String.raw`${lineStart}(?:${chineseBlocks}|${chineseCaption}) *\d+(?:[.-]\d+)*[a-zA-Z]?(?![a-zA-Z\d])`;
+const englishExamplePrefix = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:worked +)?example\M(?: +\d+(?:[.-]\d+)*)?`;
+const chineseExamplePrefix = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:例题|例)(?= *[\d:：.．—–(（-]| *$)(?: *\d+(?:[.-]\d+)*)?`;
+const headingQualifier = String.raw`(?: *(?:\([^()（）]*\)|（[^()（）]*）)| +[a-zA-Z](?= |[:：.．、—–(（-]|$))`;
+const headingQualifiers = String.raw`^${headingQualifier}* *`;
+const headingDelimiter = String.raw`(?:[:：．、—–]|\.(?!\d)|-(?!\d))`;
+const referenceBodyStart = "[A-Za-z0-9一-鿿【「『〈《]";
+const invalidReferenceBody = String.raw`^(?:${headingDelimiter}(?! *(?:$|${referenceBodyStart}))|(?!(?:${headingDelimiter}| *$|${referenceBodyStart})))`;
+const englishReferenceVerb = String.raw`\m(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\M`;
+const englishReferenceProse = String.raw`${invalidReferenceBody}|, *(?:which|where|applied|used|shown|given|as)\M|^(?!${headingDelimiter})(?:[a-z]|.*[.!?;] *$|.*${englishReferenceVerb})|^${headingDelimiter} *(?:[a-z]+|This|That|It|They|We)\M.*${englishReferenceVerb}|^${headingDelimiter} *${englishReferenceVerb}`;
+const qualifiedEnglishProse = String.raw`^${headingQualifier}+ *${headingDelimiter}.*${englishReferenceVerb}`;
+const chineseReferenceProse = String.raw`${invalidReferenceBody}|^(?:${headingDelimiter} *)?(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)|^[^，,]*[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)|^(?!${headingDelimiter}).*[。！？；] *$`;
+const markdownProse = String.raw`[=<>≈]|[.!?;。！？；] *$|${englishReferenceVerb}|, *(?:which|where|applied|used|shown|given|as)\M|^[^，,]*[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)`;
+const dottedSectionPrefix = String.raw`${lineStart}\d+(?:\.\d+)+ +`;
+const latinSectionTitle = String.raw`^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|the|to|a|an|with|without|via)){0,12} *$`;
+const cjkSectionTitle = "^[【「『〈《（(]?[一-鿿]";
+const latinUnit = String.raw`(?:[kKMGTPEZYmunpfµμ]|da|d|c)?(?:V|A|W|J|N|C|F|H|T|S|K|M|B|G|L|l|m|g|s|h|b|Ω|Hz|Pa|Wb|Bq|Gy|Sv|lm|lx|cd|sr|mol|rad|deg|kat|bar|atm|psi|cal|eV|dB|rpm|mph|fps|min|sec|hrs?|iB|[KMGTPEZY]iB|volts?|amps?|watts?|joules?|meters?|metres?|seconds?|liters?|litres?|grams?|ft|yd|mi|in|lb|oz|Ah|Wh|hp|ac|qt)(?:\^?[+-]?\d+|[²³])?`;
+const latinSectionUnits = String.raw`^(?!ML *$)${latinUnit}(?: *(?:[/·⋅*] *| +)${latinUnit})* *$`;
+const cjkUnitAtom = "(?:平方|立方|千|毫|微|纳|皮|飞|吉|兆|太|分|厘|公|市|摄氏|华氏|十|百|万|亿)*(?:米|里|顷|亩|丈|尺|寸|斗|石|克|斤|两|吨|秒|分钟|分|小时|时|天|日|周|月|年|升|伏特|伏|安培|安|瓦特|瓦|焦耳|焦|牛顿|牛|帕斯卡|帕|赫兹|赫|欧姆|欧|法拉|法|亨利|亨|韦伯|韦|特斯拉|特|库仑|库|摩尔|摩|坎德拉|坎|流明|流|勒克斯|勒|贝可|贝|戈瑞|戈|希沃特|希|开尔文|开|弧度|弧|球面度|度|分贝|字节|比特|位|美元|欧元|日元|英镑|人民币|元|角|毛|块|倍|个|次|项|种|类|条|件|张|页|题|人|成|折)";
+const cjkSectionUnits = String.raw`^(?:${cjkUnitAtom}(?:[·⋅/／每]?${cjkUnitAtom})*(?=$|[ /／每，。！？；、.,;:：)）]|(?:左右|以上|以下|以内|以外|的|是|为|重|长|宽|高))|[十百千万亿]+(?=$|[ ，。！？；、]))`;
+const jsCjkSectionUnits = new RegExp(String.raw`^(?:(?=(${cjkUnitAtom}))\1(?:(?=([·⋅/／每]?${cjkUnitAtom}))\2)*(?=$|[ /／每，。！？；、.,;:：)）]|(?:左右|以上|以下|以内|以外|的|是|为|重|长|宽|高))|[十百千万亿]+(?=$|[ ，。！？；、]))`, "u");
+const sectionProse = String.raw`[=<>≈%％。！？；]|[.!?;] *$|${englishReferenceVerb}|^(?:是|为|有(?!(?:限|理|界|向|效|序|机|源|偏|噪|穷))|在(?!(?:线|位|途)))|可得|得到|满足|成立|显示|表明|说明|实数解|整数解|唯一解|无解|有解|位于|属于|大于|小于|等于|${latinSectionUnits}|^(?:True|False|Yes|No|None|[A-F](?: *, *[A-F])*) *$`;
+const appendixHeading = String.raw`${lineStart}(?:appendix(?= |[:：]|$)|附录)`;
+const bareContainerSuffix = String.raw`^[ :：.．—–-]*$`;
+const inlinePublicHeading = String.raw`${lineStart}(?:${englishBlock} *(?:[:：．—–]|\.(?!\d)|-(?!\d)|$)|${chineseBlocks} *(?:[:：]|$))`;
+const emphasisCloseBoundary = String.raw`(?:$|[ :：.,;!?。，；：！？)\]】）])`;
+const boldEmphasisAtom = String.raw`(?:[^ *\r\n]|\*(?!\*)|\*{3,}(?!\*)|\*\*(?!\*|${emphasisCloseBoundary}))`;
+const underEmphasisAtom = String.raw`(?:[^ _\r\n]|_(?!_)|_{3,}(?!_)|__(?!_|${emphasisCloseBoundary}))`;
+const pairedBoldEmphasis = String.raw`(^|[(\[【（:： ])\*\*(?=[^ *\r\n])(${boldEmphasisAtom}(?:${boldEmphasisAtom}| +(?:\*\*(?!\*)|${boldEmphasisAtom}))*)\*\*(?=${emphasisCloseBoundary})`;
+const pairedUnderEmphasis = String.raw`(^|[(\[【（:： ])__(?=[^ _\r\n])(${underEmphasisAtom}(?:${underEmphasisAtom}| +(?:__(?!_)|${underEmphasisAtom}))*)__(?=${emphasisCloseBoundary})`;
+const emphasisReplacement = String.raw`\1\2`;
+const singleEmphasisAfter = String.raw`(?=$|[ :：.,;!?。，；：！？—–)\]】）-])`;
+const starEmphasisInterior = String.raw`(?: (?:\*+(?!\*)|(?=[^*\r\n]|$))|[^ *\r\n](?:\*+(?!\*)(?!${singleEmphasisAfter})|(?=[^*\r\n]|$)))`;
+const underEmphasisInterior = String.raw`(?: (?:_+(?!_)|(?=[^_\r\n]|$))|[^ _\r\n](?:_+(?!_)(?!${singleEmphasisAfter})|(?=[^_\r\n]|$)))`;
+const answerProofCore = String.raw`(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ \d:：.．。—–(（-]|$)|证 *[:：.．。])`;
+const answerProofStar = String.raw`\*(?=[^ *\r\n])(?:(?:Proof|Sketch +of +Proof)(?=\*|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ *\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${starEmphasisInterior})*[^ *\r\n])?\*(?!\*)${singleEmphasisAfter}`;
+const answerProofUnder = String.raw`_(?=[^ _\r\n])(?:(?:Proof|Sketch +of +Proof)(?=_|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ _\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${underEmphasisInterior})*[^ _\r\n])?_(?!_)${singleEmphasisAfter}`;
+const answerProofHeading = String.raw`${lineStart}(?:${answerProofCore}|${answerProofStar}|${answerProofUnder})`;
+const explicitHeadingMarkup = String.raw`^ *#{1,6}(?: +|$)`;
+const emptyAtxHeading = String.raw`^ *#{1,6} *$`;
+
+const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
+const jsEnglishExample = new RegExp(asJsPattern(englishExamplePrefix), "iu");
+const jsChineseExample = new RegExp(chineseExamplePrefix, "u");
+const jsEnglishBlock = new RegExp(asJsPattern(englishBlockPrefix), "iu");
+const jsBlockReference = new RegExp(asJsPattern(englishBlockReferencePrefix), "iu");
+const jsChineseNumberedBlock = new RegExp(chineseNumberedBlock, "u");
+const jsEnglishContainer = new RegExp(englishContainerPrefix, "iu");
+const jsChineseContainer = new RegExp(chineseContainerPrefix, "u");
+const jsHeadingQualifiers = new RegExp(headingQualifiers, "u");
+const jsEnglishProse = new RegExp(englishReferenceProse.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "u");
+const jsQualifiedEnglishProse = new RegExp(qualifiedEnglishProse.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "u");
+const jsChineseProse = new RegExp(chineseReferenceProse, "u");
+const jsDottedSection = new RegExp(dottedSectionPrefix, "u");
+const jsLatinTitle = new RegExp(latinSectionTitle, "u");
+const jsCjkTitle = new RegExp(cjkSectionTitle, "u");
+const jsSectionProse = new RegExp(sectionProse.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "u");
+const jsPublicHeading = new RegExp(inlinePublicHeading, "iu");
+const jsCaptionPrefix = new RegExp(captionPrefix, "iu");
+const jsChineseCaptionPrefix = new RegExp(chineseCaptionPrefix, "u");
+const jsMarkdownProse = new RegExp(asJsPattern(markdownProse), "u");
+const jsMarkdownTitle = new RegExp(("^ *" + markdownTitle).replaceAll("[[:alpha:]一-龥]", "[\\p{L}]"), "iu");
+const jsBackMatter = new RegExp(backMatterLine, "iu");
+const jsBlockedReopening = new RegExp(blockedReopeningHeading.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "iu");
+const jsExerciseHeading = new RegExp(exerciseHeading.replace(String.raw`\M`, String.raw`\b`), "iu");
+const jsExplicitHeading = new RegExp(explicitHeadingMarkup, "u");
+const jsEmptyAtxHeading = new RegExp(emptyAtxHeading, "u");
+const jsProofHeading = new RegExp(asJsPattern(answerProofHeading), "iu");
+
+function asJsPattern(pattern: string): string {
+  return pattern.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`);
+}
+
+function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp): boolean {
+  const suffix = line.slice(prefix[0].length);
+  return !prose.test(suffix.replace(jsHeadingQualifiers, ""))
+    && (prose !== jsEnglishProse || !jsQualifiedEnglishProse.test(suffix));
+}
+
+function stripArchiveClosingAtxHashes(line: string): string {
+  let leadEnd = 0;
+  while (leadEnd < line.length && line[leadEnd] === " ") leadEnd++;
+  let hashEnd = leadEnd;
+  while (hashEnd < line.length && line[hashEnd] === "#") hashEnd++;
+  const openHashes = hashEnd - leadEnd;
+  if (openHashes < 1 || openHashes > 6 || line[hashEnd] !== " ") return line;
+  let trailEnd = line.length;
+  while (trailEnd > hashEnd && line[trailEnd - 1] === " ") trailEnd--;
+  let closeHashStart = trailEnd;
+  while (closeHashStart > hashEnd && line[closeHashStart - 1] === "#") closeHashStart--;
+  if (closeHashStart === trailEnd || line[closeHashStart - 1] !== " ") return line;
+  let bodyEnd = closeHashStart - 1;
+  while (bodyEnd > hashEnd && line[bodyEnd - 1] === " ") bodyEnd--;
+  return line.slice(0, bodyEnd);
+}
+
+const jsSectionAnswer = new RegExp(sectionAnswerLine, "iu");
+const archiveEmphasisOpenPredecessors = "([【（:： ";
+const archiveEmphasisCloseFollowers = " :：.,;!?。，；：！？)]】）";
+
+function stripArchivePairedEmphasisLine(line: string, marker: "**" | "__", ch: "*" | "_"): string {
+  let pos = line.indexOf(marker);
+  if (pos === -1) return line;
+  const n = line.length;
+  let out = "";
+  let lastCopy = 0;
+  while (pos !== -1 && pos + 4 <= n) {
+    if (pos > 0 && line[pos - 1] === ch || line[pos + 2] === ch) {
+      let endRun = pos + 2;
+      while (endRun < n && line[endRun] === ch) endRun++;
+      pos = line.indexOf(marker, endRun);
+      continue;
+    }
+    const validOpener = (pos === 0 || archiveEmphasisOpenPredecessors.includes(line[pos - 1]!))
+      && line[pos + 2] !== " ";
+    if (!validOpener) {
+      pos = line.indexOf(marker, pos + 2);
+      continue;
+    }
+    let j = line.indexOf(marker, pos + 3);
+    while (j !== -1) {
+      if (line[j - 1] === ch || j + 2 < n && line[j + 2] === ch) {
+        let endRun = j + 2;
+        while (endRun < n && line[endRun] === ch) endRun++;
+        j = line.indexOf(marker, endRun);
+        continue;
+      }
+      if (line[j - 1] !== " " && (j + 2 === n || archiveEmphasisCloseFollowers.includes(line[j + 2]!))) {
+        break;
+      }
+      j = line.indexOf(marker, j + 2);
+    }
+    if (j === -1) break;
+    out += line.slice(lastCopy, pos) + line.slice(pos + 2, j);
+    lastCopy = j + 2;
+    pos = line.indexOf(marker, lastCopy);
+  }
+  if (lastCopy === 0) return line;
+  return out + line.slice(lastCopy);
+}
+
+function stripArchivePairedEmphasis(line: string): string {
+  const afterBold = stripArchivePairedEmphasisLine(line, "**", "*");
+  const afterUnder = stripArchivePairedEmphasisLine(afterBold, "__", "_");
+  return stripArchivePairedEmphasisLine(afterUnder, "**", "*");
+}
+
+type ArchivePdfLine = {
+  atx: boolean;
+  emptyAtx: boolean;
+  line: string;
+  unstarredLine: string;
+  runningHeading: boolean;
+  contentLine: boolean;
+};
+type ArchivePrimaryEvent = ArchivePdfLine | { blank: true };
+
+function parseArchivePdfBlocks(text: string): {
+  primary: ArchivePdfLine[];
+  primaryEvents: ArchivePrimaryEvent[];
+  blocks: ArchivePdfLine[][];
+  hasUnconditionalLabel: boolean;
+} {
+  const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ");
+  const primary: ArchivePdfLine[] = [];
+  const primaryEvents: ArchivePrimaryEvent[] = [];
+  const blocks = [primary];
+  let block = primary;
+  let hasUnconditionalLabel = false;
+  for (const splitLine of normalized.split("\n")) {
+    const rawUnstarred = splitLine.includes("**") || splitLine.includes("__")
+      ? splitLine.replace(/\*\*|__/gu, "") : splitLine;
+    const auxPiece = splitLine.includes("[") || splitLine.includes("【")
+      ? splitLine.replace(jsVisionAuxiliary, "") : splitLine;
+    const atx = jsExplicitHeading.test(auxPiece);
+    const auxStripped = stripArchiveClosingAtxHashes(auxPiece);
+    const hasEmphasis = auxStripped.includes("**") || auxStripped.includes("__");
+    const unstarredLine = hasEmphasis
+      ? auxStripped.replace(/\*\*|__/gu, "").replace(jsVisionAuxiliary, "").replace(/ {2,}/gu, " ")
+      : auxStripped;
+    let line = hasEmphasis
+      ? stripArchivePairedEmphasis(auxStripped).replace(/ {2,}/gu, " ")
+      : auxStripped;
+    if (jsVisionAuxiliary.test(rawUnstarred)) {
+      block = [];
+      blocks.push(block);
+      line = line.replace(jsVisionAuxiliary, "");
+    } else if (jsVisionTranscription.test(rawUnstarred)) {
+      block = primary;
+    }
+    if (jsPdfLeadingTextWrappers.test(line)) continue;
+    if (!line.trim()) {
+      if (block === primary) primaryEvents.push({ blank: true });
+      continue;
+    }
+    if (atx && jsEmptyAtxHeading.test(unstarredLine)) {
+      if (block === primary) {
+        primaryEvents.push({ atx: true, emptyAtx: true, line, unstarredLine, runningHeading: false, contentLine: false });
+      }
+      continue;
+    }
+    if (answerLabel.test(unstarredLine) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) {
+      hasUnconditionalLabel = true;
+    }
+    const runningHeading = isArchiveRunningHeading(line);
+    const entry: ArchivePdfLine = {
+      atx,
+      emptyAtx: false,
+      line,
+      unstarredLine,
+      runningHeading,
+      contentLine: !runningHeading || jsStandaloneAssessmentItem.test(line),
+    };
+    block.push(entry);
+    if (block === primary) primaryEvents.push(entry);
+  }
+  return { primary, primaryEvents, blocks, hasUnconditionalLabel };
+}
+
+export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
+  const { primary, blocks, hasUnconditionalLabel } = parseArchivePdfBlocks(text);
+  if (hasUnconditionalLabel) return true;
+  if (blocks.some(lines => {
+    const content = lines.filter(entry => entry.contentLine);
+    return content.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+      && jsAssessmentSolutionsContext.test(content[index + 1]?.line ?? ""));
+  })) return true;
+  if (!checkContext) return false;
+  let inWorkedExample = false;
+  for (const lines of blocks) {
+    let previousNumberedQuestion = false;
+    for (const { atx, line, unstarredLine, contentLine } of lines) {
+      const followsNumberedQuestion = lines === primary && contentLine && previousNumberedQuestion;
+      if (lines === primary && contentLine) previousNumberedQuestion = jsNumberedQuestion.test(line);
+      if (explanationLabel.test(line) || jsEnglishSolutionLabel.test(line) || jsSolutionPeriod.test(line)
+        || jsSectionAnswer.test(unstarredLine)) {
+        if (!inWorkedExample || followsNumberedQuestion && jsStandaloneNumberedSolution.test(line)) return true;
+        continue;
+      }
+      if (!contentLine || lines !== primary || jsProofHeading.test(line)) continue;
+      const englishExample = jsEnglishExample.exec(line);
+      const chineseExample = jsChineseExample.exec(line);
+      if (jsWorkedExample.test(line)
+        && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse))
+        && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse))) {
+        inWorkedExample = true;
+      } else if (inWorkedExample) {
+        const numbered = jsBlockReference.exec(line);
+        const chinese = jsChineseNumberedBlock.exec(line) ?? jsChineseContainer.exec(line);
+        const container = jsEnglishContainer.exec(line);
+        const dotted = jsDottedSection.exec(line);
+        const title = dotted ? line.slice(dotted[0].length) : "";
+        const numberedSection = Boolean(dotted && (jsLatinTitle.test(title) && /[A-Za-z]{2}/u.test(title)
+          || jsCjkTitle.test(title) && !jsCjkSectionUnits.test(title)) && !jsSectionProse.test(title));
+        const genericHeading = atx && !dotted && !numbered && !chinese && !container && !englishExample && !chineseExample
+          && !jsEnglishBlock.test(line) && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line)
+          && jsMarkdownTitle.test(line) && !jsMarkdownProse.test(line);
+        if (jsExerciseHeading.test(line) || jsPublicHeading.test(line)
+          || (numbered && acceptsPdfHeading(line, numbered, jsEnglishProse))
+          || (chinese && acceptsPdfHeading(line, chinese, jsChineseProse))
+          || ((container && acceptsPdfHeading(line, container, jsEnglishProse))
+            || numberedSection || jsBackMatter.test(line) || genericHeading)
+            && !jsBlockedReopening.test(line)) {
+          inWorkedExample = false;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+const pageNumberRatio = String.raw`\d+ *(?:of +|[/／–—-] *)\d+`;
+const chinesePageNumber = String.raw`[\d一二三四五六七八九十百千零〇]+`;
+const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁张張]`;
+const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁张張]`;
+const chineseCounter = String.raw`(?:(?:(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *)?${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal}(?: *第 *${chinesePageNumber} *[页頁张張]| +${chinesePageNumber} *[页頁张張]))`;
+const parenInnerChineseCounter = String.raw`(?:(?:(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *)?${chinesePage}(?: *[/／,，] *${chinesePageTotal})?|${chinesePageTotal}(?: *第 *${chinesePageNumber} *[页頁张張]| +${chinesePageNumber} *[页頁张張]))`;
+const romanCounter = "[ivxlcdm]{1,8}";
+const counter = String.raw`(?:\d+(?:\.\d+)*|${romanCounter})`;
+const shortFurniturePrefix = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|${romanCounter})|第 *${chinesePageNumber} *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])) *[|:：—–-] *`;
+const furnitureSeparator = String.raw`(?: *[|｜—–] *| +- +)`;
+const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|[。！；!]|(?:见|参见)第 *\d+ *页`;
+const pageCounter = String.raw`(?:(?:[(（\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)?(?: *[)）\]】])?|${chineseCounter})(?: *[.。．、])?`;
+const parenInnerPageCounter = String.raw`(?:(?:[\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)?(?: *[\]】])?|${parenInnerChineseCounter})(?: *[.。．、])?`;
+const parenthesizedPageCounterSuffix = String.raw` *[（(] *${parenInnerPageCounter} *[）)](?: *[.。])? *$`;
+const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix})(?:.*${furnitureSeparator}| *[|｜:：—–-] *)|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
+const titledPageCounterSuffix = String.raw`(?:[|｜—–] *| - +|[:：] +)${pageCounter} *$`;
+const titledPageCounter = String.raw`${lineStart}(?!#{1,6} +#)([^ |｜—–][^|｜—–]{0,95}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
+const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
+const ocrPlaceholder = String.raw`${lineStart}[\[【(（] *(?:illegible|unreadable|blank|unclear|ocr|no +(?:readable +)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[ \]】)）：:]|$)`;
+const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
+const bareAnswerCounter = String.raw`${lineStart}(?:(?:[(（\[【] *)?(?:${counter}|${pageNumberRatio})(?: *[)）\]】])?|[-–—] *(?:\d+|${romanCounter}) *[-–—])(?: *[.。．、])? *$`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter}(?: *[.。．、])?|[(（\[【] *${counter} *[)）\]】](?: *[.。．、])?|[-–—] *${counter} *[-–—](?: *[.。．、])?|${pageNumberRatio}(?: *[)）\]】])?(?: *[.。．、])?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
+const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
+const jsStandalonePageCounter = new RegExp(`^ *${pageCounter} *$`, "iu");
+const jsLeadingHeadingDelimiter = new RegExp(`^${headingDelimiter}`, "u");
+const jsTitledPageCounterSuffix = new RegExp(titledPageCounterSuffix, "iu");
+const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
+const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
+const jsEnglishReferenceVerb = new RegExp(asJsPattern(englishReferenceVerb), "u");
+
+function hasParenthesizedContainerPageCounter(suffix: string): boolean {
+  let end = suffix.length;
+  while (end > 0 && suffix[end - 1] === " ") end--;
+  if (end > 0 && (suffix[end - 1] === "." || suffix[end - 1] === "。")) end--;
+  while (end > 0 && suffix[end - 1] === " ") end--;
+  if (end < 3 || suffix[end - 1] !== ")" && suffix[end - 1] !== "）") return false;
+  let open = end - 2;
+  while (open >= 0 && suffix[open] !== "(" && suffix[open] !== "（" && suffix[open] !== ")" && suffix[open] !== "）") open--;
+  if (open < 0 || suffix[open] !== "(" && suffix[open] !== "（") return false;
+  const inner = suffix.slice(open + 1, end - 1).trim();
+  if (!jsStandalonePageCounter.test(inner)) return false;
+  const title = suffix.slice(0, open).trim().replace(jsLeadingHeadingDelimiter, "").trim();
+  return !title || jsLatinTitle.test(title)
+    || jsCjkTitle.test(title) && !jsCjkSectionUnits.test(title) && !jsSectionProse.test(title);
+}
+
+function isArchiveRunningHeading(line: string): boolean {
+  if (jsInlineRunningHeading.test(line)) return true;
+  const title = jsTitledPageCounterSuffix.test(line) ? jsTitledPageCounter.exec(line)?.[1] : undefined;
+  if (title && !jsEnglishReferenceVerb.test(title) && !jsFurnitureTitleProse.test(title)) return true;
+  const container = jsEnglishContainer.exec(line) ?? jsChineseContainer.exec(line);
+  return Boolean(container && hasParenthesizedContainerPageCounter(line.slice(container[0].length)));
+}
+const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
+const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
+const sectionEndCore = String.raw`(?:end +of +(?:answers?|solutions?)|答案完|解答完)`;
+const sectionEndAfterPunct = String.raw`[.。!?！？;；—–](?: +end +of +(?:answers?|solutions?)| *(?:答案完|解答完))`;
+const sectionEndBracketed = String.raw`(?:\[ *${sectionEndCore} *(?:[.。] *)?\]|【 *${sectionEndCore} *(?:[.。] *)?】|\( *${sectionEndCore} *(?:[.。] *)?\)|（ *${sectionEndCore} *(?:[.。] *)?）)`;
+const proofEndCore = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\\)|\\\]|[)）\]】]))?|Q\.?E\.?D\.?|证毕|证完)`;
+const boundProofEnd = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\\)|\\\]|[)）\]】]))?|\mQ\.?E\.?D\.?|证毕|证完)`;
+const proofTerminatorPattern = [
+  String.raw`(?:^|[^*_])${boundProofEnd} *(?:[.。] *)?$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?_(?!_) *(?:[.。] *)?$`,
+  String.raw`(?:^|[ (\[【（:：—–-])\*${proofEndCore}[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`(?:^|[ (\[【（:：—–-])_${proofEndCore}[.。]?_(?!_) *(?:[.。] *)?$`,
+].join("|");
+const answerSectionEnd = [
+  String.raw`${lineStart}${sectionEndCore} *(?:[.。] *)?$`,
+  String.raw`${sectionEndAfterPunct} *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)${sectionEndBracketed} *(?:[.。] *)?$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?_(?!_) *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)\*${sectionEndCore}[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)_${sectionEndCore}[.。]?_(?!_) *(?:[.。] *)?$`,
+].join("|");
+const inlineTerminator = String.raw`(?:${proofTerminatorPattern}|${answerSectionEnd})`;
+const terminatorTokenCore = String.raw`(?:${proofEndCore}|${sectionEndCore})`;
+const adjacentEmphasisTerminator = String.raw`(?:[*_]${terminatorTokenCore}|${terminatorTokenCore}[.。]?[*_])[.。*_!?！？;；)）\]】 ]*$`;
+const inlineFallbackBlocked = String.raw`(?:${inlineContinues}|${adjacentEmphasisTerminator})`;
+const jsNumberedExerciseInstruction = new RegExp(asJsPattern(numberedExerciseInstruction), "u");
+const jsExerciseSectionException = new RegExp(exerciseSectionException, "iu");
+const jsExerciseInlineAnswer = new RegExp(exerciseInlineAnswer, "iu");
+const jsExerciseInlineAnswerWithBody = new RegExp(exerciseInlineAnswer + "[^ ]", "iu");
+const jsInlineOpenerLinePrefix = new RegExp(inlineOpenerLinePrefix, "iu");
+const jsExerciseInlineAnswerPeriod = new RegExp(exerciseInlineAnswerPeriod, "u");
+const jsAppendixHeading = new RegExp(appendixHeading, "iu");
+const jsBareContainerSuffix = new RegExp(bareContainerSuffix, "u");
+const jsBareAnswerCounter = new RegExp(bareAnswerCounter, "iu");
+const jsInlineTerminal = new RegExp(inlineTerminal, "iu");
+const jsAnswerSectionEnd = new RegExp(asJsPattern(answerSectionEnd), "iu");
+const jsInlineTerminator = new RegExp(asJsPattern(inlineTerminator), "iu");
+const jsInlineFallbackBlocked = new RegExp(asJsPattern(inlineFallbackBlocked), "iu");
+const jsLineStart = new RegExp(lineStart, "u");
+
+/** Legacy markers predate the explicit publication receipt. New markers are
+ * settled only by the chunk transaction, even if a retry updates source status. */
+function pendingPdfSeal(sql: Sql, source: "s" | "ps") {
+  const state = source === "s" ? sql`s.parse_state<>'ready' OR seal.updated_at>s.updated_at`
+    : sql`ps.parse_state<>'ready' OR seal.updated_at>ps.updated_at`;
+  const historical = source === "s" ? sql`seal.source_version<s.version` : sql`seal.source_version<ps.version`;
+  return sql`CASE seal.pages->0->>'publicationSealCommitted'
+    WHEN 'true' THEN FALSE WHEN 'false' THEN TRUE
+    ELSE (NOT (${historical}) AND (${state})) END`;
+}
+
+export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
+  scope: { sourceIds: readonly string[]; sourceVersion?: number } | { chunkId: string }) {
+  const requestedSources = "sourceIds" in scope ? sql`s.id=ANY(${scope.sourceIds}::uuid[])`
+    : sql`s.id=(SELECT source_id FROM opening_source_chunks WHERE id=${scope.chunkId})`;
+  // Expose the requested IDs to the planner. The materialized PDF scope alone
+  // leaves the chunk scan estimated as a multi-source query, even for one PDF.
+  const archiveScope = "sourceIds" in scope ? sql`
+    c.source_id=ANY(ARRAY(SELECT id FROM pdf_read_sources))
+    AND c.source_id=ANY(${scope.sourceIds}::uuid[])
+    ${scope.sourceVersion === undefined ? sql`` : sql`AND c.source_version=${scope.sourceVersion}`}` : null;
+  // Every newer tightening invalidates stale downstream chunks until replacement.
+  // A verified reopening and all settled markers commit with that replacement.
+  return sql`WITH pdf_read_sources AS MATERIALIZED (
+    SELECT s.id,s.workspace_id,s.version,s.parse_state,s.updated_at
+    FROM opening_sources s WHERE s.workspace_id=${workspaceId} AND s.mime='application/pdf' AND ${requestedSources}
+  ), pdf_pending_seals AS MATERIALIZED (
+    SELECT seal.source_id,seal.source_version,min(CASE WHEN seal.parser_profile='pdf-publication-page-seal-v1'
+      THEN seal.page_start ELSE substring(seal.parser_profile FROM ${pendingPdfFailureBoundaryPattern})::int END) AS first_page
+    FROM opening_pdf_parse_segments seal
+    JOIN pdf_read_sources ps ON ps.id=seal.source_id AND ps.workspace_id=seal.workspace_id
+    WHERE seal.workspace_id=${workspaceId}
+      AND ((seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready' AND seal.page_end=seal.page_start
+        AND (seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+           OR seal.pages->0->>'inlineProofBoundaryPendingAtEnd'='true'
+          OR seal.pages->0->>'publicationSealUnknown'='true')
+        AND (${pendingPdfSeal(sql, "ps")}))
+        OR seal.parser_profile ~ ${pendingPdfFailureBoundaryPattern})
+    GROUP BY seal.source_id,seal.source_version
+  )${archiveScope ? sql`, ${archivedPdfSealSpans(sql, archiveScope)}` : sql``}`;
+}
+
+function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
+  return sql`pdf_archive_text AS (
+    SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
+      min(c.id::text) OVER (PARTITION BY c.source_id,c.source_version,c.page)
+        <> max(c.id::text) OVER (PARTITION BY c.source_id,c.source_version,c.page) AS multi_chunk_page,
+      max(c.page) OVER (PARTITION BY c.source_id,c.source_version) AS max_source_page,
+      string_to_array(
+        regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
+        chr(10)) AS lines
+    FROM opening_source_chunks c
+    WHERE ${scope} AND c.page IS NOT NULL
+  ), pdf_archive_headings AS (
+    SELECT *,
+      (english_container IS NOT NULL AND english_container !~ ${qualifiedEnglishProse}
+        AND regexp_replace(english_container,${headingQualifiers},'') !~ ${englishReferenceProse}
+        OR chinese_container IS NOT NULL AND regexp_replace(chinese_container,${headingQualifiers},'') !~ ${chineseReferenceProse})
+        AND line !~* ${blockedReopeningHeading} AS public_container,
+      (english_numbered IS NOT NULL AND english_numbered !~ ${qualifiedEnglishProse}
+        AND regexp_replace(english_numbered,${headingQualifiers},'') !~ ${englishReferenceProse}
+        OR chinese_numbered IS NOT NULL AND regexp_replace(chinese_numbered,${headingQualifiers},'') !~ ${chineseReferenceProse}) AS public_numbered,
+      (line ~* ${workedExampleHeading}
+        AND (english_example IS NULL OR (english_example !~ ${qualifiedEnglishProse}
+          AND regexp_replace(english_example,${headingQualifiers},'') !~ ${englishReferenceProse}))
+        AND (chinese_example IS NULL OR regexp_replace(chinese_example,${headingQualifiers},'') !~ ${chineseReferenceProse})) AS public_example,
+      (dotted_title IS NOT NULL AND (dotted_title ~ ${latinSectionTitle} AND dotted_title ~ '[A-Za-z]{2}'
+        OR dotted_title ~ ${cjkSectionTitle} AND dotted_title !~ ${cjkSectionUnits})
+        AND dotted_title !~ ${sectionProse} AND line !~* ${blockedReopeningHeading}) AS public_dotted,
+      NOT empty_atx AND (line ~* ${backMatterLine} OR (atx AND line ~* ${"^ *" + markdownTitle}
+        AND dotted_title IS NULL AND english_container IS NULL AND chinese_container IS NULL
+        AND english_numbered IS NULL AND chinese_numbered IS NULL
+        AND english_example IS NULL AND chinese_example IS NULL
+        AND line !~* ${englishBlockPrefix} AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix}
+        AND line !~ ${markdownProse}))
+        AND line !~* ${blockedReopeningHeading} AS other_reopening,
+      NOT empty_atx AND (line ~* ${inlineRunningHeading} OR (furniture_title IS NOT NULL
+        AND furniture_title !~ ${englishReferenceVerb} AND furniture_title !~* ${furnitureTitleProse})
+        OR (container_paren_title IS NOT NULL AND (container_paren_title=''
+          OR container_paren_title ~ ${latinSectionTitle}
+          OR (container_paren_title ~ ${cjkSectionTitle}
+            AND container_paren_title !~ ${cjkSectionUnits}
+            AND container_paren_title !~ ${sectionProse})))) AS running_heading
+    FROM (
+      SELECT *, coalesce(last_auxiliary>coalesce(last_transcription,0),false) AS auxiliary,
+        atx AND unstarred_line ~ ${emptyAtxHeading} AS empty_atx,
+        NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line) AS english_container,
+        NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line) AS chinese_container,
+        NULLIF(regexp_replace(line,${englishBlockReferencePrefix},'','i'),line) AS english_numbered,
+        NULLIF(regexp_replace(line,${chineseNumberedBlock},''),line) AS chinese_numbered,
+        NULLIF(regexp_replace(line,${englishExamplePrefix},'','i'),line) AS english_example,
+        NULLIF(regexp_replace(line,${chineseExamplePrefix},''),line) AS chinese_example,
+        CASE WHEN line ~* ${titledPageCounterSuffix} THEN (regexp_match(line,${titledPageCounter},'i'))[1] END AS furniture_title,
+        CASE WHEN line ~* ${parenthesizedPageCounterSuffix} THEN
+          btrim(regexp_replace(btrim(regexp_replace(
+            COALESCE(
+              NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line),
+              NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line)
+            ),
+            ${parenthesizedPageCounterSuffix},'','i')),
+            ${"^" + headingDelimiter},''))
+        END AS container_paren_title,
+        NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
+      FROM (
+        SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,aux_stripped AS raw_line,line_number,atx,unstarred_line,
+          CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0 THEN
+            regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
+              aux_stripped,${pairedBoldEmphasis},${emphasisReplacement},'g'),
+              ${pairedUnderEmphasis},${emphasisReplacement},'g'),
+              ${pairedBoldEmphasis},${emphasisReplacement},'g'),
+              ${visionAuxiliary},''),
+              ' {2,}',' ','g')
+          ELSE aux_stripped END AS line,
+          max(line_number) FILTER (WHERE raw_unstarred ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
+          max(line_number) FILTER (WHERE raw_unstarred ~ ${visionTranscription}) OVER vision_block AS last_transcription
+        FROM (
+          SELECT *,
+            CASE WHEN position('**' in raw_piece)>0 OR position('__' in raw_piece)>0
+              THEN replace(replace(raw_piece,'**',''),'__','') ELSE raw_piece END AS raw_unstarred,
+            CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0
+              THEN regexp_replace(regexp_replace(replace(replace(aux_stripped,'**',''),'__',''),${visionAuxiliary},''),' {2,}',' ','g')
+              ELSE aux_stripped END AS unstarred_line
+          FROM (
+            SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,line_number,raw_piece,
+              left(lead_trimmed,1)='#'
+                AND length(lead_trimmed)-length(after_open_hashes)<=6
+                AND (after_open_hashes='' OR left(after_open_hashes,1)=' ') AS atx,
+              CASE
+                WHEN left(lead_trimmed,1)='#'
+                  AND right(trail_trimmed,1)='#'
+                  AND length(lead_trimmed)-length(after_open_hashes)<=6
+                  AND left(after_open_hashes,1)=' '
+                  AND right(without_close_hashes,1)=' '
+                  AND length(without_close_hashes)>length(aux_piece)-length(after_open_hashes)
+                THEN rtrim(without_close_hashes,' ')
+                ELSE aux_piece
+              END AS aux_stripped
+            FROM (
+              SELECT *,ltrim(lead_trimmed,'#') AS after_open_hashes,rtrim(trail_trimmed,'#') AS without_close_hashes
+              FROM (
+                SELECT *,ltrim(aux_piece,' ') AS lead_trimmed,rtrim(aux_piece,' ') AS trail_trimmed
+                FROM (
+                  SELECT *,
+                    CASE WHEN position('[' in raw_piece)>0 OR position('【' in raw_piece)>0
+                      THEN regexp_replace(raw_piece,${visionAuxiliary},'') ELSE raw_piece END AS aux_piece
+                  FROM (
+                    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,unnest(lines) AS raw_piece,
+                      generate_subscripts(lines,1) AS line_number
+                    FROM pdf_archive_text
+                  ) unnested_lines
+                ) aux_lines
+              ) trimmed_lines
+            ) atx_bounds
+          ) raw_lines
+        ) vision_lines
+        WINDOW vision_block AS (PARTITION BY id ORDER BY line_number ROWS UNBOUNDED PRECEDING)
+      ) normalized_lines
+    ) heading_suffixes
+  ), pdf_archive_lines AS (
+    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,raw_line,line,unstarred_line,atx,empty_atx,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
+      row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
+      NOT wrapper AND NOT empty_atx AND line ~* ${exerciseHeading} AS opens_exercise,
+      NOT wrapper AND NOT empty_atx AND public_example AND NOT running_heading AS opens_worked_example,
+      (line ~* ${inlinePublicHeading} OR public_example
+        OR public_numbered OR public_container OR public_dotted OR other_reopening)
+        AND NOT wrapper AND NOT empty_atx AND NOT running_heading AND line !~* ${answerProofHeading} AND NOT qualified_solution
+        AND unstarred_line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
+      (other_reopening OR public_dotted OR public_example OR public_numbered OR line ~* ${inlinePublicHeading}
+        OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
+        AND NOT wrapper AND NOT empty_atx AND NOT running_heading AND line !~* ${answerProofHeading}
+        AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix} AS reopens_section,
+       (unstarred_line ~* ${sectionAnswerLine} OR assessment_solutions) AS opens_section,
+       (unstarred_line ~* ${answerLabelLine} OR qualified_solution OR period_answer OR assessment_solutions) AS unconditional_answer,
+       (line ~* ${explanationLabelLine} OR period_solution) AS explanation_label,
+      period_answer OR period_solution AS period_inline,
+      NOT wrapper AND line ~* ${answerSectionEnd} AS section_terminator,
+      line ~* ${exerciseSectionException} AS exercise_exception,
+       NOT auxiliary AND content_line AND line ~* ${standaloneNumberedSolution} AND COALESCE(
+         lag(line) OVER (PARTITION BY source_id,source_version,content_line,auxiliary_chunk,auxiliary_block
+           ORDER BY page,created_at,id,line_number) ~ ${numberedQuestion},false)
+        AS numbered_solution_candidate,
+       qualified_solution,wrapper,auxiliary_chunk,auxiliary_block,content_line
+    FROM (
+      SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
+        line ~* ${qualifiedSolutionLabel} AS qualified_solution,
+        content_line AND line ~* ${assessmentSolutionsHeading} AND COALESCE(
+           lead(line) OVER (PARTITION BY source_id,source_version,page,content_line,auxiliary_chunk,auxiliary_block
+             ORDER BY created_at,id,line_number)
+             ~* ${assessmentSolutionsContext},false) AS assessment_solutions
+      FROM (
+         SELECT *, CASE WHEN auxiliary THEN id END AS auxiliary_chunk,
+           CASE WHEN auxiliary THEN last_auxiliary END AS auxiliary_block,
+           line !~* ${pdfLeadingTextWrappers} AND NOT empty_atx AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
+          AND btrim(line)<>'' AS content_line
+        FROM (
+          SELECT *, auxiliary OR line ~* ${pdfLeadingTextWrappers} AS wrapper
+          FROM pdf_archive_headings
+        ) wrappers
+      ) lookahead
+    ) contextual
+  ), pdf_archive_exercise_context AS (
+    SELECT *, COALESCE(max(position) FILTER (WHERE opens_exercise) OVER context,0)
+      > COALESCE(max(position) FILTER (WHERE (opens_section AND NOT exercise_exception)
+        OR (opens_public AND NOT opens_exercise)) OVER context,0) AS in_exercise,
+      COALESCE(max(position) FILTER (WHERE opens_worked_example) OVER context,0)
+       > COALESCE(max(position) FILTER (WHERE unconditional_answer OR numbered_solution_candidate OR opens_exercise
+        OR (opens_public AND NOT opens_worked_example)) OVER context,0) AS in_worked_example
+    FROM pdf_archive_lines
+    WINDOW context AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+  ), pdf_archive_line_events AS (
+    SELECT *, section_without_numbered AND NOT numbered_solution_candidate AS section_answer,
+       explanation_label AND (NOT in_worked_example OR numbered_solution_candidate) AS sealed_explanation,
+       NOT empty_atx AND NOT (section_without_numbered AND NOT numbered_solution_candidate)
+         AND (unconditional_answer
+           OR (explanation_label AND (NOT in_worked_example OR numbered_solution_candidate))
+           OR (line ~* ${exerciseInlineAnswer}
+             AND (in_exercise OR NOT in_worked_example AND line ~* ${exerciseInlineAnswer + "[^ ]"})
+             AND (NOT in_worked_example OR NOT explanation_label))) AS inline_opener
+    FROM (
+      SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
+        AND NOT (in_worked_example AND explanation_label) AS section_without_numbered
+      FROM pdf_archive_exercise_context
+    ) with_section
+  ), pdf_archive_inline_bodies AS (
+    SELECT *,
+      CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
+        WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
+        WHEN inline_opener THEN btrim(COALESCE(
+          NULLIF(regexp_replace(line,${inlineOpenerLinePrefix},'','i'),line),
+          regexp_replace(unstarred_line,${inlineOpenerLinePrefix},'','i')
+        ))
+        WHEN empty_atx OR running_heading OR line ~* ${pdfLeadingTextWrappers} THEN ''
+        WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END AS candidate_body,
+      -- Carry each provisional section opener on its numbered predecessor so the
+      -- seal windows can check the predecessor before the opener changes groups.
+      CASE WHEN NOT auxiliary AND content_line
+        AND lead(numbered_solution_candidate AND section_without_numbered) OVER content_order
+        THEN lead(position) OVER content_order END AS next_numbered_section,
+      lead(page) OVER content_order AS next_content_page,
+      bool_or(sealed_explanation AND NOT numbered_solution_candidate OR auxiliary AND inline_opener)
+        OVER (PARTITION BY source_id,source_version,page) AS withheld_numbered_context,
+      COALESCE(max(position) FILTER (WHERE section_answer) OVER preceding_lines,0)
+        > COALESCE(max(position) FILTER (WHERE section_terminator OR reopens_section) OVER preceding_lines,0)
+        AND NOT reopens_section AS in_sealed_section
+    FROM pdf_archive_line_events
+    WINDOW content_order AS (PARTITION BY source_id,source_version,content_line,auxiliary ORDER BY position),
+      preceding_lines AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+  ), pdf_archive_inline_starts AS (
+    SELECT *, inline_opener AND NOT auxiliary_complete
+        AND NOT (auxiliary AND position<COALESCE(last_primary_position,0))
+        AND NOT (auxiliary AND last_answer_body=''
+          AND COALESCE(max(position) FILTER (WHERE unclosed_answer_body) OVER earlier_on_page,0)
+            > COALESCE(max(position) FILTER (WHERE section_answer OR opens_exercise OR opens_public
+              OR (inline_opener AND NOT auxiliary_complete AND NOT (auxiliary AND last_answer_body='')
+                AND NOT unclosed_answer_body)) OVER earlier_on_page,0)) AS starts_inline,
+      COALESCE(auxiliary_proof_head AND max(position) FILTER (WHERE auxiliary_answer_boundary) OVER earlier_on_page
+        = max(position) FILTER (WHERE auxiliary AND content_line) OVER earlier_on_page
+        OR (NOT auxiliary AND position=first_primary_position AND candidate_body ~* ${answerProofHeading}
+          OR first_auxiliary_proof AND NOT primary_ends_adjacency)
+          AND max(page) OVER previous_page=page-1
+           AND max(position) FILTER (WHERE auxiliary_answer_boundary) OVER previous_page
+             = max(position) FILTER (WHERE auxiliary AND content_line) OVER previous_page
+        OR first_auxiliary_proof AND native_answer_boundary AND NOT transcription_reopens_answer,false) AS follows_completed_answer
+    FROM (
+      SELECT *, auxiliary_proof AND position=first_auxiliary_position AS auxiliary_proof_head,
+        auxiliary_proof AND position=first_page_auxiliary_position AS first_auxiliary_proof,
+        native_answer_position>COALESCE(native_reopening,0) AND native_answer_position>COALESCE(native_proof,0)
+          AND native_answer_position>COALESCE(native_blank_exit,0)
+          AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineFallbackBlocked}) AS native_answer_boundary,
+        (bool_or(transcription_answer_reopened AND position=last_transcription_answer) OVER chunk_lines
+          AND bool_or(transcription_answer_reopened AND answer_lines=native_answer_lines) OVER chunk_lines)
+          IS TRUE AS transcription_reopens_answer,
+        auxiliary AND (last_answer_body ~* ${inlineTerminator}
+          OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends)) AS auxiliary_complete,
+        COALESCE(bool_or(native_line AND position=native_answer_position AND primary_lane_unclosed) OVER chunk_lines,false) AS native_answer_unclosed,
+        inline_opener AND last_answer_body<>'' AND (
+          auxiliary AND NOT (last_answer_body ~* ${inlineTerminator}
+            OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends))
+          OR transcription AND position=last_transcription_answer AND primary_lane_unclosed
+          OR native_line AND position=native_answer_position AND primary_lane_unclosed
+        ) AS unclosed_answer_body,
+        auxiliary AND content_line AND position=last_auxiliary_position AND auxiliary_opener>0 AND NOT open_auxiliary_proof
+          AND CASE WHEN first_auxiliary_close IS NULL THEN auxiliary_sentence_ends
+            ELSE first_auxiliary_close=position END AS auxiliary_answer_boundary
+      FROM (
+        SELECT *, NOT open_auxiliary_proof AND last_answer_body !~* ${inlineTerminator} AND last_answer_body ~* ${inlineTerminal}
+            AND last_answer_body !~* ${inlineFallbackBlocked} AS auxiliary_sentence_ends,
+          NOT auxiliary AND inline_opener AND last_answer_body<>''
+            AND lane_boundary_position IS NULL AND blank_exit_position IS NULL
+            AND CASE WHEN lane_first_proof IS NOT NULL
+              THEN COALESCE(lane_last_terminator,0)<lane_first_proof
+              ELSE answer_terminator IS NULL
+                AND NOT (last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineFallbackBlocked})
+            END AS primary_lane_unclosed,
+          transcription AND inline_opener
+            AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
+            AND (blank_exit_position IS NULL OR lane_reopening_position<=blank_exit_position)
+            AND (answer_terminator IS NULL OR answer_terminator>=lane_reopening_position
+              OR lane_reopening_position=first_content_after_terminator)
+            AND (last_answer_body ~* ${inlineTerminator}
+              OR NOT answer_has_proof AND last_answer_body ~* ${inlineTerminal}
+                AND last_answer_body !~* ${inlineFallbackBlocked}) AS transcription_answer_reopened
+        FROM (
+          SELECT *, min(position) FILTER (WHERE NOT auxiliary AND content_line)
+            OVER (PARTITION BY source_id,source_version,page) AS first_primary_position,
+            max(position) FILTER (WHERE NOT auxiliary AND content_line)
+              OVER (PARTITION BY source_id,source_version,page) AS last_primary_position,
+            min(position) FILTER (WHERE auxiliary AND content_line)
+              OVER (PARTITION BY source_id,source_version,page) AS first_page_auxiliary_position,
+            min(position) FILTER (WHERE content_line) OVER auxiliary_block_lines AS first_auxiliary_position,
+            max(position) FILTER (WHERE content_line) OVER auxiliary_block_lines AS last_auxiliary_position,
+            max(position) FILTER (WHERE NOT inline_opener AND candidate_terminator)
+              OVER auxiliary_block_lines AS auxiliary_terminator,
+            bool_or(NOT auxiliary AND (inline_opener OR section_answer OR opens_exercise OR opens_public
+              OR content_line AND line ~ ${numberedQuestion}))
+              OVER (PARTITION BY source_id,source_version,page) AS primary_ends_adjacency,
+            max(position) FILTER (WHERE native_line AND inline_opener) OVER chunk_lines AS native_answer_position,
+            max(position) FILTER (WHERE NOT auxiliary AND NOT transcription AND consumes_answer_blank)
+              OVER chunk_lines AS native_blank_exit,
+            max(position) FILTER (WHERE native_line AND (lane_reopening OR section_answer)) OVER chunk_lines AS native_reopening,
+            max(position) FILTER (WHERE native_line AND candidate_proof) OVER chunk_lines AS native_proof,
+            max(position) FILTER (WHERE transcription AND inline_opener) OVER chunk_lines AS last_transcription_answer,
+            CASE WHEN transcription AND inline_opener THEN first_value(answer_lines) OVER native_answer END AS native_answer_lines,
+            first_value(CASE WHEN native_line AND inline_opener THEN last_answer_body ELSE '' END)
+              OVER native_answer AS native_tail
+          FROM (
+            SELECT *, first_value(CASE WHEN lane_body<>'' AND (auxiliary OR answer_content)
+              THEN lane_body ELSE '' END) OVER answer_body AS last_answer_body,
+              min(position) FILTER (WHERE candidate_terminator AND NOT auxiliary_answer_proof_close)
+                OVER answer_body AS first_auxiliary_close,
+              COALESCE(max(position) FILTER (WHERE candidate_proof) OVER answer_body,0)
+                > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER answer_body,0) AS open_auxiliary_proof,
+              CASE WHEN NOT auxiliary AND inline_opener THEN
+                string_agg(btrim(regexp_replace(
+                  CASE WHEN empty_atx THEN '' WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END,
+                  ' +',' ','g')),chr(10))
+                  FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
+              max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
+              bool_or(answer_content AND candidate_proof) OVER answer_sequence AS answer_has_proof,
+              min(position) FILTER (WHERE answer_content AND candidate_proof) OVER answer_sequence AS lane_first_proof,
+              max(position) FILTER (WHERE NOT auxiliary AND candidate_terminator
+                AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
+                AND (blank_exit_position IS NULL OR position<blank_exit_position)) OVER answer_sequence AS lane_last_terminator,
+              min(position) FILTER (WHERE content_line AND position>answer_terminator)
+                OVER answer_sequence AS first_content_after_terminator
+            FROM (
+              SELECT *, NOT auxiliary AND (content_line OR line ~* ${bareAnswerCounter}) AND auxiliary_opener>0
+                AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
+                AND (blank_exit_position IS NULL OR position<blank_exit_position)
+                AND (answer_terminator IS NULL OR position<=answer_terminator) AS answer_content
+              FROM (
+             SELECT *, auxiliary AND auxiliary_opener>0 AND candidate_terminator
+               AND COALESCE(max(position) FILTER (WHERE candidate_proof) OVER auxiliary_progress,0)
+                 > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER auxiliary_prior,0) AS auxiliary_answer_proof_close,
+               -- A later provisional reopening cannot replace a boundary already reached in this lane.
+               min(position) FILTER (WHERE NOT auxiliary AND lane_reopening) OVER answer_lanes AS lane_reopening_position,
+               min(position) FILTER (WHERE NOT auxiliary AND (lane_reopening OR section_answer)) OVER answer_lanes AS lane_boundary_position,
+               min(position) FILTER (WHERE NOT auxiliary AND candidate_terminator) OVER answer_lanes AS answer_terminator,
+               min(position) FILTER (WHERE consumes_answer_blank) OVER answer_lanes AS blank_exit_position
+             FROM (
+               SELECT *,
+               -- Furniture leaves the blank pending. A proof heading upgrades the seal before a blank can end it.
+               NOT auxiliary AND auxiliary_opener>0 AND (lane_body<>'' OR section_answer)
+                 AND NOT candidate_proof AND NOT prior_answer_proof_open
+                 AND prior_blank_position>prior_body_position AS consumes_answer_blank,
+               opens_exercise OR opens_public
+                 OR (NOT auxiliary AND NOT inline_opener AND auxiliary_opener>0 AND line ~ ${numberedExerciseInstruction}
+                   AND NOT prior_answer_proof_open
+                   AND (prior_answer_body ~* ${inlineTerminator}
+                     OR prior_answer_body ~* ${inlineTerminal} AND prior_answer_body !~* ${inlineFallbackBlocked})) AS lane_reopening
+               FROM (
+                 SELECT *, lag(lane_body) OVER prior_answer AS prior_answer_body,
+                 max(position) FILTER (WHERE btrim(line)='') OVER lane_prior AS prior_blank_position,
+                 max(position) FILTER (WHERE lane_body<>'') OVER lane_prior AS prior_body_position,
+                   COALESCE(max(position) FILTER (WHERE candidate_proof) OVER prior_answer,0)
+                     > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER prior_answer,0) AS prior_answer_proof_open
+                 FROM (
+                   SELECT *, auxiliary AND content_line AND NOT inline_opener AND candidate_body ~* ${answerProofHeading} AS auxiliary_proof,
+                     candidate_body ~* ${answerProofHeading} AS candidate_proof,
+                     candidate_body ~* ${inlineTerminator} AS candidate_terminator,
+                     NOT auxiliary AND NOT transcription AND content_line AS native_line,
+                     -- Keep ambiguous counters in identity without treating them as a same-page close.
+                     CASE WHEN NOT inline_opener AND line ~* ${bareAnswerCounter}
+                       AND NOT (in_exercise AND NOT atx AND line ~ ${String.raw`^ *\d+[.。] *$`}) THEN '' ELSE candidate_body END AS lane_body,
+                     count(*) FILTER (WHERE inline_opener)
+                     OVER (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
+                   FROM pdf_archive_inline_bodies
+                 ) with_openers
+                 WINDOW prior_answer AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener,lane_body<>''
+                   ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+                  lane_prior AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener ORDER BY position
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+               ) with_prior_answer
+             ) with_reopenings
+             WINDOW auxiliary_progress AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS UNBOUNDED PRECEDING),
+               auxiliary_prior AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+               answer_lanes AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener)
+              ) with_proof_closes
+            ) with_answer_content
+            WINDOW answer_sequence AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener
+              ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
+              answer_body AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener
+                ORDER BY (lane_body='' OR NOT auxiliary AND NOT answer_content),position DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+          ) with_answer_text
+          WINDOW auxiliary_block_lines AS (PARTITION BY id,auxiliary_block),
+            chunk_lines AS (PARTITION BY source_id,source_version,page),
+            native_answer AS (PARTITION BY source_id,source_version,page ORDER BY NOT (native_line AND inline_opener),position DESC)
+        ) with_auxiliary_body
+      ) with_sentence_end
+      WINDOW chunk_lines AS (PARTITION BY source_id,source_version,page)
+    ) with_completion
+    WINDOW earlier_on_page AS (PARTITION BY source_id,source_version,page ORDER BY position
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
+      previous_page AS (PARTITION BY source_id,source_version ORDER BY page GROUPS BETWEEN 1 PRECEDING AND 1 PRECEDING)
+  ), pdf_archive_inline_groups AS (
+    -- An opener and its continuation lines share a group until the next explicit boundary.
+    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,position,inline_group,
+      auxiliary,wrapper,empty_atx,content_line,btrim(line)='' AS blank_line,
+      starts_inline,unconditional_answer,sealed_explanation,inline_opener,
+      candidate_proof,candidate_terminator,auxiliary_proof,auxiliary_terminator,auxiliary_answer_proof_close,
+      native_answer_boundary,follows_completed_answer,first_auxiliary_proof,primary_ends_adjacency,last_primary_position,
+      section_answer,opens_exercise,opens_public,lane_reopening,
+      next_numbered_section,next_content_page,in_sealed_section,withheld_numbered_context,
+      first_value(starts_inline) OVER inline_origin AS in_inline_group,
+      COALESCE(first_value(auxiliary) OVER inline_origin,false) AS auxiliary_inline_origin,
+      min(page) FILTER (WHERE starts_inline) OVER (PARTITION BY source_id,source_version,inline_group) AS group_first_page,
+      CASE WHEN (NOT auxiliary AND NOT COALESCE(first_value(auxiliary) OVER inline_origin
+          AND page=min(page) FILTER (WHERE starts_inline) OVER (PARTITION BY source_id,source_version,inline_group),false))
+        OR first_value(starts_inline) OVER inline_origin
+          AND id=first_value(id) OVER inline_origin
+          AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
+      THEN lane_body ELSE '' END AS body_line,
+      -- An auxiliary proof that closes in its own block leaves the outer answer active.
+      (auxiliary_proof AND NOT (first_auxiliary_proof AND native_answer_boundary AND transcription_reopens_answer)
+        AND NOT (position<COALESCE(last_primary_position,0))
+        AND (id=first_value(id) OVER inline_origin
+          AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
+          OR first_value(last_answer_body) OVER inline_origin<>''
+            AND first_value(blank_exit_position) OVER inline_origin IS NULL
+          OR native_answer_unclosed)
+        OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator
+          AND NOT (position<COALESCE(last_primary_position,0)))
+        AND first_value(starts_inline) OVER inline_origin
+        AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline
+    FROM (
+      SELECT *, count(*) FILTER (WHERE starts_inline OR section_answer OR opens_exercise OR opens_public
+          OR (NOT auxiliary AND lane_reopening))
+        OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group
+      FROM pdf_archive_inline_starts
+    ) grouped_lines
+    WINDOW inline_origin AS (PARTITION BY source_id,source_version,inline_group ORDER BY position)
+  ), pdf_archive_inline_body AS (
+    SELECT *,
+      min(position) FILTER (WHERE upgrades_inline
+        OR (NOT auxiliary AND candidate_inline_proof
+          AND (first_page_explicit_close IS NULL OR position<=first_page_explicit_close)
+          AND (first_group_blank_close IS NULL OR position<first_group_blank_close)
+          AND (first_midpage_explicit_close IS NULL OR position<=first_midpage_explicit_close)))
+        OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof
+    FROM (
+      SELECT *,
+        min(position) FILTER (WHERE explicit_inline_close)
+          OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_page_explicit_close,
+        min(position) FILTER (WHERE NOT auxiliary AND blank_line AND position>first_body
+          AND next_body IS NOT NULL AND next_body IS NOT DISTINCT FROM next_non_proof_body)
+          OVER (PARTITION BY source_id,source_version,inline_group) AS first_group_blank_close,
+        min(position) FILTER (WHERE explicit_inline_close AND next_body IS NOT NULL)
+          OVER (PARTITION BY source_id,source_version,inline_group) AS first_midpage_explicit_close
+      FROM (
+        SELECT *,
+          NOT auxiliary AND body_line<>'' AND candidate_proof AS candidate_inline_proof,
+          body_line<>'' AND candidate_terminator AND NOT auxiliary_answer_proof_close AS explicit_inline_close,
+          min(position) FILTER (WHERE body_line<>'')
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
+          min(position) FILTER (WHERE starts_inline)
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_opener,
+          max(position) FILTER (WHERE auxiliary_proof)
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS last_page_auxiliary_proof,
+          min(position) FILTER (WHERE body_line<>'')
+            OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_body,
+          min(position) FILTER (WHERE body_line<>'' AND NOT upgrades_inline
+            AND NOT (NOT auxiliary AND candidate_proof))
+            OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_non_proof_body
+        FROM pdf_archive_inline_groups
+      ) inline_body_candidates
+    ) inline_body_closures
+  ), pdf_archive_inline_closes AS (
+    SELECT *, min(position) FILTER (WHERE closes_after_blank OR explicit_inline_close)
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_inline_close,
+      bool_or(closes_after_blank)
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS group_closed_after_blank,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof)
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_proof_close
+    FROM (
+      SELECT *, (NOT auxiliary AND blank_line AND position>first_body AND next_body IS NOT NULL
+          AND (first_proof IS NULL OR next_body<first_proof)
+        OR position=first_opener AND first_body IS NULL
+          AND last_page_auxiliary_proof>first_opener AND first_proof IS NULL) AS closes_after_blank
+      FROM pdf_archive_inline_body
+    ) close_events
+  ), pdf_archive_inline_pages AS (
+    SELECT source_id,source_version,inline_group,page,bool_or(multi_chunk_page) AS multi_chunk_page,
+      max(max_source_page) AS max_source_page,bool_or(starts_inline) AS starts_inline,
+      min(position) AS first_position,
+      bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public OR lane_reopening)) AS primary_boundary,
+      min(position) FILTER (WHERE position=first_proof) AS proof_position,
+      min(position) FILTER (WHERE NOT auxiliary AND position=first_proof) AS primary_proof_position,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof) AS primary_proof_close,
+      min(position) FILTER (WHERE follows_completed_answer) AS auxiliary_proof_position,
+      max(position) FILTER (WHERE follows_completed_answer AND auxiliary
+        AND NOT (position<COALESCE(last_primary_position,0))
+        AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) AS unclosed_auxiliary_proof,
+      max(position) FILTER (WHERE follows_completed_answer AND NOT auxiliary
+        AND (NOT explicit_inline_close)) AS adjacent_primary_proof,
+      min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency) AS adjacent_auxiliary_position,
+      min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency
+        AND NOT (position<COALESCE(last_primary_position,0))
+        AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) AS unclosed_adjacent_auxiliary_proof,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS first_primary_terminator,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close
+        AND position>COALESCE(last_page_auxiliary_proof,0)) AS post_aux_primary_terminator,
+      max(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS primary_terminator,
+      (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
+      bool_or(closes_after_blank) AS closed_after_blank,
+      bool_or(first_proof<=position) AS in_sealed_proof,
+      bool_or(NOT auxiliary AND position=first_body AND position=first_proof) AS starts_proof,
+      min(position) FILTER (WHERE explicit_inline_close) AS terminator_position,
+      max(position) FILTER (WHERE body_line<>'') AS last_body_position,
+      min(next_numbered_section) AS numbered_section_position,
+      min(next_content_page) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_section_page,
+      min(position) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_predecessor,
+      bool_or(next_numbered_section IS NOT NULL AND (in_sealed_section OR withheld_numbered_context)) AS numbered_withheld,
+      bool_or(next_numbered_section IS NOT NULL AND inside_inline_body) AS numbered_in_inline,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND in_inline_group AND NOT auxiliary
+        AND NOT wrapper AND NOT empty_atx AND NOT blank_line
+        AND NOT COALESCE(auxiliary_inline_origin AND page=group_first_page,false)
+        AND (first_inline_close IS NULL OR position<=first_inline_close
+          OR (NOT group_closed_after_blank AND first_proof IS NOT NULL AND position>=first_proof
+            AND (first_proof_close IS NULL OR position<=first_proof_close)))) AS inline_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line AND first_proof IS NOT NULL
+        AND position>=first_proof AND (first_proof_close IS NULL OR position<=first_proof_close)) AS inline_proof_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND (follows_completed_answer OR (row_aux_proof_pos IS NOT NULL AND position>=row_aux_proof_pos
+          AND row_aux_unclosed AND (row_post_aux_term IS NULL OR position<=row_post_aux_term)))) AS aux_proof_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND ((first_auxiliary_proof AND NOT primary_ends_adjacency)
+          OR (row_adj_aux_pos IS NOT NULL AND position>=row_adj_aux_pos
+            AND row_adj_unclosed AND (row_post_aux_term IS NULL OR position<=row_post_aux_term)))) AS adj_aux_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND (row_first_primary_term IS NULL OR position<=row_first_primary_term)) AS pre_term_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line) AS all_content_chunk_ids
+    FROM (
+      SELECT *, first_inline_close IS NULL OR position<=first_inline_close AS inside_inline_body,
+        min(position) FILTER (WHERE follows_completed_answer) OVER group_page AS row_aux_proof_pos,
+        COALESCE(bool_or(follows_completed_answer AND ((auxiliary AND NOT (position<COALESCE(last_primary_position,0))
+            AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position))
+          OR (NOT auxiliary AND NOT explicit_inline_close))) OVER group_page,false) AS row_aux_unclosed,
+        min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency) OVER group_page AS row_adj_aux_pos,
+        COALESCE(bool_or(first_auxiliary_proof AND NOT primary_ends_adjacency
+          AND NOT (position<COALESCE(last_primary_position,0))
+          AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) OVER group_page,false) AS row_adj_unclosed,
+        min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close
+          AND position>COALESCE(last_page_auxiliary_proof,0)) OVER group_page AS row_post_aux_term,
+        min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) OVER group_page AS row_first_primary_term
+      FROM pdf_archive_inline_closes
+      WINDOW group_page AS (PARTITION BY source_id,source_version,inline_group,page)
+    ) with_line_closes
+    GROUP BY source_id,source_version,inline_group,page
+  ), pdf_archive_inline_ranges AS (
+    SELECT *, bool_or(page=last_page AND multi_chunk_page)
+        OVER (PARTITION BY source_id,source_version,inline_group) AS last_page_multi_chunk,
+      array_agg(page) FILTER (WHERE multi_chunk_page)
+        OVER (PARTITION BY source_id,source_version) AS multi_chunk_pages
+    FROM (
+      -- A finished answer affects later pages only up to its first closing page.
+      SELECT *, min(page) FILTER (WHERE starts_inline) OVER answer AS first_page,
+        COALESCE(min(page) FILTER (WHERE closed_after_blank
+          OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
+            OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
+          OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
+            AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked})) OVER answer,
+          GREATEST(max(page) OVER answer,COALESCE(
+            min(next_group_page) OVER answer-1,max_source_page))) AS last_page
+      FROM (
+        SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof,
+          CASE WHEN lead(inline_group) OVER document_order<>inline_group
+            THEN lead(page) OVER document_order END AS next_group_page
+        FROM pdf_archive_inline_pages
+        WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page),
+          document_order AS (PARTITION BY source_id,source_version ORDER BY first_position)
+      ) with_next_page
+      WINDOW answer AS (PARTITION BY source_id,source_version,inline_group)
+    ) inline_bounds
+  ), pdf_archive_proof_ranges AS (
+    SELECT *,
+      CASE WHEN multi_chunk_page THEN page+1 ELSE page END AS span_first_page,
+      CASE WHEN COALESCE(proof_end=ANY(multi_chunk_pages),false) THEN proof_end ELSE proof_end+1 END AS span_reopen_page,
+      CASE WHEN multi_chunk_page THEN
+        COALESCE(CASE WHEN first_page IS NOT NULL AND first_page<last_page AND page=last_page THEN inline_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN active_inline_proof IS NOT NULL THEN inline_proof_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN auxiliary_proof_position IS NOT NULL THEN aux_proof_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN follows_finished_inline AND adjacent_auxiliary_position IS NOT NULL THEN adj_aux_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN prior_open_proof_end IS NOT NULL AND page<=prior_open_proof_end THEN
+          CASE WHEN page=prior_open_proof_end AND first_primary_terminator IS NOT NULL THEN pre_term_chunk_ids ELSE all_content_chunk_ids END
+        END,'{}'::uuid[])
+      END AS multi_chunk_sealed_ids
+    FROM (
+      SELECT *, max(proof_end) FILTER (WHERE proof_start IS NOT NULL AND unclosed_proof_start IS NOT NULL)
+        OVER (PARTITION BY source_id,source_version,primary_group ORDER BY first_position
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prior_open_proof_end
+      FROM (
+        -- A completed answer can start a fresh proof on the adjacent page.
+        -- A terminator in that proof's opening block only closes that proof.
+        SELECT source_id,source_version,page,multi_chunk_page,multi_chunk_pages,first_position,primary_group,
+          first_page,last_page,proof_start,unclosed_proof_start,active_inline_proof,auxiliary_proof_position,
+          follows_finished_inline,adjacent_auxiliary_position,first_primary_terminator,
+          primary_proof_position,primary_proof_close,numbered_section_position,numbered_section_page,
+          numbered_predecessor,numbered_withheld,numbered_in_inline,
+          inline_chunk_ids,inline_proof_chunk_ids,aux_proof_chunk_ids,adj_aux_chunk_ids,pre_term_chunk_ids,all_content_chunk_ids,
+          CASE WHEN unclosed_proof_start IS NULL THEN page
+            WHEN own_close IS NOT NULL THEN page
+            ELSE COALESCE(later_close_page,
+              GREATEST(max(page) OVER remaining,COALESCE(next_primary_page-1,max_source_page))) END AS proof_end
+        FROM (
+          SELECT *,
+            CASE WHEN first_primary_terminator>=unclosed_proof_start THEN first_primary_terminator
+              WHEN post_aux_primary_terminator>=unclosed_proof_start THEN post_aux_primary_terminator END AS own_close,
+            min(page) FILTER (WHERE first_primary_terminator IS NOT NULL) OVER later_in_group AS later_close_page
+          FROM (
+            SELECT *, LEAST(auxiliary_proof_position,
+              CASE WHEN follows_finished_inline THEN adjacent_auxiliary_position END,
+              active_inline_proof) AS proof_start,
+              GREATEST(unclosed_auxiliary_proof,adjacent_primary_proof,
+                CASE WHEN follows_finished_inline THEN unclosed_adjacent_auxiliary_proof END,
+                CASE WHEN primary_proof_close IS NULL THEN active_inline_proof END) AS unclosed_proof_start,
+              count(*) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position
+                ROWS UNBOUNDED PRECEDING) AS primary_group,
+              min(page) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_primary_page
+            FROM (
+              SELECT *, CASE WHEN first_page IS NOT NULL AND page<=last_page AND closed_after_blank IS NOT TRUE
+                  THEN proof_position END AS active_inline_proof,
+                lag(page) OVER previous_page=page-1 AND lag(page=last_page AND first_page IS NOT NULL
+                AND in_sealed_proof IS NOT TRUE AND NOT closed_after_blank
+                AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked}))
+                OVER previous_page AS follows_finished_inline
+              FROM pdf_archive_inline_ranges
+              WINDOW previous_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
+            ) adjacent
+          ) proof_groups
+          WINDOW later_in_group AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ) proof_closures
+        WINDOW remaining AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position DESC
+          ROWS UNBOUNDED PRECEDING)
+      ) with_proof_end
+    ) with_prior_open_proof
+  ), pdf_archive_numbered_predecessors AS (
+    SELECT *, max(proof_end) FILTER (WHERE proof_start IS NOT NULL) OVER prior_pages AS earlier_proof_end,
+      min(first_primary_terminator) OVER same_page AS first_page_primary_terminator,
+      bool_or(proof_start IS NOT NULL AND proof_end>page
+        AND (numbered_predecessor IS NULL OR numbered_predecessor>=proof_start)) OVER same_page AS same_page_proof_open
+    FROM pdf_archive_proof_ranges
+    WINDOW same_page AS (PARTITION BY source_id,source_version,page),
+      prior_pages AS (PARTITION BY source_id,source_version ORDER BY page
+      GROUPS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+  ), pdf_archive_page_events AS (
+    SELECT source_id,source_version,page,bool_or(section_answer) AS section_answer,
+      bool_or(answer_label) AS answer_label,
+      max(position) FILTER (WHERE section_terminator) > COALESCE(max(position) FILTER (WHERE section_answer),0) AS section_ends_here,
+      (array_agg(reopens_section ORDER BY position) FILTER (WHERE reopens_section IS NOT NULL))[1] AS reopens_section
+    FROM (
+      SELECT source_id,source_version,page,position,section_answer,
+        inline_opener OR unconditional_answer OR sealed_explanation AS answer_label,section_terminator,
+        CASE WHEN NOT wrapper AND NOT empty_atx AND btrim(line)<>'' AND NOT running_heading THEN reopens_section END AS reopens_section
+      FROM pdf_archive_line_events
+      UNION ALL
+      SELECT source_id,source_version,numbered_section_page,numbered_section_position,true,true,false,NULL::boolean
+      FROM pdf_archive_numbered_predecessors
+      WHERE numbered_section_position IS NOT NULL
+        AND (numbered_withheld OR numbered_in_inline AND first_page IS NOT NULL AND page<=last_page
+          OR page<earlier_proof_end OR page=earlier_proof_end
+            AND (first_page_primary_terminator IS NULL OR numbered_predecessor<=first_page_primary_terminator)
+          OR same_page_proof_open OR proof_start=primary_proof_position
+            AND numbered_predecessor BETWEEN proof_start AND primary_proof_close)
+    ) sections
+    GROUP BY source_id,source_version,page
+  ), pdf_archive_sealed_spans AS MATERIALIZED (
+    SELECT source_id,source_version,first_page,reopen_page,NULL::uuid AS chunk_id FROM (
+      SELECT source_id,source_version,page AS first_page,section_answer,
+        CASE WHEN section_ends_here THEN page+1 ELSE
+          lead(CASE WHEN section_ends_here AND NOT section_answer THEN page+1 ELSE page END)
+            OVER (PARTITION BY source_id,source_version ORDER BY page) END AS reopen_page
+      FROM pdf_archive_page_events
+      WHERE section_answer OR section_ends_here OR (NOT answer_label AND reopens_section)
+    ) events WHERE section_answer
+    UNION ALL
+    SELECT source_id,source_version,first_page+1,
+      CASE WHEN last_page_multi_chunk THEN last_page ELSE last_page+1 END,NULL::uuid
+    FROM pdf_archive_inline_ranges
+    WHERE starts_inline AND first_page < CASE WHEN last_page_multi_chunk THEN last_page-1 ELSE last_page END
+    UNION ALL
+    SELECT source_id,source_version,span_first_page,span_reopen_page,NULL::uuid
+    FROM pdf_archive_proof_ranges
+    WHERE proof_start IS NOT NULL AND span_first_page<span_reopen_page
+    UNION ALL
+    SELECT DISTINCT source_id,source_version,page,page+1,unnest(multi_chunk_sealed_ids)
+    FROM pdf_archive_proof_ranges
+    WHERE multi_chunk_page AND cardinality(multi_chunk_sealed_ids)>0
+    UNION ALL
+    SELECT DISTINCT source_id,source_version,page,page+1,id
+    FROM pdf_archive_inline_closes
+    WHERE sealed_explanation OR unconditional_answer OR (auxiliary AND inline_opener)
+      OR starts_inline
+      OR (in_inline_group AND page=group_first_page AND NOT auxiliary
+        AND NOT wrapper AND NOT empty_atx AND NOT blank_line
+        AND NOT COALESCE(auxiliary_inline_origin AND page=group_first_page,false)
+        AND (first_inline_close IS NULL OR position<=first_inline_close
+          OR (NOT group_closed_after_blank AND first_proof IS NOT NULL AND position>=first_proof
+            AND (first_proof_close IS NULL OR position<=first_proof_close))))
+  ), pdf_archive_sealed_pages AS MATERIALIZED (
+    -- A page is sealed if any span started by that page is unbounded or ends later.
+    SELECT source_id,source_version,page FROM (
+      SELECT source_id,source_version,page,
+        bool_or(unbounded) OVER prior_pages OR max(reopen_page) OVER prior_pages>page AS sealed
+      FROM (
+        SELECT source_id,source_version,page,bool_or(unbounded) AS unbounded,max(reopen_page) AS reopen_page
+        FROM (
+          SELECT DISTINCT source_id,source_version,page,false AS unbounded,NULL::int AS reopen_page
+          FROM pdf_archive_text
+          UNION ALL
+          SELECT source_id,source_version,first_page,reopen_page IS NULL,reopen_page
+          FROM pdf_archive_sealed_spans WHERE chunk_id IS NULL
+        ) page_events
+        GROUP BY source_id,source_version,page
+      ) page_ranges
+      WINDOW prior_pages AS (PARTITION BY source_id,source_version ORDER BY page ROWS UNBOUNDED PRECEDING)
+    ) page_seals WHERE sealed
+  ), pdf_archive_sealed_chunks AS MATERIALIZED (
+    SELECT DISTINCT chunk_id FROM pdf_archive_sealed_spans WHERE chunk_id IS NOT NULL
+  )`;
+}
+
+/** Chunk and source aliases are c and s at each publication read. */
+export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) {
+  return sql`(s.mime<>'application/pdf' OR c.page IS NULL OR (
+    NOT EXISTS (
+      SELECT 1 FROM pdf_pending_seals boundary
+      WHERE boundary.source_id=c.source_id AND boundary.source_version=c.source_version AND boundary.first_page<=c.page
+    ) ${checkArchive ? sql`AND NOT EXISTS (
+      SELECT 1 FROM pdf_archive_sealed_pages archived_page
+      WHERE archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page
+    ) AND NOT EXISTS (
+      SELECT 1 FROM pdf_archive_sealed_chunks archived_chunk WHERE archived_chunk.chunk_id=c.id
+    )` : sql``} AND NOT EXISTS (
+      SELECT 1 FROM opening_pdf_parse_segments seal
+      WHERE seal.workspace_id=s.workspace_id AND seal.source_id=c.source_id AND seal.source_version=c.source_version
+        AND seal.parser_profile='pdf-publication-page-seal-v1' AND seal.state='ready'
+        AND seal.page_start=c.page AND seal.page_end=c.page
+        AND (seal.pages->0->>'hadSealedContent'='true' OR seal.pages->0->>'inlineSealedAtEnd'='true'
+          OR seal.pages->0->>'inlineProofBoundaryPendingAtEnd'='true'
+          OR seal.pages->0->>'sectionSealedAtEnd'='true' OR seal.pages->0->>'publicationSealUnknown'='true')
+        AND (c.image_object_key IS NOT NULL OR (${pendingPdfSeal(sql, "s")}))
+    )
+  ))`;
+}
+
+export function publicPdfChunkImageObjectKey(sql: Sql) {
+  return sql`CASE WHEN s.mime='application/pdf' AND c.page IS NOT NULL AND c.image_object_key IS NOT NULL
+    THEN (CASE WHEN EXISTS (
+      SELECT 1 FROM pdf_archive_sealed_spans sealed_sibling
+      WHERE sealed_sibling.source_id=c.source_id AND sealed_sibling.source_version=c.source_version
+        AND sealed_sibling.chunk_id IS NOT NULL AND sealed_sibling.first_page=c.page
+    ) THEN NULL ELSE c.image_object_key END)
+    ELSE c.image_object_key END`;
+}
+
+export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
+  // The archive scans physical pages in order. Page-less chunks have only local context.
+  return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string, { checkContext: row.page == null });
+}
+
+export function filterPublicChunkRows<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+  const sealedPages = new Set<string>();
+  const kept: T[] = [];
+  for (const row of rows) {
+    if (isPublicSourceChunk(row)) {
+      kept.push(row);
+    } else if (row.mime === "application/pdf" && row.page != null) {
+      sealedPages.add(`${String(row.source_id)}:${String(row.source_version)}:${String(row.page)}`);
+    }
+  }
+  if (!sealedPages.size) return kept;
+  return kept.map(row => row.mime === "application/pdf" && row.page != null
+    && sealedPages.has(`${String(row.source_id)}:${String(row.source_version)}:${String(row.page)}`)
+    ? { ...row, image_object_key: null, public_image_object_key: null }
+    : row);
+}
+
+function classifyArchivePdfLine(entry: ArchivePdfLine, assessmentSolutions: boolean) {
+  if (entry.emptyAtx) {
+    return {
+      opensExercise: false, opensWorkedExample: false, opensPublic: false, reopensSection: false,
+      opensSection: false, unconditionalAnswer: false, expLabel: false, qualifiedSol: false,
+      periodInline: false, sectionTerminator: false, exerciseException: false,
+    };
+  }
+  const { atx, line, unstarredLine, runningHeading } = entry;
+  const englishContainer = jsEnglishContainer.exec(line);
+  const chineseContainer = jsChineseContainer.exec(line);
+  const publicContainer = Boolean((englishContainer && acceptsPdfHeading(line, englishContainer, jsEnglishProse)
+    || chineseContainer && acceptsPdfHeading(line, chineseContainer, jsChineseProse))
+    && !jsBlockedReopening.test(line));
+  const englishNumbered = jsBlockReference.exec(line);
+  const chineseNumbered = jsChineseNumberedBlock.exec(line);
+  const publicNumbered = Boolean(englishNumbered && acceptsPdfHeading(line, englishNumbered, jsEnglishProse)
+    || chineseNumbered && acceptsPdfHeading(line, chineseNumbered, jsChineseProse));
+  const englishExample = jsEnglishExample.exec(line);
+  const chineseExample = jsChineseExample.exec(line);
+  const publicExample = jsWorkedExample.test(line)
+    && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse))
+    && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse));
+  const dotted = jsDottedSection.exec(line);
+  const dottedTitle = dotted ? line.slice(dotted[0].length) : "";
+  const publicDotted = Boolean(dotted
+    && (jsLatinTitle.test(dottedTitle) && /[A-Za-z]{2}/u.test(dottedTitle)
+      || jsCjkTitle.test(dottedTitle) && !jsCjkSectionUnits.test(dottedTitle))
+    && !jsSectionProse.test(dottedTitle) && !jsBlockedReopening.test(line));
+  const otherReopening = Boolean((jsBackMatter.test(line)
+    || atx && jsMarkdownTitle.test(line)
+      && !dotted && !englishContainer && !chineseContainer && !englishNumbered && !chineseNumbered
+      && !englishExample && !chineseExample && !jsEnglishBlock.test(line)
+      && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line) && !jsMarkdownProse.test(line))
+    && !jsBlockedReopening.test(line));
+  const proofHeading = jsProofHeading.test(line);
+  const qualifiedSol = jsQualifiedSolution.test(line);
+  const periodAnswer = jsAnswerPeriod.test(line);
+  const periodSolution = jsSolutionPeriod.test(line);
+  const periodInline = periodAnswer || periodSolution;
+  const hasAnswerLabel = answerLabel.test(unstarredLine);
+  const hasExplanationLabel = explanationLabel.test(line);
+  const unconditionalAnswer = hasAnswerLabel || qualifiedSol || periodAnswer || assessmentSolutions;
+  const expLabel = hasExplanationLabel || periodSolution;
+  const inlinePub = jsPublicHeading.test(line);
+  const opensExercise = jsExerciseHeading.test(line);
+  const opensWorkedExample = publicExample && !runningHeading;
+  const opensPublic = (inlinePub || publicExample || publicNumbered || publicContainer || publicDotted || otherReopening)
+    && !runningHeading && !proofHeading && !qualifiedSol && !hasAnswerLabel && !hasExplanationLabel;
+  const containerSuffix = englishContainer ? line.slice(englishContainer[0].length)
+    : chineseContainer ? line.slice(chineseContainer[0].length) : null;
+  const reopensSection = (otherReopening || publicDotted || publicExample || publicNumbered || inlinePub
+    || publicContainer && (jsAppendixHeading.test(line)
+      || containerSuffix !== null && !jsBareContainerSuffix.test(containerSuffix)))
+    && !runningHeading && !proofHeading && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line);
+  const opensSection = jsSectionAnswer.test(unstarredLine) || assessmentSolutions;
+  const sectionTerminator = jsAnswerSectionEnd.test(line);
+  const exerciseException = jsExerciseSectionException.test(line);
+  return {
+    opensExercise, opensWorkedExample, opensPublic, reopensSection, opensSection,
+    unconditionalAnswer, expLabel, qualifiedSol, periodInline, sectionTerminator, exerciseException,
+  };
+}
+
+export type ArchivePdfCursorState = {
+  inWorkedExample: boolean;
+  inExercise: boolean;
+  previousNumberedQuestion: boolean;
+};
+
+function advanceArchivePdfCursorState(parsed: readonly ReturnType<typeof parseArchivePdfBlocks>[], state: ArchivePdfCursorState) {
+  const pagePrimaryContent = parsed.flatMap(info => info.primary.filter(entry => entry.contentLine));
+  const assessmentSolutionsSet = new Set<ArchivePdfLine>();
+  for (let index = 0; index + 1 < pagePrimaryContent.length; index++) {
+    const current = pagePrimaryContent[index]!;
+    const next = pagePrimaryContent[index + 1]!;
+    if (jsAssessmentSolutionsHeading.test(current.line) && jsAssessmentSolutionsContext.test(next.line)) {
+      assessmentSolutionsSet.add(current);
+    }
+  }
+  for (const info of parsed) {
+    for (const event of info.primaryEvents) {
+      if ("blank" in event) continue;
+      const { line, contentLine } = event;
+      const followsNumberedQuestion = contentLine && state.previousNumberedQuestion;
+      const numberedSolutionCandidate = followsNumberedQuestion && jsStandaloneNumberedSolution.test(line);
+      if (contentLine) state.previousNumberedQuestion = jsNumberedQuestion.test(line);
+      const flags = classifyArchivePdfLine(event, assessmentSolutionsSet.has(event));
+      if (flags.opensExercise) state.inExercise = true;
+      else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) state.inExercise = false;
+      if (flags.opensWorkedExample) state.inWorkedExample = true;
+      else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+        state.inWorkedExample = false;
+      }
+    }
+  }
+}
+
+export function filterPublicSamePagePdfChunks<T extends { text: string; page?: number | null }>(
+  rows: readonly T[],
+  state?: ArchivePdfCursorState,
+): T[] {
+  if (!rows.length) return [];
+  if (rows[0]?.page == null) {
+    return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
+  }
+  if (rows.length === 1) {
+    if (state) advanceArchivePdfCursorState([parseArchivePdfBlocks(rows[0]!.text)], state);
+    return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
+  }
+  const parsed = rows.map(row => parseArchivePdfBlocks(row.text));
+  const pagePrimaryContent = parsed.flatMap(info => info.primary.filter(entry => entry.contentLine));
+  const assessmentSolutionsSet = new Set<ArchivePdfLine>();
+  const assessmentContextSet = new Set<ArchivePdfLine>();
+  for (let index = 0; index + 1 < pagePrimaryContent.length; index++) {
+    const current = pagePrimaryContent[index]!;
+    const next = pagePrimaryContent[index + 1]!;
+    if (jsAssessmentSolutionsHeading.test(current.line) && jsAssessmentSolutionsContext.test(next.line)) {
+      assessmentSolutionsSet.add(current);
+      assessmentContextSet.add(next);
+    }
+  }
+
+  const chunkSealed = new Set<number>();
+  let inExercise = state?.inExercise ?? false;
+  let inWorkedExample = state?.inWorkedExample ?? false;
+  let previousNumberedQuestion = state?.previousNumberedQuestion ?? false;
+  let mode: "none" | "section" | "inline" | "inline_proof" = "none";
+  let lastInlineBody = "";
+  let blankPending = false;
+
+  for (let chunkIndex = 0; chunkIndex < parsed.length; chunkIndex++) {
+    const info = parsed[chunkIndex]!;
+    if (info.hasUnconditionalLabel) chunkSealed.add(chunkIndex);
+
+    for (const event of info.primaryEvents) {
+      if ("blank" in event) {
+        if (mode === "inline" && lastInlineBody !== "") blankPending = true;
+        continue;
+      }
+      const { atx, emptyAtx, line, runningHeading, contentLine } = event;
+      const followsNumberedQuestion = contentLine && previousNumberedQuestion;
+      const numberedSolutionCandidate = followsNumberedQuestion && jsStandaloneNumberedSolution.test(line);
+      if (contentLine) previousNumberedQuestion = jsNumberedQuestion.test(line);
+
+      const assessmentSolutions = assessmentSolutionsSet.has(event);
+      const isAssessmentContextLine = assessmentContextSet.has(event);
+      const flags = classifyArchivePdfLine(event, assessmentSolutions);
+      const sectionWithoutNumbered = flags.opensSection && !(inExercise && flags.exerciseException)
+        && !(inWorkedExample && flags.expLabel);
+      const sectionAnswer = sectionWithoutNumbered && !numberedSolutionCandidate;
+      const sealedExplanation = flags.expLabel && (!inWorkedExample || numberedSolutionCandidate);
+      const inlineOpener = !emptyAtx && !sectionAnswer
+        && (flags.unconditionalAnswer || sealedExplanation
+          || jsExerciseInlineAnswer.test(line)
+            && (inExercise || !inWorkedExample && jsExerciseInlineAnswerWithBody.test(line))
+            && (!inWorkedExample || !flags.expLabel));
+
+      const strippedOpener = inlineOpener ? line.replace(jsInlineOpenerLinePrefix, "") : line;
+      const candidateBody = inlineOpener && flags.qualifiedSol ? line.replace(jsQualifiedSolution, "").trim()
+        : inlineOpener && flags.periodInline ? line.replace(jsExerciseInlineAnswerPeriod, "").trim()
+        : inlineOpener ? (strippedOpener !== line ? strippedOpener : event.unstarredLine.replace(jsInlineOpenerLinePrefix, "")).trim()
+        : emptyAtx || runningHeading ? ""
+        : atx ? line.replace(jsLineStart, "").trim()
+        : line.trim();
+      const candidateProof = candidateBody !== "" && jsProofHeading.test(candidateBody);
+      const candidateTerminator = candidateBody !== "" && jsInlineTerminator.test(candidateBody);
+      const laneBody = !inlineOpener && jsBareAnswerCounter.test(line)
+        && !(inExercise && !atx && /^ *\d+[.。] *$/u.test(line)) ? "" : candidateBody;
+
+      if (mode === "section") {
+        if (!isAssessmentContextLine && flags.reopensSection && !sectionAnswer) {
+          mode = "none";
+        } else {
+          chunkSealed.add(chunkIndex);
+          if (flags.sectionTerminator) mode = "none";
+          if (flags.opensExercise) inExercise = true;
+          else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+          if (flags.opensWorkedExample) inWorkedExample = true;
+          else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+            inWorkedExample = false;
+          }
+          continue;
+        }
+      }
+
+      if (mode === "inline" && blankPending && (laneBody !== "" || sectionAnswer) && !candidateProof) {
+        mode = "none";
+        blankPending = false;
+        lastInlineBody = "";
+      }
+
+      if ((mode === "inline" || mode === "inline_proof") && candidateProof && !inlineOpener && !sectionAnswer) {
+        blankPending = false;
+        mode = "inline_proof";
+        chunkSealed.add(chunkIndex);
+        lastInlineBody = laneBody;
+        if (candidateTerminator) {
+          mode = "none";
+          lastInlineBody = "";
+        }
+        if (flags.opensExercise) inExercise = true;
+        else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+        if (flags.opensWorkedExample) inWorkedExample = true;
+        else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+          inWorkedExample = false;
+        }
+        continue;
+      }
+
+      const numberedExerciseAfterAnswer = mode === "inline" && !inlineOpener
+        && jsNumberedExerciseInstruction.test(line)
+        && (jsInlineTerminator.test(lastInlineBody)
+          || jsInlineTerminal.test(lastInlineBody) && !jsInlineFallbackBlocked.test(lastInlineBody));
+      if ((mode === "inline" || mode === "inline_proof") && !sectionAnswer && !inlineOpener
+        && (flags.opensExercise || flags.opensPublic || numberedExerciseAfterAnswer)) {
+        mode = "none";
+        blankPending = false;
+        lastInlineBody = "";
+      }
+
+      if (sectionAnswer) {
+        mode = flags.sectionTerminator ? "none" : "section";
+        blankPending = false;
+        lastInlineBody = "";
+        chunkSealed.add(chunkIndex);
+      } else if (inlineOpener) {
+        chunkSealed.add(chunkIndex);
+        blankPending = false;
+        lastInlineBody = laneBody;
+        if (candidateProof) mode = candidateTerminator ? "none" : "inline_proof";
+        else if (candidateTerminator) mode = "none";
+        else mode = "inline";
+      } else if (flags.unconditionalAnswer || sealedExplanation) {
+        chunkSealed.add(chunkIndex);
+      } else if (mode === "inline" || mode === "inline_proof") {
+        chunkSealed.add(chunkIndex);
+        if (laneBody !== "") lastInlineBody = laneBody;
+        if (candidateTerminator) {
+          mode = "none";
+          blankPending = false;
+          lastInlineBody = "";
+        }
+      }
+
+      if (flags.opensExercise) inExercise = true;
+      else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+      if (flags.opensWorkedExample) inWorkedExample = true;
+      else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+        inWorkedExample = false;
+      }
+    }
+
+    // Auxiliary Vision blocks remain strictly isolated within their own chunk.
+    for (const auxLines of info.blocks.slice(1)) {
+      const auxContent = auxLines.filter(entry => entry.contentLine);
+      if (auxContent.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+        && jsAssessmentSolutionsContext.test(auxContent[index + 1]?.line ?? ""))) {
+        chunkSealed.add(chunkIndex);
+        break;
+      }
+      for (const auxEntry of auxLines) {
+        const auxFlags = classifyArchivePdfLine(auxEntry, false);
+        const auxSectionAnswer = auxFlags.opensSection && !(inExercise && auxFlags.exerciseException)
+          && !(inWorkedExample && auxFlags.expLabel);
+        const auxSealedExplanation = auxFlags.expLabel && !inWorkedExample;
+        const auxInlineOpener = !auxEntry.emptyAtx && !auxSectionAnswer
+          && (auxFlags.unconditionalAnswer || auxSealedExplanation
+            || jsExerciseInlineAnswer.test(auxEntry.line)
+              && (inExercise || !inWorkedExample && jsExerciseInlineAnswerWithBody.test(auxEntry.line))
+              && (!inWorkedExample || !auxFlags.expLabel));
+        if (auxFlags.unconditionalAnswer || auxSectionAnswer || auxSealedExplanation || auxInlineOpener) {
+          chunkSealed.add(chunkIndex);
+          break;
+        }
+      }
+    }
+  }
+
+  if (state) {
+    state.inExercise = inExercise;
+    state.inWorkedExample = inWorkedExample;
+    state.previousNumberedQuestion = previousNumberedQuestion;
+  }
+
+  return rows.filter((_, index) => !chunkSealed.has(index));
+}
+
+export type ArchivedSealSpan = { first_page: number; reopen_page: number | null; chunk_id: string | null };
+
+export async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string,
+  archivedSpans: Map<string, ArchivedSealSpan[]>) {
   // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
-  const [chunk] = await tx<SourceChunk[]>`SELECT c.id,c.source_id AS "sourceId",c.source_version AS "sourceVersion",
+  const [row] = await tx<Array<SourceChunk & { mime: string }>>`
+    ${publicPdfSealBoundaries(tx, scope.workspaceId, { chunkId: id })}
+    SELECT c.id,c.source_id AS "sourceId",c.source_version AS "sourceVersion",
+    s.mime AS mime,
     c.page,c.slide_label AS "slideLabel",c.start_ms AS "startMs",c.end_ms AS "endMs",c.text,c.image_object_key AS "imageObjectKey"
     FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
@@ -19,8 +1592,31 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
       AND graph.owner_user_id=${scope.ownerUserId}
     WHERE c.id=${id} AND c.source_version::text=graph.source_versions->>s.id::text
       AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+      AND ${publicPdfChunkPredicate(tx, { checkArchive: false })}
     FOR SHARE OF c,s,v,m`;
-  return chunk?.id === id ? chunk : undefined;
+  if (row?.id !== id) return undefined;
+  const { mime, ...chunk } = row;
+  if (mime !== "application/pdf") return chunk;
+  if (!isPublicSourceChunk(row)) return undefined;
+  if (chunk.page == null) return chunk;
+
+  // The source share lock from the citation read lasts through backfill, blocking
+  // chunk replacements. Reuse only page boundaries, keeping cited texts streamed.
+  const key = `${chunk.sourceId}:${chunk.sourceVersion}`;
+  let spans = archivedSpans.get(key);
+  if (!spans) {
+    const version = tx`c.source_id=${chunk.sourceId} AND c.source_version=${chunk.sourceVersion}`;
+    spans = await tx<ArchivedSealSpan[]>`WITH ${archivedPdfSealSpans(tx, version)}
+      SELECT first_page,reopen_page,chunk_id FROM pdf_archive_sealed_spans`;
+    archivedSpans.set(key, spans);
+  }
+  const page = chunk.page;
+  if (spans.some(span => (span.chunk_id == null || span.chunk_id === id)
+    && span.first_page <= page && (span.reopen_page == null || page < span.reopen_page))) {
+    return undefined;
+  }
+  return chunk.imageObjectKey !== null && spans.some(span => span.chunk_id != null && span.first_page === page)
+    ? { ...chunk, imageObjectKey: null } : chunk;
 }
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.
@@ -47,6 +1643,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       AND graph.source_versions->>${sourceId}=${String(sourceVersion)} AND missing.node_indexes IS NOT NULL
     ORDER BY graph.course_id FOR UPDATE OF graph`;
   let evidenceStageReady = false;
+  const archivedSpans = new Map<string, ArchivedSealSpan[]>();
   for (const { course_id: courseId, node_indexes: nodeIndexes } of graphs) {
     const [graph] = await tx`SELECT snapshot FROM opening_course_knowledge
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
@@ -69,7 +1666,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       const node = parsed.data.nodes[index]!;
       const evidenceIds = new Set(node.evidenceChunkIds);
       if (evidenceIds.size === 1) {
-        const chunk = await readCitedChunk(tx, scope, courseId, node.evidenceChunkIds[0]!);
+        const chunk = await readCitedChunk(tx, scope, courseId, node.evidenceChunkIds[0]!, archivedSpans);
         const definition = chunk && knowledgeNodeDefinition(node, [chunk]);
         if (!definition) continue;
         const bytes = Buffer.byteLength(JSON.stringify(definition)) + node.id.length + 4;
@@ -89,7 +1686,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
       }
       let complete = true;
       for (const id of evidenceIds) {
-        const chunk = await readCitedChunk(tx, scope, courseId, id);
+        const chunk = await readCitedChunk(tx, scope, courseId, id, archivedSpans);
         const content = chunk && serializeKnowledgeEvidence(chunk);
         if (!content) { complete = false; break; }
         const sortKey = Buffer.from(content, "utf16le").swap16();

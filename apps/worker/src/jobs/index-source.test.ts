@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { OpeningJobRecord, SourceIndexSnapshot } from "@aistudy/database";
+import { createOpeningSourceEmbeddingsRepository, type OpeningJobRecord, type SourceIndexSnapshot } from "@aistudy/database";
+import type { Sql } from "postgres";
 import type { BudgetedRepository } from "@aistudy/ai";
 import { createIndexSourceHandler, type IndexSourceDeps } from "./index-source";
 
@@ -44,6 +45,23 @@ describe("source indexing", () => {
     expect(await f.handler(job, { sourceId: "source", sourceVersion: 2 })).toMatchObject({ indexed: false });
     expect(f.embed).not.toHaveBeenCalled();
   });
+  it("does not send legacy PDF answer chunks to the embedding callback", async () => {
+    const db = (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT s.id,s.version")) return [{ id: "source", version: 2, privacy_epoch: 1 }];
+      if (query.includes("SELECT c.*,s.mime")) return [
+        { ...snapshot.chunks[0], source_id: "source", source_version: 2, mime: "application/pdf", text: "Official Answer 1\nx = 3." },
+        { ...snapshot.chunks[0], source_id: "source", source_version: 2, id: "public", mime: "application/pdf", text: "Public explanation." },
+      ];
+      return { query };
+    };
+    const f = fixture();
+    const repository = { ...f.repository, snapshot: createOpeningSourceEmbeddingsRepository(db as unknown as Sql).snapshot };
+    const handler = createIndexSourceHandler({ repository, embed: f.embed, config, budget: () => ({} as BudgetedRepository) });
+    await expect(handler(job, { sourceId: "source", sourceVersion: 2 })).resolves.toMatchObject({ indexed: true, segments: 1 });
+    expect(f.embed.mock.calls[0]?.[0].inputs).toEqual(["Public explanation."]);
+  });
+
   it("does not claim semantic indexing for an image with no extracted text", async () => {
     const f = fixture();
     vi.mocked(f.repository.snapshot).mockResolvedValue({ ...snapshot, chunks: [{ ...snapshot.chunks[0]!, text: "", imageObjectKey: "photo" }] });

@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from .physical_pages import texts_by_page, visual_kinds_by_page
+from .physical_pages import extract_physical_pages, texts_by_page, visual_kinds_by_page
 
 PDF = "application/pdf"
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -24,6 +24,11 @@ def parser():
     result.add_argument("--timeout-seconds", type=float, default=240)
     result.add_argument("--page-start", type=int)
     result.add_argument("--page-end", type=int)
+    result.add_argument("--initial-seal-mode", choices=("section_sealed", "inline_sealed", "inline_proof_sealed"))
+    result.add_argument("--initial-inline-proof-boundary", action="store_true")
+    result.add_argument("--initial-previous-numbered-question", action="store_true")
+    result.add_argument("--initial-in-worked-example", action="store_true")
+    result.add_argument("--initial-in-exercise", action="store_true")
     result.add_argument("--inspect-pdf", action="store_true")
     return result
 
@@ -119,6 +124,14 @@ def main(argv=None):
         parser().error("page-start and page-end must be supplied together")
     if args.page_start is not None and (args.mime != PDF or args.page_start < 1 or args.page_end < args.page_start):
         parser().error("invalid PDF physical page range")
+    if args.initial_seal_mode is not None and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial seal mode requires a non-first PDF page range")
+    if args.initial_in_worked_example and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial worked example requires a non-first PDF page range")
+    if args.initial_in_exercise and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial exercise requires a non-first PDF page range")
+    if args.initial_previous_numbered_question and (args.page_start is None or args.page_start == 1 or args.inspect_pdf):
+        parser().error("initial numbered question requires a non-first PDF page range")
     if args.mime not in (PDF, PPTX):
         print("unsupported mime", file=sys.stderr)
         return 3
@@ -142,20 +155,54 @@ def main(argv=None):
         page_range = (args.page_start, args.page_end) if args.page_start is not None else None
         conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
-        by_page = texts_by_page(conversion)
+        extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode,
+                                            initial_in_worked_example=args.initial_in_worked_example,
+                                            initial_in_exercise=args.initial_in_exercise,
+                                            initial_inline_proof_boundary=args.initial_inline_proof_boundary,
+                                            initial_previous_numbered_question=args.initial_previous_numbered_question)
+        by_page = extraction.texts_by_page
+        visual_kinds = extraction.visual_kinds_by_page if args.mime == PDF else {}
+        sealed_by_page = extraction.section_sealed_by_page
+        inline_sealed_by_page = extraction.inline_sealed_by_page
+        had_sealed_by_page = extraction.had_sealed_by_page
         if page_range:
             expected = set(range(args.page_start, args.page_end + 1))
             if set(by_page) != expected:
                 raise ValueError("parser did not preserve the requested physical page range")
-        visual_kinds = visual_kinds_by_page(conversion, by_page) if args.mime == PDF else {}
         for page_number, texts in sorted(by_page.items()):
             text = "\n".join(texts)
             if len(text) > TEXT_CAP:
                 text = text[:TEXT_CAP] + "\n…[truncated]"
-            pages.append({"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])})
+            entry = {"page": page_number, "text": text, "imagePath": None, "visualKinds": visual_kinds.get(page_number, [])}
+            if sealed_by_page.get(page_number):
+                entry["sectionSealedAtEnd"] = True
+            if inline_sealed_by_page.get(page_number) or had_sealed_by_page.get(page_number):
+                entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
+            if (inline_sealed_by_page.get(page_number)
+                    and not extraction.inline_proof_sealed_by_page.get(page_number)
+                    and not extraction.inline_answer_has_body_by_page.get(page_number)):
+                entry["inlineEmptyAtEnd"] = True
+            if extraction.inline_proof_sealed_by_page.get(page_number):
+                entry["inlineProofSealedAtEnd"] = True
+            if extraction.inline_proof_boundary_by_page.get(page_number):
+                entry["inlineProofBoundaryPendingAtEnd"] = True
+                completed_answer_digest = extraction.completed_inline_answer_digest_by_page.get(page_number)
+                if completed_answer_digest is not None:
+                    entry["completedInlineAnswerDigest"] = completed_answer_digest
+            if had_sealed_by_page.get(page_number):
+                entry["hadSealedContent"] = True
+            if args.mime == PDF and extraction.in_worked_example_by_page.get(page_number):
+                entry["inWorkedExampleAtEnd"] = True
+            if args.mime == PDF and extraction.in_exercise_by_page[page_number]:
+                entry["inExerciseAtEnd"] = True
+            numbered_question = extraction.previous_numbered_question_by_page.get(page_number, False)
+            if args.mime == PDF and (numbered_question or had_sealed_by_page.get(page_number)):
+                entry["previousNumberedQuestionAtEnd"] = numbered_question
+            pages.append(entry)
         if len(pages) > args.max_pages:
             raise ValueError("max-pages would truncate pages")
-        output = json.dumps({"pages": pages}, ensure_ascii=False, separators=(",", ":"))
+        payload = {"pages": pages, "tracksExerciseContext": True} if args.mime == PDF else {"pages": pages}
+        output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         if len(output.encode("utf-8")) > CAP:
             raise OverflowError("output size cap exceeded")
         print(output)

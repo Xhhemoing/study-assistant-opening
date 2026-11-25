@@ -6,10 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
 import { sourceRecordSchema, type ApiFailure, type SourceChunk, type SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
-import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository } from "@aistudy/database";
+import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository, PdfSegmentPage } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
 import { createSourceVisualRecognition } from "../runtime/source-visual-recognition";
-import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
+import { createParseSourceHandler, sealTextWithState, type ParseSourceVisualPageInput, type SealState } from "./parse-source";
 import { fetchPresignedSourceObject } from "./source-object-download";
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -75,6 +75,261 @@ async function deps(input: HandlerOverrides & { source?: SourceRecord; exitCode?
 }
 
 describe("parse source handler", () => {
+  it.each([1, 4].flatMap(segmentPages => ["Solution. The answer is 3.", "Answer: Yes. □"]
+    .map(answer => ({ segmentPages, answer }))))(
+    "carries a Vision answer's proof boundary with $segmentPages-page windows after $answer",
+    async ({ segmentPages, answer }) => {
+      const texts = [
+        "Problem 1. Prove the identity.\n" + answer,
+        "[原生提取]\nChapter 1 | Page 2\nProof. Private continuation.",
+        "A private intermediate step.\n\nThe proof concludes. ∎",
+        "Example 1: Factor the polynomial.\nSolution. The public derivation.\nProof. The worked proof is public.",
+      ];
+      const d = await deps({
+        segmentPages,
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const end = Number(argv[argv.indexOf("--page-end") + 1]);
+          return { exitCode: 0, stdout: JSON.stringify({ pages: texts.slice(start - 1, end).map((_, index) => ({
+            page: start + index, text: "", imagePath: null, visualKinds: ["scan"], inExerciseAtEnd: false,
+          })) }) };
+        },
+        recognizePage: async page => ({ text: texts[page.physicalPage - 1]!, imageObjectKey: "synthetic/page-" + page.physicalPage }),
+      });
+      await d.handler(job, { sourceId });
+      const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+      expect(chunks.map(chunk => chunk.page)).toEqual([1, 4]);
+      expect(chunks[0]).toMatchObject({ text: expect.stringContaining("Problem 1. Prove the identity."), imageObjectKey: null });
+      expect(chunks[1]?.text).toContain("Proof. The worked proof is public.");
+      expect(d.argvs().some(argv =>
+        argv[argv.indexOf("--page-start") + 1] === "2" && argv.includes("--initial-inline-proof-boundary"))).toBe(true);
+    },
+  );
+
+  it.each([1, 4])("uses the same-page native answer boundary for Vision with %i-page windows", async segmentPages => {
+    const pages = [
+      { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+        inlineSealedAtEnd: false, inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false },
+      { page: 2, text: "The private derivation continues.", imagePath: null, visualKinds: [] },
+      { page: 3, text: "The private derivation ends. ∎", imagePath: null, visualKinds: [] },
+      { page: 4, text: "The next topic is public.", imagePath: null, visualKinds: [] },
+    ];
+    const recognizePage = vi.fn(async () => ({
+      text: "[图片描述]\nProof. The derivation begins.", imageObjectKey: "vision/proof",
+    }));
+    const d = await deps({ segmentPages, recognizePage, runner: async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+    } });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(chunks.filter(chunk => chunk.page !== 1).map(chunk => chunk.page)).toEqual([4]);
+    expect(chunks.every(chunk => chunk.imageObjectKey === null)).toBe(true);
+  });
+
+  it("clears a native answer boundary when Vision closes its same-page proof", async () => {
+    const publicProof = "Proof. This separate proof is public.";
+    const publicEnd = "This is the conclusion of the public proof. ∎";
+    const pages = [
+      { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true,
+        inlineSealedAtEnd: false, inlineProofBoundaryPendingAtEnd: true, previousNumberedQuestionAtEnd: false },
+      { page: 2, text: publicProof, imagePath: null, visualKinds: [] },
+      { page: 3, text: publicEnd, imagePath: null, visualKinds: [] },
+    ];
+    const d = await deps({ segmentPages: 1, runner: async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":3}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, start) }) };
+    }, recognizePage: async () => ({
+        text: "[图片描述]\nProof. The private proof ends. Q.E.D.", imageObjectKey: "vision/proof",
+      }) });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(chunks.filter(chunk => chunk.page !== 1).map(chunk => chunk.text)).toEqual([publicProof, publicEnd]);
+  });
+
+  it("replays a published proof boundary recorded without an active seal when cached Vision is unavailable", async () => {
+    const publicText = "Chapter 2: Rings\nThe rest of this chapter is public.";
+    const pages = [
+      { page: 1, text: "Problem 1. Prove the identity.", imagePath: null, visualKinds: ["picture"] },
+      { page: 2, text: "Page 2 of 4\nProof. Private continuation.", imagePath: null, visualKinds: [] },
+      { page: 3, text: "The equality holds. □", imagePath: null, visualKinds: [] },
+      { page: 4, text: publicText, imagePath: null, visualKinds: [] },
+    ];
+    const d = await deps({
+      segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {},
+        readPageSeals: async (_scope, range) => range.pageStart !== 1 ? [] : [{
+          page: 1, text: "", imagePath: null, visualKinds: ["picture"],
+          inlineProofBoundaryPendingAtEnd: true, publicationSealCommitted: true,
+        }] },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":4}' };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const end = Number(argv[argv.indexOf("--page-end") + 1]);
+        return { exitCode: 0, stdout: JSON.stringify({ pages: pages.slice(start - 1, end) }) };
+      },
+    });
+    await d.handler(job, { sourceId });
+    const chunks = (d.replaceInput() as { chunks: NewSourceChunk[] }).chunks;
+    expect(chunks.map(chunk => chunk.text)).toEqual(["Page 2 of 4", publicText]);
+    expect(d.argvs().some(argv =>
+      argv[argv.indexOf("--page-start") + 1] === "2" && argv.includes("--initial-inline-proof-boundary"))).toBe(true);
+  });
+
+  it("persists a confirmed native section seal when Vision fails on its public prefix", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const d = await deps({
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"],
+          sectionSealedAtEnd: true, hadSealedContent: true },
+        { page: 2, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const markers = save.mock.calls.filter(([, identity]) => identity.parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, identity, segment]) => [identity.pageStart, segment])).toEqual([[1, {
+      state: "ready", pages: [expect.objectContaining({
+        page: 1, hadSealedContent: true, publicationSealHadPublicPrefix: true,
+        sectionSealedAtEnd: true, publicationSealCommitted: false,
+      })],
+    }]]);
+    expect(d.replaceInput()).toBeUndefined();
+  });
+
+  it("fences the later scan whose cache read fails before the renderer yields the first picture", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const reads: number[] = [];
+    const visual = createSourceVisualRecognition({
+      repository: {
+        read: async (_scope, { physicalPage }) => {
+          reads.push(physicalPage);
+          if (physicalPage === 2) throw new Error("Scan cache unavailable");
+          return null;
+        },
+        save: vi.fn(), assertCurrent: vi.fn(), ledger: vi.fn(), releasedReservation: vi.fn(),
+      },
+      gateway: { call: vi.fn() }, budget: vi.fn(), storage: { finalKey: () => "final" }, renderPdf: vi.fn(),
+    });
+    const d = await deps({
+      pageCount: 3,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "123", imagePath: null, visualKinds: ["scan"] },
+        { page: 3, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePages: visual.recognizePages,
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Scan cache unavailable");
+    expect(reads).toEqual([1, 2]);
+    const markers = save.mock.calls.filter(([, identity]) => identity.parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, identity, segment]) => [identity.pageStart, segment])).toEqual([[2, {
+      state: "ready", pages: [expect.objectContaining({ page: 2, publicationSealUnknown: true, publicationSealCommitted: false })],
+    }]]);
+    expect(d.replaceInput()).toBeUndefined();
+  });
+
+  it.each([
+    { sourceOfSeal: "later native page", sealPage: 2, mode: "section" },
+    { sourceOfSeal: "archived Vision", sealPage: 1, mode: "inline" },
+  ])("persists a confirmed seal from $sourceOfSeal when recognition aborts the window", async ({ sealPage, mode }) => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const archivedText = "[原生提取]\nChapter 2: Geometry\n\n[视觉转写与描述]\n[原图忠实转写]\nChapter 2: Geometry\nSolution:";
+    const d = await deps({
+      pageCount: 3,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      ...(mode === "inline" ? { published: [{
+        id: "saved-page", sourceId, sourceVersion: 7, page: 1, slideLabel: null, startMs: null, endMs: null,
+        text: archivedText, imageObjectKey: "archived/1",
+      }] } : {}),
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "", imagePath: null, visualKinds: [],
+          ...(mode === "section" ? { hadSealedContent: true, sectionSealedAtEnd: true } : {}) },
+        { page: 3, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const markers = save.mock.calls.filter(([, { parserProfile }]) => parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, { pageStart }, segment]) => [pageStart, segment])).toEqual([[sealPage, {
+      state: "ready", pages: [expect.objectContaining({
+        hadSealedContent: true, publicationSealHadPublicPrefix: mode === "inline",
+        sectionSealedAtEnd: mode === "section", inlineSealedAtEnd: mode === "inline", publicationSealUnknown: false,
+      })],
+    }]]);
+  });
+
+  it("recovers a native-only seal on the first retry after Vision fails on an earlier page", async () => {
+    const markers = new Map<number, PdfSegmentPage>();
+    const segments: OpeningPdfSegmentsRepository = {
+      assertCurrent: async () => {},
+      read: async () => null,
+      readPageSeals: async (_scope, { pageStart, pageEnd }) => [...markers.values()]
+        .filter(({ page }) => page >= pageStart && page <= pageEnd),
+      save: async (_scope, { parserProfile, pageStart }, segment) => {
+        if (parserProfile === "pdf-publication-page-seal-v1" && segment.state === "ready") markers.set(pageStart, segment.pages[0]!);
+      },
+    };
+    const first = await deps({
+      pageCount: 3, segments,
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Public geometry introduction.", visualKinds: ["picture"], imagePath: null },
+        { page: 2, text: "", visualKinds: [], imagePath: null, hadSealedContent: true, sectionSealedAtEnd: true },
+        { page: 3, text: "5 units.", imagePath: null },
+      ] }),
+      recognizePage: async () => { throw new Error("Vision failed"); },
+    });
+    await expect(first.handler(job, { sourceId })).rejects.toThrow("Vision failed");
+    const marker = markers.get(2)!;
+    expect(marker).toMatchObject({ hadSealedContent: true, sectionSealedAtEnd: true, publicationSealHadPublicPrefix: false });
+    expect(marker.visualKinds).toBeUndefined();
+
+    const texts = ["Public geometry introduction.", "Chapter 2: Geometry\nPublic prose.", "Public continuation."];
+    const retry = await deps({
+      pageCount: 3, segments,
+      stdout: JSON.stringify({ pages: texts.map((text, index) => ({ page: index + 1, text, imagePath: null, visualKinds: [] })) }),
+    });
+    await expect(retry.handler(job, { sourceId })).resolves.toEqual({ pages: 3 });
+    expect(retry.replaceInput()).toMatchObject({
+      chunks: texts.map((text, index) => ({ page: index + 1, text, imageObjectKey: null })),
+      publicationSeals: [expect.objectContaining({ page: 2, hadSealedContent: false })],
+    });
+    expect(retry.warnings).toEqual([]);
+  });
+
+  it("keeps a verified archived scan outside the implicated visual inputs", async () => {
+    const save = vi.fn<OpeningPdfSegmentsRepository["save"]>();
+    const batch = vi.fn(async function* (inputs: ParseSourceVisualPageInput[]) {
+      expect(inputs.map(input => input.physicalPage)).toEqual([1, 3]);
+      yield Promise.reject(new Error("Page 3 cache unavailable"));
+    });
+    const d = await deps({
+      pageCount: 4,
+      segments: { assertCurrent: async () => {}, read: async () => null, readPageSeals: async () => [], save },
+      published: [{ id: "saved-page", sourceId, sourceVersion: 7, page: 2, slideLabel: null, startMs: null, endMs: null,
+        text: "[视觉转写与描述]\n[原图忠实转写]\nPublic geometry notes.", imageObjectKey: "archived/2" }],
+      stdout: JSON.stringify({ pages: [
+        { page: 1, text: "Chapter 2: Geometry", imagePath: null, visualKinds: ["picture"] },
+        { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
+        { page: 3, text: "123", imagePath: null, visualKinds: ["scan"] },
+        { page: 4, text: "5 units.", imagePath: null, visualKinds: [] },
+      ] }),
+      recognizePages: batch,
+    });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("Page 3 cache unavailable");
+    const markers = save.mock.calls.filter(([, { parserProfile }]) => parserProfile === "pdf-publication-page-seal-v1");
+    expect(markers.map(([, { pageStart }, segment]) => [pageStart, segment])).toEqual([[3, {
+      state: "ready", pages: [expect.objectContaining({ publicationSealUnknown: true, hadSealedContent: false })],
+    }]]);
+  });
+
   it("reports low quality on a saved legacy page preserved beyond the UTF-16 staging limit", async () => {
     const legacyText = "😀".repeat(51_000) + "\uFFFD".repeat(2_000);
     const saved = { id: "00000000-0000-4000-8000-000000000004", sourceId, sourceVersion: 7, page: 1,
@@ -215,26 +470,26 @@ describe("parse source handler", () => {
       {page:2,text:"[原生提取]\noriginal caption\n\n[视觉转写与描述]\n转写：∫₀¹ x² dx；描述：图中箭头向右",imageObjectKey:"trusted/page-2"},
     ]});
   });
-  it("publishes a native PDF page and an honestly described blank page together", async () => {
+  it("publishes a native PDF page and a blank-page description without an unverified scan image", async () => {
     const description = "该页为空白页，没有可见文字或图形。";
     const recognizePage = vi.fn(async () => {
       const result = parseSourceVisualRecognitionOutput(JSON.stringify({
         transcription: "", description, uncertainties: [], contentKinds: [],
       }));
-      return { text: result.description, imageObjectKey: "trusted/page-2" };
+      return { text: "【图表观察描述，非原文或解答】\n" + result.description, imageObjectKey: "trusted/page-2" };
     });
     const d = await deps({ recognizePage, stdout: JSON.stringify({ pages: [
       { page: 1, text: "native prose", imagePath: null, visualKinds: [] },
       { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
     ] }) });
-    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2, warnings: 1, degraded: true });
     expect(recognizePage).toHaveBeenCalledOnce();
     expect(recognizePage).toHaveBeenCalledWith(expect.objectContaining({
       physicalPage: 2, nativeText: "", visualKinds: ["scan"],
     }));
     expect(d.replaceInput()).toMatchObject({ chunks: [
       { page: 1, text: "native prose", imageObjectKey: null },
-      { page: 2, text: `[视觉转写与描述]\n${description}`, imageObjectKey: "trusted/page-2" },
+      { page: 2, text: `[视觉转写与描述]\n【图表观察描述，非原文或解答】\n${description}`, imageObjectKey: null },
     ] });
     expect(d.states).toEqual(["ready"]);
   });
@@ -242,12 +497,12 @@ describe("parse source handler", () => {
     const d = await deps({ pageCount: 3, stdout: JSON.stringify({ pages: [
       { page: 1, text: "Native table caption", imagePath: null, visualKinds: ["table"] },
       { page: 2, text: "  ", imagePath: null },
-      { page: 3, text: "Readable native page", imagePath: null },
+      { page: 3, text: "Chapter 2: Readable native section", imagePath: null },
     ] }) });
     await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3, warnings: 2, degraded: true });
     expect(d.replaceInput()).toMatchObject({ chunks: [
       { page: 1, text: "Native table caption", imageObjectKey: null },
-      { page: 3, text: "Readable native page", imageObjectKey: null },
+      { page: 3, text: "Chapter 2: Readable native section", imageObjectKey: null },
     ] });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 1–2 页未能识别，可以重新解析", retryable: true }]);
   });
@@ -282,7 +537,7 @@ describe("parse source handler", () => {
     const modelSnapshot = { id: "vision", providerId: "test", modelName: "vision", inputCentsPerMillion: 10, outputCentsPerMillion: 50 };
     const call = vi.fn<ModelGateway["call"]>(async (_scope, _task, options) => {
       const page = options.input.imageParts[0]!.physicalPage;
-      const output = { text: JSON.stringify({ transcription: `Transcription of page ${page}`, description: "",
+      const output = { text: JSON.stringify({ transcription: `Chapter ${page}: Segment overview`, description: "",
         uncertainties: [], contentKinds: ["text"] }), requestId: null, citedChunkIds: [], candidates: [], inputTokens: 1, outputTokens: 1 };
       options.onModel?.({ modelSnapshot, provider: { complete: async () => output },
         inputCentsPerMillion: 10, outputCentsPerMillion: 50 }, { fallback: false });
@@ -293,7 +548,7 @@ describe("parse source handler", () => {
     const save = vi.fn(async () => {});
     const visual = createSourceVisualRecognition({
       repository: { read: async (_scope, { physicalPage }) => physicalPage === cachedPage ? {
-        result: { transcription: `Transcription of page ${cachedPage}`, description: "", uncertainties: [], contentKinds: ["text"] },
+        result: { transcription: `Chapter ${cachedPage}: Segment overview`, description: "", uncertainties: [], contentKinds: ["text"] },
         modelSnapshot, operationId: "saved-operation", imageObjectKey: "final",
       } : null, save, assertCurrent: async () => {},
         ledger: async () => "unsent", releasedReservation: async () => null },
@@ -310,7 +565,7 @@ describe("parse source handler", () => {
       ...(publishedPage ? {
         segments: { assertCurrent: async () => {}, read: async () => ({ state: "ready", pages }), save: async () => {} },
         published: [{ id: "published", sourceId, sourceVersion: 7, page: publishedPage, slideLabel: null,
-          startMs: null, endMs: null, text: `Transcription of page ${publishedPage}`, imageObjectKey: "final" }],
+          startMs: null, endMs: null, text: `Chapter ${publishedPage}: Segment overview`, imageObjectKey: "final" }],
       } : {}),
     });
     vi.mocked(readFile).mockClear();
@@ -323,7 +578,7 @@ describe("parse source handler", () => {
       .toEqual(batches.flat().map(page => [page]));
     expect(save).toHaveBeenCalledTimes(batches.flat().length);
     expect(d.replaceInput()).toMatchObject({ chunks: pages.map(({ page }) => ({
-      page, text: expect.stringContaining(`Transcription of page ${page}`), imageObjectKey: "final",
+      page, text: expect.stringContaining(`Chapter ${page}: Segment overview`), imageObjectKey: "final",
     })) });
   });
 
@@ -410,7 +665,7 @@ describe("parse source handler", () => {
   it.each([
     { pageCount: 2, cachedPages: [2], missingPages: "1", warnings: 1 },
     { pageCount: 6, cachedPages: [2, 3, 5], missingPages: "1、4、6", warnings: 3 },
-  ])("publishes cached scans after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
+  ])("publishes cached scans with section headings after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
     const call = vi.fn<ModelGateway["call"]>(async () => { throw new OpeningModelRoutingError("vision route unavailable"); });
     const renderPdf = vi.fn<NonNullable<Parameters<typeof createSourceVisualRecognition>[0]["renderPdf"]>>(
       async (_bytes, requests) => requests.map(request => ({ ...request, mediaType: "image/png", data: "data:image/png;base64,cGFnZQ==" })),
@@ -418,7 +673,7 @@ describe("parse source handler", () => {
     const visual = createSourceVisualRecognition({
       repository: {
         read: async (_scope, { physicalPage }) => cachedPages.includes(physicalPage) ? {
-          result: { transcription: `Cached readable transcription for page ${physicalPage}`, description: "", uncertainties: [], contentKinds: ["text"] },
+          result: { transcription: `Section ${physicalPage}: Cached readable section`, description: "", uncertainties: [], contentKinds: ["text"] },
           modelSnapshot: { id: "vision", providerId: "test", modelName: "vision", inputCentsPerMillion: 10, outputCentsPerMillion: 50 },
           operationId: `stored-page-${physicalPage}`, imageObjectKey: "final",
         } : null,
@@ -443,7 +698,8 @@ describe("parse source handler", () => {
 
     expect(d.states).toEqual(["ready"]);
     expect(d.replaceInput()).toMatchObject({ chunks: cachedPages.map(page => ({
-      page, text: expect.stringContaining(`Cached readable transcription for page ${page}`), imageObjectKey: "final",
+      page, text: expect.stringContaining(`Section ${page}: Cached readable section`),
+      imageObjectKey: cachedPages.includes(page - 1) ? "final" : null,
     })) });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: `第 ${missingPages} 页未能识别，可以重新解析`, retryable: true }]);
     expect(call).toHaveBeenCalledExactlyOnceWith(scope, "materials.recognize-page", expect.objectContaining({
@@ -822,5 +1078,518 @@ describe("parse source handler", () => {
       objectKey: v1MixedKey,
     })).resolves.toEqual({ pages: 1 });
     expect(presignedKeys).toEqual([v2CanonicalKey, v2MixedKey]);
+  });
+
+  it("normalizes adjacent emphasis spans and pathological unclosed openers in strict linear time", () => {
+    for (const [input, expectedAnswer] of [
+      ["**Model** **Answer**: No.", "Model Answer: No."],
+      ["**Answer:** **No.**", "Answer: No."],
+      ["__Answer:__ __No.__", "Answer: No."],
+      ["**Answer:** **2**3.**", "Answer: 2**3."],
+      ["**Answer: 2**3.**", "Answer: 2**3."],
+      ["**Answer: 2 ** 3.**", "Answer: 2 ** 3."],
+      ["Answer: 2**3 + 4**5.", "Answer: 2**3 + 4**5."],
+      ["Answer: x__1 + y__2.", "Answer: x__1 + y__2."],
+    ] as const) {
+      const state: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+      let completedDigest: string | undefined;
+      expect(sealTextWithState(`1. Find x.\n${input}`, state, undefined, undefined, undefined, digestValue => {
+        completedDigest = digestValue;
+      })).toBe("1. Find x.");
+      expect(state.mode).toBe("none");
+      expect(state.inlineProofBoundaryPending).toBe(true);
+      expect(completedDigest).toBe(createHash("sha256").update(expectedAnswer).digest("hex"));
+    }
+
+    for (const pathological of [
+      "**a ".repeat(10_000),
+      "__a ".repeat(10_000),
+      `*Proof ${" *".repeat(5_000)}`,
+      `Answer: No.\nProof. Starts.\n*Q.E.D.*${" ".repeat(20_000)}continuing prose`,
+      `Answer Key\n*End of Answers.*${" ".repeat(20_000)}continuing prose`,
+    ]) {
+      const state: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+      const started = performance.now();
+      const output = sealTextWithState(pathological, state);
+      const elapsedMs = performance.now() - started;
+      if (pathological.startsWith("Answer: No.")) {
+        expect(output).toBe("");
+        expect(state.mode).toBe("inline_proof_sealed");
+      } else if (pathological.startsWith("Answer Key")) {
+        expect(output).toBe("");
+        expect(state.mode).toBe("section_sealed");
+      } else {
+        expect(output).toBe(pathological);
+      }
+      expect(elapsedMs).toBeLessThan(50);
+    }
+  });
+
+  it("preserves affirmative current hasInlineAnswerBody against stale empty saved Answer: and closes empty repeated Vision Answer:", async () => {
+    const staleEmptySaved: SourceChunk = {
+      id: "00000000-0000-4000-8000-000000000091",
+      sourceId,
+      sourceVersion: 7,
+      page: 1,
+      slideLabel: null,
+      startMs: null,
+      endMs: null,
+      text: "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[图片描述]\nProof. An unfinished derivation.",
+      imageObjectKey: "vision/p1-stale-empty",
+    };
+    const makeSegments = (): OpeningPdfSegmentsRepository => {
+      const map = new Map<string, { state: "ready" | "failed"; pages: PdfSegmentPage[] }>();
+      return {
+        read: async (_s, id) => map.get(`${id.parserProfile}/${id.pageStart}-${id.pageEnd}`) ?? null,
+        readPageSeals: async () => [],
+        save: async (_s, id, val) => { map.set(`${id.parserProfile}/${id.pageStart}-${id.pageEnd}`, val); },
+      };
+    };
+
+    const withCurrentBody = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      published: [staleEmptySaved],
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Answer: x = 1", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Still private proof continuation.", imagePath: null, visualKinds: [] }
+            : { page: 3, text: "Chapter 2: Rings\nPublic theorem.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(withCurrentBody.handler({ ...job, claimToken: "claim-p1-3" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 3 });
+    expect(withCurrentBody.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+    ]);
+    expect((withCurrentBody.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[3, "Chapter 2: Rings\nPublic theorem."]]);
+
+    const withEmptyRepeatedVision = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 2 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Theorem 1.1: Groups.\nAnswer:\n", imagePath: null, visualKinds: ["picture"] }
+          : { page: 2, text: "Public prose after the answer.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+      recognizePage: async () => ({
+        text: "[转写]\nAnswer:\n[图片描述]\nProof. An independent derivation.",
+        imageObjectKey: "vision/p1-empty-repeat",
+      }),
+    });
+    await expect(withEmptyRepeatedVision.handler({ ...job, claimToken: "claim-p2-5" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 2 });
+    expect((withEmptyRepeatedVision.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[1, "Theorem 1.1: Groups."], [2, "Public prose after the answer."]]);
+
+    const recognize = vi.fn(async () => ({
+      text: "[转写]\nAnswer: x = 1\n[图片描述]\nProof. An unfinished derivation.",
+      imageObjectKey: "vision/p1-populated-repeat",
+    }));
+    const withPopulatedTranscription = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Theorem 1.\nAnswer:\n", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+      recognizePage: recognize,
+    });
+    await expect(withPopulatedTranscription.handler({ ...job, claimToken: "claim-p2-5b" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(recognize).toHaveBeenCalledOnce();
+    expect(withPopulatedTranscription.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((withPopulatedTranscription.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
+
+    // P1 #1: Completed native answer + empty Vision [转写]\nAnswer: + auxiliary Proof upgrades to inline_proof_sealed.
+    for (const mode of ["live", "saved"] as const) {
+      const recognizeCompletedNative = vi.fn(async () => ({
+        text: "[转写]\nAnswer:\n[图片描述]\nProof. An unfinished derivation.",
+        imageObjectKey: "vision/p1-completed-native-empty-tx",
+      }));
+      const completedNativeEmptyTx = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        ...(mode === "saved" ? {
+          published: [{
+            id: "00000000-0000-4000-8000-000000000092",
+            sourceId,
+            sourceVersion: 7,
+            page: 1,
+            slideLabel: null,
+            startMs: null,
+            endMs: null,
+            text: "[原生提取]\nTheorem 1.\nAnswer: No.\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An unfinished derivation.",
+            imageObjectKey: "vision/p1-completed-native-empty-tx",
+          }],
+        } : {
+          recognizePage: recognizeCompletedNative,
+        }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const page = start === 1
+            ? { page: 1, text: "Theorem 1.\nAnswer: No.", imagePath: null, visualKinds: ["picture"] }
+            : start === 2
+              ? { page: 2, text: "Therefore the claim holds.", imagePath: null, visualKinds: [] }
+              : start === 3
+                ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+                : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(completedNativeEmptyTx.handler({ ...job, claimToken: `claim-r59-p1-1-${mode}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 4 });
+      if (mode === "live") expect(recognizeCompletedNative).toHaveBeenCalledOnce();
+      expect(completedNativeEmptyTx.argvs().filter(a => a.includes("--page-start")).map(a => ({
+        start: Number(a[a.indexOf("--page-start") + 1]),
+        seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+      }))).toEqual([
+        { start: 1, seed: undefined },
+        { start: 2, seed: "inline_proof_sealed" },
+        { start: 3, seed: "inline_proof_sealed" },
+        { start: 4, seed: undefined },
+      ]);
+      expect((completedNativeEmptyTx.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+        .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
+    }
+
+    // P1 #2: Stripped Docling inline_sealed page (text: "", inlineEmptyAtEnd: false) + saved auxiliary Proof upgrades to inline_proof_sealed.
+    const doclingStrippedSavedProof = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      published: [{
+        id: "00000000-0000-4000-8000-000000000093",
+        sourceId,
+        sourceVersion: 7,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: "[视觉转写与描述]\n[图片描述]\nProof. An unfinished derivation.",
+        imageObjectKey: "vision/p1-docling-stripped-aux-proof",
+      }],
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? {
+              page: 1,
+              text: "",
+              imagePath: null,
+              visualKinds: ["picture"],
+              hadSealedContent: true,
+              inlineSealedAtEnd: true,
+              inlineEmptyAtEnd: false,
+            }
+          : start === 2
+            ? { page: 2, text: "This intermediate sentence ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Still part of proof. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(doclingStrippedSavedProof.handler({ ...job, claimToken: "claim-r59-p1-2" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(doclingStrippedSavedProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((doclingStrippedSavedProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[4, "Chapter 2\nPublic prose."]]);
+
+    // P1 #3: Populated [转写]\nAnswer: x = 1 + empty auxiliary [图片描述]\nAnswer: + [不确定处]\nProof preserves body and upgrades to inline_proof_sealed.
+    for (const mode of ["live", "saved"] as const) {
+      const recognizeMultiAux = vi.fn(async () => ({
+        text: "[转写]\nAnswer: x = 1\n[图片描述]\nAnswer:\n[不确定处]\nProof. An unfinished derivation.",
+        imageObjectKey: "vision/p1-multi-aux",
+      }));
+      const multiAuxProof = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        ...(mode === "saved" ? {
+          published: [{
+            id: "00000000-0000-4000-8000-000000000094",
+            sourceId,
+            sourceVersion: 7,
+            page: 1,
+            slideLabel: null,
+            startMs: null,
+            endMs: null,
+            text: "[原生提取]\nTheorem 1.\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\n\n[图片描述]\nAnswer:\n\n[不确定处]\nProof. An unfinished derivation.",
+            imageObjectKey: "vision/p1-multi-aux",
+          }],
+        } : {
+          recognizePage: recognizeMultiAux,
+        }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const page = start === 1
+            ? { page: 1, text: "Theorem 1.\nAnswer:\n", imagePath: null, visualKinds: ["picture"] }
+            : start === 2
+              ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+              : start === 3
+                ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+                : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(multiAuxProof.handler({ ...job, claimToken: `claim-r59-p1-3-${mode}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 4 });
+      if (mode === "live") expect(recognizeMultiAux).toHaveBeenCalledOnce();
+      expect(multiAuxProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+        start: Number(a[a.indexOf("--page-start") + 1]),
+        seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+      }))).toEqual([
+        { start: 1, seed: undefined },
+        { start: 2, seed: "inline_proof_sealed" },
+        { start: 3, seed: "inline_proof_sealed" },
+        { start: 4, seed: undefined },
+      ]);
+      expect((multiAuxProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+        .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
+    }
+
+    // Round 60 P1 #1a: Live Vision retry on a mixed public+sealed page must not downgrade saved inline_proof_sealed to inline_sealed.
+    const recognizeWithoutProof = vi.fn(async () => ({
+      text: "[转写]\nTheorem 1.\nAnswer: x = 1\n[图片描述]\nDiagram",
+      imageObjectKey: "vision/p1-retry-omitted-proof",
+    }));
+    const liveRetryPreservesSavedProof = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      recognizePage: recognizeWithoutProof,
+      published: [{
+        id: "00000000-0000-4000-8000-000000000095",
+        sourceId,
+        sourceVersion: 7,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: "[原生提取]\nTheorem 1.\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nTheorem 1.\nAnswer: x = 1\n\n[图片描述]\nProof. An unfinished derivation.",
+        imageObjectKey: null,
+      }],
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Theorem 1.\nAnswer: x = 1", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(liveRetryPreservesSavedProof.handler({ ...job, claimToken: "claim-r60-p1-1a" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(recognizeWithoutProof).toHaveBeenCalledOnce();
+    expect(liveRetryPreservesSavedProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((liveRetryPreservesSavedProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([
+        [1, "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nTheorem 1."],
+        [4, "Chapter 2\nPublic prose."],
+      ]);
+
+    // Round 60 P1 #1b: Public prefix + Docling-stripped inline_sealed (inlineEmptyAtEnd: false) + live Vision auxiliary Proof upgrades to inline_proof_sealed.
+    const recognizeDoclingPublicPrefixProof = vi.fn(async () => ({
+      text: "[图片描述]\nProof. An unfinished derivation.",
+      imageObjectKey: "vision/p1-docling-public-prefix-proof",
+    }));
+    const doclingPublicPrefixLiveProof = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      recognizePage: recognizeDoclingPublicPrefixProof,
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? {
+              page: 1,
+              text: "Theorem 1.",
+              imagePath: null,
+              visualKinds: ["picture"],
+              hadSealedContent: true,
+              inlineSealedAtEnd: true,
+              inlineEmptyAtEnd: false,
+            }
+          : start === 2
+            ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(doclingPublicPrefixLiveProof.handler({ ...job, claimToken: "claim-r60-p1-1b" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(recognizeDoclingPublicPrefixProof).toHaveBeenCalledOnce();
+    expect(doclingPublicPrefixLiveProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((doclingPublicPrefixLiveProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
+
+    // Round 64 P2 #1: Worked example interrupted by running container headings keeps internal Solution: public.
+    const workedExample = "Worked Example 1: Factor the quadratic polynomial x^2 - 1 over the integers.";
+    const examplePages: PdfSegmentPage[] = [
+      { page: 1, text: `${workedExample}\nChapter 2: Algebra (第2张)\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+      { page: 2, text: `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+      { page: 3, text: `${workedExample}\nChapter 2: 第2张\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+    ];
+    const runningExampleRun = await deps({
+      segmentPages: 3,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: examplePages.length }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const end = Number(argv[argv.indexOf("--page-end") + 1]);
+        return { exitCode: 0, stdout: JSON.stringify({ pages: examplePages.slice(start - 1, end) }) };
+      },
+    });
+    await expect(runningExampleRun.handler({ ...job, claimToken: "claim-r64-p2-1" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 3 });
+    expect((runningExampleRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([
+        [1, `${workedExample}\nChapter 2: Algebra (第2张)\nSolution: 2张`],
+        [2, `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`],
+        [3, `${workedExample}\nChapter 2: 第2张\nSolution: 2张`],
+      ]);
+
+    // Round 65 & 66: Numbered answer/explanation delimiters carry inline seal when standalone and close when terminal body follows.
+    for (const label of [
+      "答案 1、", "答案 1。", "Answer to Exercise 1:", "Answer to Exercise #1:", "Answer to Review Question 1:",
+      "Solution to Practice Problem #2:", "Key to the Self-Check Exercise #1:", "Answer #1:", "Solution #1:",
+      "Official Solution #1.", "Official Solution to Practice Problem #1.", "Key 1:", "Solution to Exercise 1:", "解析 1。",
+    ]) {
+      const standaloneRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${label}`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : start === 2
+              ? { page: 2, text: seeded ? "" : "x = 2.", imagePath: null, visualKinds: [], hadSealedContent: Boolean(seeded) }
+              : { page: 3, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(standaloneRun.handler({ ...job, claimToken: `claim-r65-standalone-${label}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 3 });
+      expect((standaloneRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), label)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [3, "Chapter 2\nPublic prose.", null],
+        ]);
+    }
+    for (const doneLabel of [
+      "答案 1。x = 2。", "Key 1: x = 2.", "Answer to Exercise #1: x = 2.", "Answer to Review Question 1: Yes.",
+      "Solution to Practice Problem #2: x = 2.", "Key to the Self-Check Exercise #1: True.", "Official Solution #1. x = 2.",
+    ]) {
+      const completedRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${doneLabel}`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 2 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : { page: 2, text: seeded ? "" : "Public prose after answer.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(completedRun.handler({ ...job, claimToken: `claim-r65-done-${doneLabel}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 2 });
+      expect((completedRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), doneLabel)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [2, "Public prose after answer.", null],
+        ]);
+    }
+    for (const sectionLabel of ["Answers to Exercises #1-#5", "Answer to Review Questions 1-3", "Answer to Exercise:"]) {
+      const sectionRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${sectionLabel}\n1. x = 2.`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : start === 2
+              ? { page: 2, text: seeded === "section_sealed" ? "" : "2. y = 3.", imagePath: null, visualKinds: [],
+                hadSealedContent: seeded === "section_sealed", sectionSealedAtEnd: seeded === "section_sealed" }
+              : { page: 3, text: "Chapter 2: Groups\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(sectionRun.handler({ ...job, claimToken: `claim-r66-section-${sectionLabel}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 3 });
+      expect((sectionRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), sectionLabel)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [3, "Chapter 2: Groups\nPublic prose.", null],
+        ]);
+    }
   });
 });
