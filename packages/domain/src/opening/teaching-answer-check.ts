@@ -1,5 +1,6 @@
 import type { TeachingQuestionInteraction } from "@aistudy/contracts";
 import { checkArithmeticAnswer, equalArithmeticValues, evaluateArithmeticQuestion, parseArithmeticLiteral } from "./arithmetic-check";
+import { evaluateSymbolicTeachingAnswer, matchSavedChoiceSubmission, savedChoiceKeyIds } from "./symbolic-answer-bridge";
 
 /** The client renders the stem and option labels as Markdown; only content whose meaning survives rendering can be graded. */
 function keepsMeaningWhenRendered(question: string, interaction: TeachingQuestionInteraction | undefined): boolean {
@@ -13,9 +14,9 @@ function keepsMeaningWhenRendered(question: string, interaction: TeachingQuestio
 /** Independent evaluation of the pinned question and key; null means no authority. */
 export function evaluateTeachingAnswer(question: string, interaction: TeachingQuestionInteraction | undefined,
   key: string | null, answer: string): "correct" | "incorrect" | "unparseable" | null {
-  if (!keepsMeaningWhenRendered(question, interaction)) return null;
   const expected = evaluateArithmeticQuestion(question);
-  if (!expected || !interaction || !key?.trim()) return null;
+  if (expected === null) return evaluateSymbolicTeachingAnswer(question, interaction, key, answer);
+  if (!keepsMeaningWhenRendered(question, interaction) || !interaction || !key?.trim()) return null;
   if (interaction.kind === "numeric") {
     if (interaction.unit !== undefined || checkArithmeticAnswer(question, key) !== "correct") return null;
     const value = parseArithmeticLiteral(answer);
@@ -33,21 +34,8 @@ export function evaluateTeachingAnswer(question: string, interaction: TeachingQu
     return value && equalArithmeticValues(expected, value);
   });
   if (matches.length !== 1) return null;
-  const trimmed = key.trim();
-  const prefixIds = new Set(interaction.options.filter(option => {
-    for (const lead of ["", "(", "（"]) {
-      const start = lead + option.id;
-      if (!trimmed.startsWith(start)) continue;
-      let tail = trimmed.slice(start.length);
-      if (tail.startsWith(")") || tail.startsWith("）")) tail = tail.slice(1);
-      if (!tail || /^[\s.．、:：,，]/u.test(tail)) return true;
-    }
-    return false;
-  }).map(option => option.id));
+  const prefixIds = savedChoiceKeyIds(interaction.options, key);
   if (prefixIds.size > 1) return null;
   if (prefixIds.size === 1 ? !prefixIds.has(matches[0]!.id) : checkArithmeticAnswer(question, key) !== "correct") return null;
-  const submitted = interaction.options.filter(option => answer === `${option.id}. ${option.label}`);
-  if (submitted.length === 0) return "unparseable";
-  if (submitted.length > 1) return null;
-  return submitted[0]!.id === matches[0]!.id ? "correct" : "incorrect";
+  return matchSavedChoiceSubmission(interaction.options, answer, matches[0]!.id);
 }
