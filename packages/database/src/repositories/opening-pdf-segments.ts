@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { lockOpeningJobExecution, type OpeningJobScope } from "./opening-job-execution";
 import { OpeningSourceError } from "./opening-source-errors";
 
-export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; inlineProofSealedAtEnd?: boolean; inlineProofBoundaryPendingAtEnd?: boolean; completedInlineAnswerDigest?: string; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; previousNumberedQuestionAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" | "inline_proof_sealed" };
+export type PdfSegmentPage = { page: number; text: string; imagePath: null; visualKinds?: ("scan" | "formula" | "table" | "picture")[]; sectionSealedAtEnd?: boolean; inlineSealedAtEnd?: boolean; inlineEmptyAtEnd?: boolean; inlineProofSealedAtEnd?: boolean; inlineProofBoundaryPendingAtEnd?: boolean; completedInlineAnswerDigest?: string; hadSealedContent?: boolean; inWorkedExampleAtEnd?: boolean; previousNumberedQuestionAtEnd?: boolean; inExerciseAtEnd?: boolean; publicationSealUnknown?: boolean; publicationSealHadPublicPrefix?: boolean; publicationSealCommitted?: boolean; reopenedSection?: boolean; failedRangeBoundary?: true; withheldNativeDigest?: string; withheldNativeMode?: "section_sealed" | "inline_sealed" | "inline_proof_sealed" };
 export type PdfSegmentIdentity = { sourceId: string; sourceVersion: number; parserProfile: string; pageStart: number; pageEnd: number };
 export type PdfSegment = { state: "ready"; pages: PdfSegmentPage[]; requiresRevalidation?: true } | { state: "failed"; errorCode: "conversion_failed" | "timeout" | "invalid_output" };
 export type OpeningPdfSegmentsRepository = ReturnType<typeof createOpeningPdfSegmentsRepository>;
@@ -40,6 +40,9 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       || new Set(row.visualKinds).size !== row.visualKinds.length)) throw new TypeError("invalid PDF visual classification");
     if (row.sectionSealedAtEnd !== undefined && typeof row.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid PDF sectionSealedAtEnd metadata");
     if (row.inlineSealedAtEnd !== undefined && typeof row.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid PDF inlineSealedAtEnd metadata");
+    if (row.inlineEmptyAtEnd !== undefined && (typeof row.inlineEmptyAtEnd !== "boolean" || row.inlineEmptyAtEnd && (!row.inlineSealedAtEnd || row.inlineProofSealedAtEnd))) {
+      throw new TypeError("invalid PDF inlineEmptyAtEnd metadata");
+    }
     if (row.inlineProofBoundaryPendingAtEnd !== undefined && typeof row.inlineProofBoundaryPendingAtEnd !== "boolean") throw new TypeError("invalid PDF inlineProofBoundaryPendingAtEnd metadata");
     if (row.completedInlineAnswerDigest !== undefined && (row.inlineProofBoundaryPendingAtEnd !== true
       || typeof row.completedInlineAnswerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(row.completedInlineAnswerDigest))) {
@@ -66,6 +69,7 @@ export function validatePdfSegmentPages(value: unknown, start: number, end: numb
       ...(row.visualKinds === undefined ? {} : { visualKinds: row.visualKinds as PdfSegmentPage["visualKinds"] }),
       ...(row.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: row.sectionSealedAtEnd }),
       ...(row.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: row.inlineSealedAtEnd }),
+      ...(row.inlineEmptyAtEnd === undefined ? {} : { inlineEmptyAtEnd: row.inlineEmptyAtEnd }),
       ...(row.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: row.inlineProofBoundaryPendingAtEnd }),
       ...(row.completedInlineAnswerDigest === undefined ? {} : { completedInlineAnswerDigest: row.completedInlineAnswerDigest }),
       ...(row.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: row.inlineProofSealedAtEnd }),

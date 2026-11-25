@@ -37,15 +37,10 @@ _HEADING_LABELS = frozenset({"section_header", "title"})
 _CONTINUABLE_KINDS = frozenset({"definition", "theorem", "proof", "worked_example", "exercise", "solution_sealed"})
 
 _MD_HASH_PREFIX_RE = re.compile(r"^(?:#{1,6}\s+)+")
-_EMPHASIS_CLOSE_BOUNDARY = r"(?:$|[\s:：.,;!?。，；：！？)\]】）])"
-_BOLD_EMPHASIS_ATOM = rf"(?:[^\s*]|\*(?!\*)|\*\*(?!{_EMPHASIS_CLOSE_BOUNDARY})|\*\*+(?=[^\S\r\n]))"
-_UNDER_EMPHASIS_ATOM = rf"(?:[^\s_]|_(?!_)|__(?!{_EMPHASIS_CLOSE_BOUNDARY})|__+(?=[^\S\r\n]))"
-_PAIRED_BOLD_EMPHASIS_RE = re.compile(
-    rf"(^|[(\[【（:：\s])\*\*(?=\S)((?:{_BOLD_EMPHASIS_ATOM}|[^\S\r\n]+{_BOLD_EMPHASIS_ATOM})+)\*\*(?={_EMPHASIS_CLOSE_BOUNDARY})"
-)
-_PAIRED_UNDER_EMPHASIS_RE = re.compile(
-    rf"(^|[(\[【（:：\s])__(?=\S)((?:{_UNDER_EMPHASIS_ATOM}|[^\S\r\n]+{_UNDER_EMPHASIS_ATOM})+)__(?={_EMPHASIS_CLOSE_BOUNDARY})"
-)
+_EMPHASIS_OPEN_PREDECESSOR_RE = re.compile(r"[\s(\[【（:：]")
+_EMPHASIS_CLOSE_FOLLOWER_RE = re.compile(r"[\s:：.,;!?。，；：！？)\]】）]")
+_UNICODE_SPACE_RE = re.compile(r"\s")
+_LINE_BREAK_SPLIT_RE = re.compile(r"(\r\n|\r|\n)")
 _MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
 _CAPTION_NAME = r"(?:Figure|Fig\.?|Table|Tab\.?|Chart|Diagram|Scheme|Algorithm|Listing)"
 _CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE)
@@ -76,13 +71,13 @@ _CHINESE_REFERENCE_CLAUSE_RE = re.compile(r"[，,].*(?:可得|得到|显示|表�
 _SINGLE_EMPHASIS_AFTER = r"(?=$|[\s:：.,;!?。，；：！？—–)\]】）-])"
 _ANSWER_PROOF_STAR = (
     r"\*(?=[^\s*])(?:(?:Proof|Sketch\s+of\s+Proof)(?=\*|\b)|【\s*(?:证明|证|略证|续证)\s*】"
-    r"|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^*\r\n]*[^\s*])?\*"
-    + _SINGLE_EMPHASIS_AFTER
+    r"|(?:证明|略证|续证)(?=[\s*\d:：.．。—–(（-]|$)|证\s*[:：.．。])"
+    rf"(?:(?:[^*\r\n]*[^\s*])?\*{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s*]\*(?!\*)[.。]?$)"
 )
 _ANSWER_PROOF_UNDER = (
     r"_(?=[^\s_])(?:(?:Proof|Sketch\s+of\s+Proof)(?=_|\b)|【\s*(?:证明|证|略证|续证)\s*】"
-    r"|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])(?:[^_\r\n]*[^\s_])?_"
-    + _SINGLE_EMPHASIS_AFTER
+    r"|(?:证明|略证|续证)(?=[\s_\d:：.．。—–(（-]|$)|证\s*[:：.．。])"
+    rf"(?:(?:[^_\r\n]*[^\s_])?_{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s_]_(?!_)[.。]?$)"
 )
 _ANSWER_PROOF_HEADING_RE = re.compile(
     r"^(?:(?:Proof|Sketch\s+of\s+Proof)\b|【\s*(?:证明|证|略证|续证)\s*】"
@@ -210,7 +205,7 @@ def _single_emphasis_proof_branch(delim: str, not_delim: str, word_end: str) -> 
         r"|【\s*(?:证明|证|略证|续证)\s*】"
         rf"|(?:证明|略证|续证)\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*(?:[:：.．\-—]|(?={esc})|$)"
         r"|证\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：.．]"
-        rf")(?:[^{not_delim}\r\n]*[^\s{not_delim}])?{esc}{_SINGLE_EMPHASIS_AFTER}"
+        rf")(?:(?:[^{not_delim}\r\n]*[^\s{not_delim}])?{esc}{_SINGLE_EMPHASIS_AFTER}|[^\r\n]*[^\s{not_delim}]{esc}(?!{esc})[.。]?$)"
     )
 
 
@@ -363,11 +358,11 @@ _NEXT_CONTINUATION_RE = re.compile(
 )
 def _single_emphasis_terminator(bound_core: str, plain_core: str) -> str:
     return (
-        rf"(?:{bound_core}\s*[.。]?\s*$"
-        rf"|^\s*\*(?=[^\s*])(?:[^*\r\n]*{bound_core}|{plain_core})[.。]?\*\s*[.。]?\s*$"
-        rf"|^\s*_(?=[^\s_])(?:[^_\r\n]*{bound_core}|{plain_core})[.。]?_\s*[.。]?\s*$"
-        rf"|(?:^|[\s(\[【（:：—–-])\*{plain_core}[.。]?\*\s*[.。]?\s*$"
-        rf"|(?:^|[\s(\[【（:：—–-])_{plain_core}[.。]?_\s*[.。]?\s*$)"
+        rf"(?:(?:^|[^*_]){bound_core}\s*[.。]?\s*$"
+        rf"|^\s*\*(?=[^\s*])(?:[^\r\n]*[^*_]{bound_core}|{plain_core})[.。]?\*(?!\*)\s*[.。]?\s*$"
+        rf"|^\s*_(?=[^\s_])(?:[^\r\n]*[^*_]{bound_core}|{plain_core})[.。]?_(?!_)\s*[.。]?\s*$"
+        rf"|(?:^|[\s(\[【（:：—–-])\*{plain_core}[.。]?\*(?!\*)\s*[.。]?\s*$"
+        rf"|(?:^|[\s(\[【（:：—–-])_{plain_core}[.。]?_(?!_)\s*[.。]?\s*$)"
     )
 
 
@@ -432,6 +427,7 @@ class PhysicalPagesExtraction:
     visual_kinds_by_page: dict[int, list[str]]
     section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
+    inline_answer_has_body_by_page: dict[int, bool] = field(default_factory=dict)
     inline_proof_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     inline_proof_boundary_by_page: dict[int, bool] = field(default_factory=dict)
     completed_inline_answer_digest_by_page: dict[int, str] = field(default_factory=dict)
@@ -620,10 +616,66 @@ def _collect_page_fragments(conversion):
     return numbers, fragments, visual_sets
 
 
+def _strip_paired_emphasis_line(line: str, marker: str, ch: str) -> str:
+    pos = line.find(marker)
+    if pos == -1:
+        return line
+    n = len(line)
+    parts: list[str] = []
+    last_copy = 0
+    while pos != -1 and pos + 4 <= n:
+        if (pos > 0 and line[pos - 1] == ch) or line[pos + 2] == ch:
+            end_run = pos + 2
+            while end_run < n and line[end_run] == ch:
+                end_run += 1
+            pos = line.find(marker, end_run)
+            continue
+        valid_opener = (pos == 0 or bool(_EMPHASIS_OPEN_PREDECESSOR_RE.match(line[pos - 1]))) and not bool(
+            _UNICODE_SPACE_RE.match(line[pos + 2])
+        )
+        if not valid_opener:
+            pos = line.find(marker, pos + 2)
+            continue
+        j = line.find(marker, pos + 3)
+        while j != -1:
+            if line[j - 1] == ch or (j + 2 < n and line[j + 2] == ch):
+                end_run = j + 2
+                while end_run < n and line[end_run] == ch:
+                    end_run += 1
+                j = line.find(marker, end_run)
+                continue
+            if not _UNICODE_SPACE_RE.match(line[j - 1]) and (
+                j + 2 == n or bool(_EMPHASIS_CLOSE_FOLLOWER_RE.match(line[j + 2]))
+            ):
+                break
+            j = line.find(marker, j + 2)
+        if j == -1:
+            break
+        parts.append(line[last_copy:pos])
+        parts.append(line[pos + 2:j])
+        last_copy = j + 2
+        pos = line.find(marker, last_copy)
+    if last_copy == 0:
+        return line
+    parts.append(line[last_copy:])
+    return "".join(parts)
+
+
+def _strip_paired_emphasis(text: str, marker: str, ch: str) -> str:
+    if marker not in text:
+        return text
+    if "\n" not in text and "\r" not in text:
+        return _strip_paired_emphasis_line(text, marker, ch)
+    chunks = _LINE_BREAK_SPLIT_RE.split(text)
+    for idx in range(0, len(chunks), 2):
+        chunks[idx] = _strip_paired_emphasis_line(chunks[idx], marker, ch)
+    return "".join(chunks)
+
+
 def _strip_markdown_emphasis(text: str) -> str:
-    text = _PAIRED_BOLD_EMPHASIS_RE.sub(r"\1\2", text)
-    text = _PAIRED_UNDER_EMPHASIS_RE.sub(r"\1\2", text)
-    return _PAIRED_BOLD_EMPHASIS_RE.sub(r"\1\2", text)
+    text = _strip_paired_emphasis(text, "**", "*")
+    text = _strip_paired_emphasis(text, "__", "_")
+    return _strip_paired_emphasis(text, "**", "*")
 
 
 def _strip_heading_markup(line_text: str) -> str:
@@ -959,6 +1011,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     in_worked_example = initial_in_worked_example
     in_exercise = initial_in_exercise and initial_seal_mode != "section_sealed"
     last_inline_body = ""
+    has_inline_body = initial_seal_mode in _INLINE_SEAL_MODES
     inline_answer_lines = None
     inline_break_pending = False
     current_proof_terminated = False
@@ -1046,6 +1099,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             flush()
             if page_seal_mode == "inline_sealed":
                 page_seal_mode = None
+                has_inline_body = False
                 inline_answer_lines = None
             inline_break_pending = False
         active_seal = current[7] if current is not None else page_seal_mode
@@ -1078,6 +1132,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             if seal_kind not in _INLINE_SEAL_MODES:
                 in_exercise = kind == "exercise"
             page_seal_mode = seal_kind
+            has_inline_body = False
             inline_answer_lines = [] if explicit_opener and seal_kind == "inline_sealed" else None
 
         if current is None or explicit_opener or section_break:
@@ -1098,6 +1153,8 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             previous_numbered_question = active_seal is None and bool(_NUMBERED_QUESTION_RE.match(stripped))
         if active_seal in _INLINE_SEAL_MODES:
             last_inline_body = _inline_answer_body(stripped) if explicit_opener else stripped
+            if last_inline_body:
+                has_inline_body = True
             if inline_answer_lines is not None and stripped:
                 # Match the Worker's seal scanner without returning the sealed answer text.
                 inline_answer_lines.append(re.sub(r"[^\S\n]+", " ", stripped))
@@ -1113,6 +1170,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             flush()
             inline_proof_boundary_pending = active_seal == "inline_sealed"
             page_seal_mode = None
+            has_inline_body = False
 
     flush()
     substantive = [entry for entry in entries if not entry[1]]
@@ -1126,10 +1184,12 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 and not _NEXT_CONTINUATION_RE.search(last_inline_body)):
             inline_proof_boundary_pending = True
             page_seal_mode = None
+            has_inline_body = False
     completed_answer_digest = (sha256("\n".join(inline_answer_lines).encode("utf-8")).hexdigest()
                                if inline_proof_boundary_pending and inline_answer_lines else None)
     return (blocks, entries, in_worked_example, in_exercise, page_seal_mode,
-            inline_proof_boundary_pending, previous_numbered_question, completed_answer_digest)
+            inline_proof_boundary_pending, previous_numbered_question, completed_answer_digest,
+            bool(page_seal_mode in _INLINE_SEAL_MODES and has_inline_body))
 
 def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals):
     for index, page_number in enumerate(page_order):
@@ -1337,6 +1397,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
     entries_by_page = {}
     end_seals: dict[int, str | None] = {}
+    inline_has_body: dict[int, bool] = {}
     proof_boundaries: dict[int, bool] = {}
     completed_answer_digests: dict[int, str] = {}
     worked_examples: dict[int, bool] = {}
@@ -1356,7 +1417,8 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
             inline_proof_boundary = False
             previous_numbered_question = False
         (blocks, entries, in_worked_example, in_exercise, seal_mode,
-         next_inline_proof_boundary, previous_numbered_question, completed_answer_digest) = _build_page_blocks(
+         next_inline_proof_boundary, previous_numbered_question, completed_answer_digest,
+         page_inline_has_body) = _build_page_blocks(
             page_number,
             raw_fragments[page_number],
             visual_sets.get(page_number, set()),
@@ -1369,6 +1431,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         blocks_by_page[page_number] = blocks
         entries_by_page[page_number] = entries
         end_seals[page_number] = seal_mode
+        inline_has_body[page_number] = page_inline_has_body
         proof_boundaries[page_number] = next_inline_proof_boundary
         if completed_answer_digest is not None:
             completed_answer_digests[page_number] = completed_answer_digest
@@ -1409,6 +1472,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_
         visual_kinds_by_page=visuals,
         section_sealed_by_page={page: mode == "section_sealed" for page, mode in end_seals.items()},
         inline_sealed_by_page={page: mode in _INLINE_SEAL_MODES for page, mode in end_seals.items()},
+        inline_answer_has_body_by_page=inline_has_body,
         inline_proof_sealed_by_page={page: mode == "inline_proof_sealed" for page, mode in end_seals.items()},
         inline_proof_boundary_by_page=proof_boundaries,
         completed_inline_answer_digest_by_page=completed_answer_digests,

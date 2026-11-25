@@ -470,11 +470,15 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     expect((await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1)).map(({ page }) => page)).toEqual([4]);
   });
 
-  it.each(["Answer: x =\n\nAn ordinary observation.", "Answer:\n"])(
-    "does not start an archived auxiliary proof from the native tail %j",
-    async native => {
+  it.each([
+    "[原生提取]\nAnswer: x =\n\nAn ordinary observation.\n[图片描述]\nProof. An independent derivation.",
+    "[原生提取]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
+    "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[图片描述]\nProof. An independent derivation.",
+  ])(
+    "does not start an archived auxiliary proof from %j",
+    async pageOne => {
       const pdf = await seed([
-        "[原生提取]\n" + native + "\n[图片描述]\nProof. An independent derivation.",
+        pageOne,
         "Public prose after the answer.",
       ]);
       await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
@@ -489,6 +493,7 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
   );
 
   it.each([
+    "Proof. Starts.\nQ.E.D.",
     "**Proof. Done. ∎**",
     "Proof. Starts.\n**Q.E.D.**",
     "Proof. Starts.\n## Q.E.D. ###",
@@ -498,7 +503,11 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     "Proof. Starts.\n*Q.E.D.*",
     "Proof. Starts.\n_Q.E.D._",
     "Proof. Done. *∎*",
+    "Proof. Done. *Q.E.D.*",
     "Proof. Done. _Q.E.D._",
+    "*Proof. Since 2 * 3 = 6, done. ∎*",
+    "*Proof. Since 2 * 3 = 6. Q.E.D.*",
+    "_Proof. Since a_1 + a_2 = 3. Q.E.D._",
   ])(
     "publishes the next archived page after the Markdown proof %j",
     async proof => {
@@ -506,13 +515,52 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     },
   );
 
-  it.each(["*End of Answers.*", "_End of Solutions._"])(
-    "closes an archived answer section at single-emphasis terminator %j while preserving arithmetic *",
+  it("withholds multi-page italic proofs with interior * or _ and rejects unmatched proof terminators in Archive SQL", async () => {
+    for (const heading of ["*Proof. Since 2 * 3 = 6, continue.*", "_Proof. Since a_1 + a_2 = 3, continue._"]) {
+      await expectArchivedPdfPages([
+        "Answer: No.",
+        heading,
+        "Still private continuation.",
+        "The proof finishes. ∎",
+        "Public prose.",
+      ], [5], 3);
+    }
+    for (const unmatched of [
+      "*Q.E.D.", "Q.E.D.*", "_Q.E.D.", "Q.E.D._", "*∎", "∎*",
+      "Proof. Done. *Q.E.D.", "Proof. Done. Q.E.D.*", "**Q.E.D.*", "*Q.E.D.**",
+    ]) {
+      await expectArchivedPdfPages([
+        "Answer: No.\nProof. Starts.\n" + unmatched,
+        "Still private continuation.",
+        "Chapter 2: Geometry\nPublic prose.",
+      ], [3], 2);
+    }
+  });
+
+  it.each([
+    "*End of Answers.*",
+    "_End of Solutions._",
+    "Calculation complete. End of Answers.",
+    "Calculation complete. *End of Answers.*",
+    "Calculation complete. _End of Answers._",
+    "Calculation complete. **End of Answers.**",
+  ])(
+    "closes an archived answer section at terminator %j while rejecting unmatched wrappers and arithmetic *",
     async terminator => {
       await expectArchivedPdfPages(["Answer Key\nPrivate calculation\n" + terminator, "Public prose."], [2], 1);
-      await expectArchivedPdfPages(["Answer: 2 * 3 * 4", "Still sealed calculation.", "Public prose."], [3], 2);
     },
   );
+
+  it("keeps archived sections and inline answers sealed on unmatched section terminators and arithmetic *", async () => {
+    await expectArchivedPdfPages(["Answer: 2 * 3 * 4", "Still sealed calculation.", "Public prose."], [3], 2);
+    for (const unmatched of ["Calculation complete. *End of Answers.", "Calculation complete. End of Answers.*"]) {
+      await expectArchivedPdfPages([
+        "Answer Key\n" + unmatched,
+        "Still private calculation.",
+        "Chapter 2: Geometry\nPublic prose.",
+      ], [3], 2);
+    }
+  });
 
   it("withholds a continuing inline answer introduced inside archived auxiliary Vision", async () => {
     await expectArchivedPdfPages([
@@ -720,6 +768,11 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     { native: "1. Find x.\nAnswer: x__1 + y__2.", primary: "__Answer:__ x__1 + y__2.\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\n## **Answer:** No. ##", primary: "Answer: **No.**\nChapter 2: Geometry", sealed: false },
     { native: "1. Find x.\n__Answer:__ No.", primary: "Answer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n**Model** **Answer**: No.", primary: "Model Answer: Yes.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\n**Model** **Answer**: No.", primary: "Model Answer: No.\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n**Answer:** **No.**", primary: "__Answer:__ __No.__\nChapter 2: Geometry", sealed: false },
+    { native: "1. Find x.\n**Answer:** **2**3.**", primary: "Answer: 23.\nChapter 2: Geometry", sealed: true },
+    { native: "1. Find x.\n**Answer:** **2**3.**", primary: "Answer: 2**3.\nChapter 2: Geometry", sealed: false },
   ])("archives a mixed proof after native $native and transcription $primary", async ({ native, primary, sealed }) => {
     const pdf = await seed([
       "Answer: Yes.",
@@ -1924,6 +1977,27 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     const results = await pdf.repository.search(f.scope, query);
     expect(results.sort((a, b) => a.segmentIndex - b.segmentIndex).map(({ chunk }) => chunk.text))
       .toEqual([prefix, formulas]);
+  });
+
+  it("produces byte-for-byte identical Archive SQL answer_lines for adjacent emphasis and interior operators", async () => {
+    const cases = [
+      ["**Model** **Answer**: No.", "Model Answer: No."],
+      ["**Answer:** **No.**", "Answer: No."],
+      ["__Answer:__ __No.__", "Answer: No."],
+      ["**Answer:** **2**3.**", "Answer: 2**3."],
+      ["**Answer: 2**3.**", "Answer: 2**3."],
+      ["**Answer: 2 ** 3.**", "Answer: 2 ** 3."],
+      ["Answer: 2**3 + 4**5.", "Answer: 2**3 + 4**5."],
+      ["Answer: x__1 + y__2.", "Answer: x__1 + y__2."],
+    ] as const;
+    for (const [rawLine, expectedNormalized] of cases) {
+      const pdf = await seed([`1. Find x.\n${rawLine}`, "Public prose after the answer."]);
+      await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+      const [row] = await f.sql<{ answer_lines: string }[]>`
+        ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+        SELECT answer_lines FROM pdf_archive_inline_starts WHERE inline_opener`;
+      expect(row?.answer_lines).toBe(expectedNormalized);
+    }
   });
 
   it("stores a long display formula intact after a punctuated currency amount", async () => {

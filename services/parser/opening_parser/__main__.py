@@ -178,6 +178,10 @@ def main(argv=None):
                 entry["sectionSealedAtEnd"] = True
             if inline_sealed_by_page.get(page_number) or had_sealed_by_page.get(page_number):
                 entry["inlineSealedAtEnd"] = inline_sealed_by_page[page_number]
+            if (inline_sealed_by_page.get(page_number)
+                    and not extraction.inline_proof_sealed_by_page.get(page_number)
+                    and not extraction.inline_answer_has_body_by_page.get(page_number)):
+                entry["inlineEmptyAtEnd"] = True
             if extraction.inline_proof_sealed_by_page.get(page_number):
                 entry["inlineProofSealedAtEnd"] = True
             if extraction.inline_proof_boundary_by_page.get(page_number):

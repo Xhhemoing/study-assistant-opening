@@ -9,7 +9,7 @@ import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
 import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository, PdfSegmentPage } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
 import { createSourceVisualRecognition } from "../runtime/source-visual-recognition";
-import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
+import { createParseSourceHandler, sealTextWithState, type ParseSourceVisualPageInput, type SealState } from "./parse-source";
 import { fetchPresignedSourceObject } from "./source-object-download";
 
 vi.mock("node:fs/promises", async importOriginal => {
@@ -1078,5 +1078,36 @@ describe("parse source handler", () => {
       objectKey: v1MixedKey,
     })).resolves.toEqual({ pages: 1 });
     expect(presignedKeys).toEqual([v2CanonicalKey, v2MixedKey]);
+  });
+
+  it("normalizes adjacent emphasis spans and pathological unclosed openers in strict linear time", () => {
+    for (const [input, expectedAnswer] of [
+      ["**Model** **Answer**: No.", "Model Answer: No."],
+      ["**Answer:** **No.**", "Answer: No."],
+      ["__Answer:__ __No.__", "Answer: No."],
+      ["**Answer:** **2**3.**", "Answer: 2**3."],
+      ["**Answer: 2**3.**", "Answer: 2**3."],
+      ["**Answer: 2 ** 3.**", "Answer: 2 ** 3."],
+      ["Answer: 2**3 + 4**5.", "Answer: 2**3 + 4**5."],
+      ["Answer: x__1 + y__2.", "Answer: x__1 + y__2."],
+    ] as const) {
+      const state: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+      let completedDigest: string | undefined;
+      expect(sealTextWithState(`1. Find x.\n${input}`, state, undefined, undefined, undefined, digestValue => {
+        completedDigest = digestValue;
+      })).toBe("1. Find x.");
+      expect(state.mode).toBe("none");
+      expect(state.inlineProofBoundaryPending).toBe(true);
+      expect(completedDigest).toBe(createHash("sha256").update(expectedAnswer).digest("hex"));
+    }
+
+    for (const pathological of ["**a ".repeat(10_000), "__a ".repeat(10_000)]) {
+      const state: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
+      const started = performance.now();
+      const output = sealTextWithState(pathological, state);
+      const elapsedMs = performance.now() - started;
+      expect(output).toBe(pathological);
+      expect(elapsedMs).toBeLessThan(50);
+    }
   });
 });

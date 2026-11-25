@@ -25,6 +25,9 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
     if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
     if (page.inlineSealedAtEnd !== undefined && typeof page.inlineSealedAtEnd !== "boolean") throw new TypeError("invalid inlineSealedAtEnd metadata");
+    if (page.inlineEmptyAtEnd !== undefined && (typeof page.inlineEmptyAtEnd !== "boolean" || page.inlineEmptyAtEnd && (!page.inlineSealedAtEnd || page.inlineProofSealedAtEnd))) {
+      throw new TypeError("invalid inlineEmptyAtEnd metadata");
+    }
     if (page.inlineProofBoundaryPendingAtEnd !== undefined && typeof page.inlineProofBoundaryPendingAtEnd !== "boolean") throw new TypeError("invalid inlineProofBoundaryPendingAtEnd metadata");
     if (page.completedInlineAnswerDigest !== undefined && (page.inlineProofBoundaryPendingAtEnd !== true
       || typeof page.completedInlineAnswerDigest !== "string" || !/^[a-f0-9]{64}$/u.test(page.completedInlineAnswerDigest))) {
@@ -40,6 +43,7 @@ export function decodeParserOutput(text: string): ParsedPage[] {
       ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
       ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }),
       ...(page.inlineSealedAtEnd === undefined ? {} : { inlineSealedAtEnd: page.inlineSealedAtEnd }),
+      ...(page.inlineEmptyAtEnd === undefined ? {} : { inlineEmptyAtEnd: page.inlineEmptyAtEnd }),
       ...(page.inlineProofSealedAtEnd === undefined ? {} : { inlineProofSealedAtEnd: page.inlineProofSealedAtEnd }),
       ...(page.inlineProofBoundaryPendingAtEnd === undefined ? {} : { inlineProofBoundaryPendingAtEnd: page.inlineProofBoundaryPendingAtEnd }),
       ...(page.completedInlineAnswerDigest === undefined ? {} : { completedInlineAnswerDigest: page.completedInlineAnswerDigest }),
