@@ -463,6 +463,122 @@ function expectOutcome(
     ] });
 }
 
+describe("symbolic proof feedback Round 17", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    "The following step uses F₂.", "After this step, switch to F₂.", "从下一步起改用 F₂。",
+    "The fourth step uses F₂.", "Use F₂ in the 4th step.", "第四步改用 F₂。",
+    "Use F₂ in Step 4.", "Use F₂ in a previous step.", "上一步使用 F₂。",
+  ])("keeps step-local domain references from advancing the current step in %s", text => {
+    for (const field of ["feedback", "repairPrompt"] as const) {
+      const steps = sequence("1+1=0", "Continue.", "Proceed.", "Finish.");
+      steps.steps[0]![field] = text;
+      expectOutcome("correct", steps, "unverified", { transcription: "Work over ℝ. 1+1=0." });
+    }
+    expectOutcome("correct", sequence("1+1=0", "Continue.", "Proceed.", "Finish."), "unverified", {
+      transcription: "Work over ℝ. 1+1=0.", feedback: text,
+    });
+  });
+
+  it.each(["The following step uses F₂.", "下一步改用 F₂。", "The second step uses F₂.", "第二步使用 F₂。"])(
+    "applies a deferred local domain to its target in %s", text => {
+      const steps = sequence("1+1=2", "1+1=0");
+      steps.steps[0]!.repairPrompt = text;
+      expectOutcome("correct", steps, "correct");
+    },
+  );
+
+  it("keeps a relative switch after the second transcribed claim attached to the third step", () => {
+    expectOutcome("correct", sequence("2+2=4", "1+1=0", "Continue."), "unverified", {
+      transcription: "Work over ℝ. 2+2=4. 1+1=0, but the following step uses F₂. Continue.",
+    });
+    expectOutcome("correct", sequence("2+2=4", "1+1=2", "1+1=0"), "correct", {
+      transcription: "Work over ℝ. 2+2=4. 1+1=2, but the following step uses F₂. 1+1=0.",
+    });
+  });
+
+  it("resolves ordinals by proof position and explicit labels by step index", () => {
+    const steps = sequence("1+1=2", "1+1=0");
+    steps.steps[1]!.stepIndex = 4;
+    steps.steps[0]!.feedback = "The second step uses F₂.";
+    expectOutcome("correct", steps, "correct");
+    steps.steps[0]!.feedback = "Step 4 uses F₂.";
+    expectOutcome("correct", steps, "correct");
+    steps.steps[0]!.feedback = "The fourth step uses F₂.";
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it.each(["the fourth step", "the 4th step", "第四步", "the last step"])(
+    "applies the domain to %s when it is current", scope => {
+      expectOutcome("correct", sequence("1+1=2", "Continue.", "Proceed.", "1+1=0"), "correct", {
+        transcription: "Work over ℝ. 1+1=2. Continue. Proceed. 1+1=0.",
+        feedback: 'Use F₂ in ' + scope + '.',
+      });
+    },
+  );
+
+  it.each([
+    [", but the fourth step uses F₂.", "unverified"], [", and the 4th step uses F₂.", "unverified"],
+    [", but the twenty-first step uses F₂.", "unverified"], ["，但第四步使用 F₂。", "unverified"],
+    [", because in this first step we use F₂.", "correct"], ["，因为第一步在 F₂ 中计算。", "correct"],
+    [", because for this step we switch to F₂.", "correct"], [", for this step, switch to F₂.", "correct"],
+    [", in this current step we now switch to F₂.", "correct"], ["，在本步中改用 F₂。", "correct"],
+    [", after working in this step we switch to F₂.", "unverified"],
+    [", until this step ends, then switch to F₂.", "unverified"],
+  ] as const)("scopes the transcribed domain qualifier in %s", (suffix, expected) => {
+    expectOutcome("correct", sequence("1+1=0", "Continue.", "Proceed.", "Finish."), expected, {
+      transcription: `Work over ℝ. 1+1=0${suffix}`,
+    });
+  });
+
+  it.each([
+    ["The worksheet reads ‘the student’s result gives a contradiction’.", "unverified"],
+    ["The worksheet reads ‘the students’ result gives a contradiction’.", "unverified"],
+    ["The worksheet reads ‘the students’ result gives a contradiction and ‘nothing follows’.", "correct"],
+    ["This ‘result’ gives a contradiction and ‘ends the calculation’.", "correct"],
+    ["讲义写着‘该结果导出矛盾’。", "unverified"],
+    ["该结果导出矛盾。", "correct"],
+  ] as const)("distinguishes a quoted contradiction from an assertion in %s", (text, expected) => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", text), expected);
+  });
+
+  it.each([
+    ["The rubric gives “the proof lacks justification” as an example of feedback.", "unverified"],
+    ["The rubric uses missing justification as a model comment.", "unverified"],
+    ["评分细则把‘缺少理由’作为反馈样例。", "unverified"],
+    ["The proof lacks justification.", "incorrect"], ["证明缺少理由。", "incorrect"],
+    ["Your division by $0$ invalidates the argument.", "incorrect"],
+    ["It is false that the conclusion does not follow.", "unverified"],
+    ["The claim that the conclusion cannot follow is groundless.", "unverified"],
+    ["It is false that you assume what you need to prove.", "unverified"],
+    ["It is false that you divide by x without checking that x is nonzero.", "unverified"],
+    ["It is false that your division by $0$ invalidates the argument.", "unverified"],
+    ["The conclusion does not follow.", "incorrect"], ["The conclusion fails to follow.", "incorrect"],
+    ["你不能说这个证明缺少理由。", "unverified"],
+    ["It is false that the proof lacks justification, and that it skips a necessary step.", "unverified"],
+    ["It is false that the proof lacks justification, and that calculations omit a necessary step.", "unverified"],
+    ["It is false that the proof lacks justification and skips a necessary step.", "unverified"],
+    ["不能说证明缺少理由，也不能说它跳过了必要步骤。", "unverified"],
+    ["认为证明缺少理由且跳步是错误的。", "unverified"],
+    ["认为证明缺少理由，且跳步是错误的。", "unverified"],
+    ["It is false that the proof is circular, but your proof skips a necessary step.", "incorrect"],
+    ["It is false that the proof lacks justification, and that step skips a necessary step.", "incorrect"],
+    ["不能说证明缺少理由，但该证明跳过了必要步骤。", "incorrect"],
+  ] as const)("checks asserted inference feedback in %s", (feedback, expected) => {
+    expectOutcome("incorrect", incorrectEquality(identity), expected, { feedback });
+  });
+
+  it.each([
+    "The rubric gives “the equality is incorrect” as an example.",
+    "The rubric gives “the identity holds only when x=0” as an example.",
+    "评分细则将‘等式不成立’作为反馈示例。",
+    "评分细则将‘等式仅在 x=0 时成立’作为反馈示例。",
+  ])("keeps an illustrative equality objection out of the verdict in %s", feedback => {
+    expectOutcome("incorrect", proof(identity, "incorrect"), "incorrect", { feedback });
+  });
+});
+
 describe("symbolic proof feedback Round 11", () => {
   const identity = "(x+1)^2=x^2+2x+1";
 
