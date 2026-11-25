@@ -265,7 +265,8 @@ export function projectPrivacyGuardedOpeningDataset(
   const validVersion = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
   const validSourceRef = (ref: unknown): ref is Row => isRecord(ref)
     && typeof ref.sourceId === "string" && isUuid(ref.sourceId) && validSourceId(ref.sourceId)
-    && validVersion(ref.sourceVersion) && (ref.memoryOnly === undefined || typeof ref.memoryOnly === "boolean");
+    && validVersion(ref.sourceVersion) && (ref.memoryOnly === undefined || typeof ref.memoryOnly === "boolean")
+    && (ref.publication === undefined || ref.publication === true);
   const hasUnavailableSource = (row: Row) => {
     const pins = row.source_versions;
     return [row.source_id, row.reference_source_id, field(row.context_anchor, "sourceId")]

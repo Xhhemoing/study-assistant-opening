@@ -349,43 +349,52 @@ describe("native backup round-trip", () => {
       payload: { grade: "good", assisted: false, excludeFromAssessment: false },
     });
 
-    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-      VALUES(${badNote.id},${scope.workspaceId},${sql.json([
-        { sourceId, sourceVersion: 1, legacy: [] },
-        { publicationCardIds: [pubCard.id] },
-      ])})`;
+    for (const malformedSourceRef of [
+      { sourceId, sourceVersion: 1, legacy: [] },
+      { sourceId, sourceVersion: 1, publication: "legacy" },
+      { sourceId, sourceVersion: 1, publication: false },
+    ]) {
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${badNote.id},${scope.workspaceId},${sql.json([
+          malformedSourceRef,
+          { publicationCardIds: [pubCard.id] },
+        ])})
+        ON CONFLICT (document_id) DO UPDATE SET context_source_refs=EXCLUDED.context_source_refs`;
 
-    await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: badNote.id }))
-      .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: badNote.id }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
 
-    const openingSnapshot = await readOpeningBackupRecords(sql, scope);
-    const nativePacked = await backups.exportWorkspace(scope);
+      const openingSnapshot = await readOpeningBackupRecords(sql, scope);
+      const nativePacked = await backups.exportWorkspace(scope);
 
-    expect(openingSnapshot.tables.library_documents.map(row => row.id)).toEqual([cleanNote.id]);
-    expect(openingSnapshot.tables.cards.map(row => row.id)).toEqual([cleanCard.id]);
-    expect(nativePacked.records.documents.map(row => row.id)).toEqual([cleanNote.id]);
-    expect(nativePacked.records.cards.map(row => row.id)).toEqual([cleanCard.id]);
-    expect(nativePacked.records.events).toEqual([]);
+      expect(openingSnapshot.tables.library_documents.map(row => row.id)).toEqual([cleanNote.id]);
+      expect(openingSnapshot.tables.cards.map(row => row.id)).toEqual([cleanCard.id]);
+      expect(nativePacked.records.documents.map(row => row.id)).toEqual([cleanNote.id]);
+      expect(nativePacked.records.cards.map(row => row.id)).toEqual([cleanCard.id]);
+      expect(nativePacked.records.events).toEqual([]);
 
-    for (const serialized of [JSON.stringify(openingSnapshot.tables), JSON.stringify(nativePacked)]) {
-      for (const forbidden of [
-        badNote.id,
-        "MALFORMED-LINEAGE-TITLE",
-        "MALFORMED-LINEAGE-BODY",
-        directCard.id,
-        "MALFORMED-DIRECT-CARD",
-        pubCard.id,
-        "MALFORMED-PUB-CARD",
-        badReview.id,
-        pubReview.id,
-      ]) {
-        expect(serialized).not.toContain(forbidden);
+      for (const serialized of [JSON.stringify(openingSnapshot.tables), JSON.stringify(nativePacked)]) {
+        for (const forbidden of [
+          badNote.id,
+          "MALFORMED-LINEAGE-TITLE",
+          "MALFORMED-LINEAGE-BODY",
+          directCard.id,
+          "MALFORMED-DIRECT-CARD",
+          pubCard.id,
+          "MALFORMED-PUB-CARD",
+          badReview.id,
+          pubReview.id,
+        ]) {
+          expect(serialized).not.toContain(forbidden);
+        }
       }
     }
 
+    const nativePacked = await backups.exportWorkspace(scope);
     await wipeLearningData();
     for (const badRefs of [
       [{ sourceId, sourceVersion: 1, legacy: [] }],
+      [{ sourceId, sourceVersion: 1, publication: "legacy" }],
       [{ sourceId, sourceVersion: 1, publication: false }],
     ]) {
       const forged = structuredClone(nativePacked);
@@ -394,6 +403,221 @@ describe("native backup round-trip", () => {
         .rejects.toMatchObject({ code: "VALIDATION" });
     }
   });
+
+  it.each(["source-backed", "turn-memory-backed"] as const)(
+    "rejects foreign-workspace child-only restores targeting a retained %s linked note without mutating the target workspace",
+    async noteKind => {
+      const target = await identity.createUserWithWorkspace({
+        email: `target-${noteKind}-${randomUUID()}@example.com`,
+        displayName: "Target",
+        passwordHash: "unused",
+      });
+      const foreign = await identity.createUserWithWorkspace({
+        email: `foreign-${noteKind}-${randomUUID()}@example.com`,
+        displayName: "Foreign",
+        passwordHash: "unused",
+      });
+      const targetScope = { workspaceId: target.workspace.id, ownerUserId: target.user.id };
+      const foreignBase = await backups.exportWorkspace({ workspaceId: foreign.workspace.id, ownerUserId: foreign.user.id });
+
+      const targetCourse = await courses.createCourse({
+        workspaceId: targetScope.workspaceId,
+        title: "Target Course",
+        slug: `course-${randomUUID()}`,
+      });
+      const plainDoc = await library.createDocument({
+        workspaceId: targetScope.workspaceId,
+        title: "Plain Note",
+        lifecycle: "scratch",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Plain body" } }],
+      });
+      const targetExploration = await explorations.createExploration({
+        workspaceId: targetScope.workspaceId,
+        ownerUserId: targetScope.ownerUserId,
+        title: "Target Exploration",
+        courseId: targetCourse.id,
+      });
+
+      const notes = createOpeningNoteRepository(sql);
+      let linkedDocId: string;
+      if (noteKind === "source-backed") {
+        const sourceId = randomUUID();
+        const convId = randomUUID();
+        const turnId = randomUUID();
+        await sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+          VALUES(${sourceId},${targetScope.workspaceId},'source.txt','text/plain',1,${"c".repeat(64)},0,'uploaded','ready')`;
+        await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+          VALUES(${convId},${targetScope.workspaceId},${targetScope.ownerUserId},'Source dialogue')`;
+        await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+          VALUES(${turnId},${targetScope.workspaceId},${convId},'assistant','Source answer','listen','complete',
+            ${sql.json([{ sourceId, sourceVersion: 0 }])})`;
+        ({ documentId: linkedDocId } = await notes.saveSnippet(targetScope, {
+          title: "Retained source note",
+          text: "Retained source body",
+          savedTurnId: turnId,
+        }));
+      } else {
+        const convId = randomUUID();
+        const userTurnId = randomUUID();
+        const assistantTurnId = randomUUID();
+        const memoryId = randomUUID();
+        await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+          VALUES(${convId},${targetScope.workspaceId},${targetScope.ownerUserId},'Memory dialogue')`;
+        await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+          VALUES(${userTurnId},${targetScope.workspaceId},${convId},'user','User memory','listen','complete','[]'::jsonb)`;
+        await sql`INSERT INTO opening_memories(id,workspace_id,kind,text,source_turn_ids,status)
+          VALUES(${memoryId},${targetScope.workspaceId},'confirmed','Confirmed memory',${sql.json([userTurnId])},'active')`;
+        await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+          VALUES(${assistantTurnId},${targetScope.workspaceId},${convId},'assistant','Memory answer','listen','complete',
+            ${sql.json([{ memoryDependencyIds: [memoryId] }])})`;
+        ({ documentId: linkedDocId } = await notes.saveSnippet(targetScope, {
+          title: "Retained memory note",
+          text: "Retained memory body",
+          savedTurnId: assistantTurnId,
+        }));
+      }
+
+      const linkedDoc = await library.getDocument({ workspaceId: targetScope.workspaceId, documentId: linkedDocId });
+      const retainedBlockId = linkedDoc.blocks[0]!.id;
+
+      const snapshotTargetCounts = async () => {
+        const [counts] = await sql`SELECT
+          (SELECT count(*)::int FROM library_documents WHERE workspace_id=${targetScope.workspaceId}) AS docs,
+          (SELECT count(*)::int FROM library_blocks WHERE workspace_id=${targetScope.workspaceId}) AS blocks,
+          (SELECT count(*)::int FROM library_revisions WHERE workspace_id=${targetScope.workspaceId}) AS revisions,
+          (SELECT count(*)::int FROM cards WHERE workspace_id=${targetScope.workspaceId}) AS cards,
+          (SELECT count(*)::int FROM course_asset_memberships WHERE workspace_id=${targetScope.workspaceId}) AS memberships,
+          (SELECT count(*)::int FROM library_relations WHERE workspace_id=${targetScope.workspaceId}) AS relations,
+          (SELECT count(*)::int FROM promotion_records WHERE workspace_id=${targetScope.workspaceId}) AS promotions,
+          (SELECT count(*)::int FROM promotion_targets WHERE workspace_id=${targetScope.workspaceId}) AS promotion_targets`;
+        return counts;
+      };
+      const baseline = await snapshotTargetCounts();
+
+      const childMutations: Array<Record<string, unknown[]>> = [
+        {
+          blocks: [{
+            id: randomUUID(),
+            documentId: linkedDocId,
+            type: "paragraph",
+            position: 99,
+            content: { text: "forged child block" },
+          }],
+        },
+        {
+          revisions: [{
+            id: randomUUID(),
+            documentId: linkedDocId,
+            revisionNumber: 99,
+            parentRevisionNumber: 1,
+            title: "Forged revision",
+            lifecycle: "scratch",
+            reason: "edit",
+            blocks: [],
+          }],
+        },
+        {
+          cards: [{
+            id: randomUUID(),
+            ownerUserId: foreign.user.id,
+            front: "Forged front",
+            back: "Forged back",
+            sourceDocumentId: linkedDocId,
+            sourceIds: [],
+            tags: [],
+            archived: false,
+            contentVersion: 1,
+            autoPaused: false,
+            excludeFromAssessment: false,
+          }],
+        },
+        {
+          memberships: [{
+            id: randomUUID(),
+            courseId: targetCourse.id,
+            assetType: "document",
+            assetId: linkedDocId,
+            role: "core",
+            sortOrder: 0,
+            visibility: "course",
+          }],
+        },
+        {
+          relations: [{
+            id: randomUUID(),
+            fromType: "document",
+            fromId: plainDoc.id,
+            toType: "document",
+            toId: linkedDocId,
+            relationType: "references",
+            source: { kind: "user" },
+          }],
+        },
+        {
+          relations: [{
+            id: randomUUID(),
+            fromType: "document",
+            fromId: plainDoc.id,
+            toType: "block",
+            toId: retainedBlockId,
+            relationType: "embeds",
+            source: { kind: "user" },
+          }],
+        },
+        {
+          promotions: [{
+            id: randomUUID(),
+            explorationId: targetExploration.id,
+            kind: "note",
+            title: "Forged promotion",
+            body: "Forged body",
+            status: "accepted",
+            targetType: "document",
+            targetId: linkedDocId,
+          }],
+        },
+        {
+          promotions: (() => {
+            const promoId = randomUUID();
+            return [{
+              id: promoId,
+              explorationId: targetExploration.id,
+              kind: "note",
+              title: "Forged nested target promotion",
+              body: "Forged body",
+              status: "pending",
+              targets: [{
+                id: randomUUID(),
+                promotionId: promoId,
+                explorationId: targetExploration.id,
+                kind: "note",
+                title: "Forged target",
+                body: "Forged target body",
+                targetId: retainedBlockId,
+              }],
+            }];
+          })(),
+        },
+      ];
+
+      for (const mutation of childMutations) {
+        const packed = structuredClone(foreignBase);
+        packed.records.documents = [];
+        Object.assign(packed.records, mutation);
+        const attempt = backups.restoreWorkspace({
+          ...targetScope,
+          packed,
+          conflictPolicy: "skip",
+        });
+        await expect(attempt).rejects.toBeInstanceOf(BackupRestoreError);
+        await expect(attempt).rejects.toMatchObject({
+          code: "VALIDATION",
+          message: expect.stringContaining("original workspace"),
+        });
+        expect(await snapshotTargetCounts()).toEqual(baseline);
+      }
+    },
+  );
 
   it("preserves and revalidates source-free snippet lineage across native export, wipe, restore, system queries, and skip merges", async () => {
     const owner = await identity.createUserWithWorkspace({

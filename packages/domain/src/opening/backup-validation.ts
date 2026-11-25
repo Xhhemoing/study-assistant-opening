@@ -522,7 +522,9 @@ export function noteProvenanceSourceReferences(row: Record<string, unknown>): st
     if (notePublicationMetadata(ref)) continue;
     if (isRecord(ref) && "memoryDependencyIds" in ref) {
       if (!turnMemoryDependencyMetadata(ref)) return null;
-    } else if (containsDisallowedNoteMetadataOrArray(ref)) {
+    } else if (!isRecord(ref)
+      || (ref.publication !== undefined && ref.publication !== true)
+      || containsDisallowedNoteMetadataOrArray(ref)) {
       return null;
     } else refs.push(ref);
   }

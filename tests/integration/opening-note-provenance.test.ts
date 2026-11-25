@@ -127,6 +127,25 @@ describe("Opening linked note persistence", () => {
     await sql`UPDATE opening_turns SET citations=${sql.json([{ sourceId, sourceVersion: 0 }])} WHERE id=${savedTurnId}`;
     await expect(notes.saveSnippet(scope, { title: "Incomplete", text: "must not save", savedTurnId })).rejects.toMatchObject({ code: "PROVENANCE_UNKNOWN" });
     expect(await library.listDocuments({ workspaceId: scope.workspaceId })).toEqual([]);
+
+    const covered = await savedReply([{ sourceId, sourceVersion: 0 }]);
+    await sql`UPDATE opening_turns SET citations=${sql.json([{
+      chunkId: randomUUID(),
+      sourceId,
+      sourceVersion: 0,
+      label: "Lecture 1",
+      page: 2,
+      keyframeChunkId: "frame-1",
+    }])} WHERE id=${covered.savedTurnId}`;
+    const saved = await notes.saveSnippet(scope, { title: "Covered citation", text: "CITATION-BODY", savedTurnId: covered.savedTurnId });
+    expect((await library.getDocument({ workspaceId: scope.workspaceId, documentId: saved.documentId })).id).toBe(saved.documentId);
+    for (const badPublication of ["legacy", false] as const) {
+      await sql`UPDATE opening_note_provenance
+        SET context_source_refs=${sql.json([{ sourceId, sourceVersion: 0, publication: badPublication }, { snippetLineageVersion: 1 }])}
+        WHERE document_id=${saved.documentId}`;
+      await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: saved.documentId })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect((await backups.exportWorkspace(scope)).records.documents).toEqual([]);
+    }
   });
 
   it("keeps actual consumed lineage instead of promoting an unretrieved source selection", async () => {

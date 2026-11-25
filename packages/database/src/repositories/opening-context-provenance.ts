@@ -143,7 +143,11 @@ export function hasValidNoteMetadataStructure(value: unknown): value is unknown[
   return Array.isArray(value) && value.every(ref =>
     notePublicationMetadata(ref) !== null
     || isMemoryDependencyMetadata(ref)
-    || !containsDisallowedNoteMetadataOrArray(ref),
+    || (!containsDisallowedNoteMetadataOrArray(ref)
+      && (!ref || typeof ref !== "object" || (
+        (ref as Record<string, unknown>).publication === undefined
+        || (ref as Record<string, unknown>).publication === true
+      ))),
   );
 }
 
@@ -270,7 +274,10 @@ export function noteContextSourceRefsIncluded(
               WHERE dep.value IS NULL OR dep.value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             )
           )
-          AND COALESCE(jsonb_path_exists(provenance_ref, 'strict $.** ? (@.type() == "array")'), false)
+          AND (
+            COALESCE(jsonb_path_exists(provenance_ref, 'strict $.** ? (@.type() == "array")'), false)
+            OR (provenance_ref ? 'publication' AND provenance_ref->'publication' IS DISTINCT FROM 'true'::jsonb)
+          )
       )
   )`;
 }

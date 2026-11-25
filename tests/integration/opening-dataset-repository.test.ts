@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createScopedOpeningSystemQueryReader } from "../../packages/database/src/repositories/opening-system-query";
 import { createOpeningDatasetRepository } from "../../packages/database/src/repositories/opening-dataset";
 import { OPENING_DATASET_POLICY_VERSION } from "@aistudy/contracts";
-import { createCardRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
+import { createBackupRestoreRepository, createCardRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
   createOpeningEphemeralProvenanceRepository, createOpeningPrivacyRepository, createOpeningMemoryRepository,
   createOpeningNoteRepository, createOpeningStudyNoteRepository, readOpeningBackupRecords } from "@aistudy/database";
 import { cardLinkedToNotePublication, cardReadable, notePublicationCardIds } from "../../packages/database/src/repositories/card-sources";
@@ -820,7 +820,12 @@ describe("synthetic deidentified dataset repository", () => {
       });
       await publishSnippet(fixture, doc.id);
       const linkedCard = await cardRepo.createCard({ ...scope, sourceDocumentId: doc.id, front: "Linked", back: "Answer" });
+      const pubLinkedCard = await cardRepo.createCard({ ...scope, front: "PubLinked", back: "Answer" });
       const cleanCard = await cardRepo.createCard({ ...scope, front: "Clean", back: "Answer" });
+      const pubVariantActivity = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        source_ids=${[validSourceId]}::uuid[],
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: pubLinkedCard.id })} WHERE id=${pubVariantActivity}`;
 
       // Cross-workspace publication link at depth 40 with tab/newline/NBSP padding must also withhold card from dataset export.
       const foreignDoc = await library.createDocument({
@@ -837,20 +842,26 @@ describe("synthetic deidentified dataset repository", () => {
         create_intent=${sql.json({ kind: "card_review_variant", cardId: crossWsCard.id })} WHERE id=${crossWsVariant}`;
 
       await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-        VALUES(${doc.id},${scope.workspaceId},${sql.json([{ sourceId: validSourceId, sourceVersion: 0 }])})`;
+        VALUES(${doc.id},${scope.workspaceId},${sql.json([
+          { sourceId: validSourceId, sourceVersion: 0, publication: true },
+          { publicationCardIds: [pubLinkedCard.id] },
+        ])})`;
 
       const datasets = createOpeningDatasetRepository(sql);
       await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
         expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
       const readQuery = createScopedOpeningSystemQueryReader(sql, scope);
+      const nativeBackups = createBackupRestoreRepository(sql);
       const signal = new AbortController().signal;
 
-      expect((await datasets.read(scope)).coursePackageQuality).toHaveLength(1);
+      expect((await datasets.read(scope)).coursePackageQuality).toHaveLength(2);
 
       for (const malformed of [
-        [{ sourceId: validSourceId, sourceVersion: 0, legacy: [{ sourceId: unknownSourceId, sourceVersion: 0 }] }],
-        [{ sourceId: validSourceId, sourceVersion: 0, extra: [] }],
-        [{ sourceId: validSourceId, sourceVersion: 0, deep: { nested: [1] } }],
+        [{ sourceId: validSourceId, sourceVersion: 0, legacy: [{ sourceId: unknownSourceId, sourceVersion: 0 }] }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, extra: [] }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, deep: { nested: [1] } }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, publication: "legacy" }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, publication: false }, { publicationCardIds: [pubLinkedCard.id] }],
       ]) {
         expect(parseNoteContextProvenanceRefs(malformed)).toBeNull();
         expect(parseNoteContextSourceRefs(malformed)).toBeNull();
@@ -867,12 +878,16 @@ describe("synthetic deidentified dataset repository", () => {
 
         await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: doc.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
         await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: linkedCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: pubLinkedCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
         expect((await readQuery({ name: "notes", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([]);
         expect((await readQuery({ name: "cards", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([cleanCard.id]);
 
         const backup = await readOpeningBackupRecords(sql, scope);
         expect(backup.tables.library_documents.map(r => r.id)).not.toContain(doc.id);
         expect(backup.tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
+        const nativePacked = await nativeBackups.exportWorkspace(scope);
+        expect(nativePacked.records.documents.map(r => r.id)).not.toContain(doc.id);
+        expect(nativePacked.records.cards.map(r => r.id)).toEqual([cleanCard.id]);
         expect((await datasets.read(scope)).coursePackageQuality).toEqual([]);
       }
 

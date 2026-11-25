@@ -46,6 +46,7 @@ export function openingNoteReadable(db: Db, workspaceId: string, documentId: Ret
             AND CASE WHEN jsonb_typeof(ref->'sourceVersion')='number' AND ref->>'sourceVersion' ~ '^[0-9]+$'
               THEN (ref->>'sourceVersion')::numeric <= 9007199254740991 ELSE false END
             AND (NOT ref ? 'memoryOnly' OR jsonb_typeof(ref->'memoryOnly')='boolean')
+            AND (NOT ref ? 'publication' OR ref->'publication'='true'::jsonb)
             AND EXISTS (SELECT 1 FROM opening_sources s WHERE s.workspace_id=np.workspace_id AND s.id::text=lower(ref->>'sourceId'))
             AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=np.workspace_id
               AND e.source_id::text=lower(ref->>'sourceId') AND e.asset_deleted_at IS NOT NULL)

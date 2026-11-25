@@ -1,4 +1,4 @@
-import { cardReadable, cardSourcesIncluded } from "./card-sources";
+import { cardReadable, cardSourcesIncluded, notePublicationCardIds } from "./card-sources";
 import { uuidSchema } from "@aistudy/contracts";
 import { notePublicationMetadata, type ExistingBackupIds } from "@aistudy/domain";
 import type { Sql } from "postgres";
@@ -191,49 +191,120 @@ export function readNoteBackupProvenance(record: NativeBackupRecord, requiresMet
 
 export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: string, packed: NativeBackupPackage): Promise<void> {
   const modern = Number.parseInt(packed.schemaManifest.latestMigrationId.slice(0, 4), 10) >= 35;
-  const documentIds = new Set(asRecords(packed.records.documents).map(row => row.id));
-  for (const row of [...asRecords(packed.records.blocks), ...asRecords(packed.records.revisions)]) {
-    if (typeof row.documentId === "string" && uuidSchema.safeParse(row.documentId).success) documentIds.add(row.documentId);
+  const addUuid = (ids: Set<string>, value: unknown) => {
+    if (typeof value === "string" && uuidSchema.safeParse(value).success) ids.add(value.toLowerCase());
+  };
+  const documentIds = new Set<string>();
+  const blockCandidateIds = new Set<string>();
+  const cardCandidateIds = new Set<string>();
+  for (const row of asRecords(packed.records.documents)) addUuid(documentIds, row.id);
+  for (const row of asRecords(packed.records.blocks)) {
+    addUuid(documentIds, row.documentId);
+    addUuid(blockCandidateIds, row.id);
   }
+  for (const row of asRecords(packed.records.revisions)) addUuid(documentIds, row.documentId);
   for (const card of asRecords(packed.records.cards)) {
-    if (typeof card.sourceDocumentId === "string" && uuidSchema.safeParse(card.sourceDocumentId).success) documentIds.add(card.sourceDocumentId);
-    for (const id of teachingDocumentIds(card)) documentIds.add(id);
+    addUuid(documentIds, card.sourceDocumentId);
+    for (const id of teachingDocumentIds(card)) addUuid(documentIds, id);
+    addUuid(cardCandidateIds, card.id);
   }
-  const validDocIds = [...documentIds].filter(id => uuidSchema.safeParse(id).success);
-  const current = validDocIds.length ? await sql`SELECT document_id, context_source_refs FROM opening_note_provenance
-    WHERE workspace_id=${workspaceId} AND document_id=ANY(${validDocIds}::uuid[])` : [];
+  for (const row of asRecords(packed.records.memberships)) {
+    if (row.assetType !== "source") {
+      addUuid(documentIds, row.assetId);
+      addUuid(blockCandidateIds, row.assetId);
+      if (row.assetType === "card") addUuid(cardCandidateIds, row.assetId);
+    }
+  }
+  for (const row of asRecords(packed.records.relations)) {
+    addUuid(documentIds, row.fromId);
+    addUuid(documentIds, row.toId);
+    addUuid(blockCandidateIds, row.fromId);
+    addUuid(blockCandidateIds, row.toId);
+    if (row.fromType === "card") addUuid(cardCandidateIds, row.fromId);
+    if (row.toType === "card") addUuid(cardCandidateIds, row.toId);
+  }
+  for (const row of asRecords(packed.records.promotions)) {
+    addUuid(documentIds, row.targetId);
+    addUuid(blockCandidateIds, row.targetId);
+    if (Array.isArray(row.targets)) {
+      for (const target of row.targets) {
+        if (target && typeof target === "object") {
+          const targetId = (target as Record<string, unknown>).targetId;
+          addUuid(documentIds, targetId);
+          addUuid(blockCandidateIds, targetId);
+        }
+      }
+    }
+  }
+  for (const row of asRecords(packed.records.events)) {
+    if (row.type === "review") addUuid(cardCandidateIds, row.contentId);
+  }
+  if (blockCandidateIds.size > 0) {
+    const blockDocs = await sql`SELECT DISTINCT document_id FROM library_blocks
+      WHERE workspace_id=${workspaceId} AND id=ANY(${[...blockCandidateIds]}::uuid[])`;
+    for (const row of blockDocs) addUuid(documentIds, row.document_id);
+  }
+  if (cardCandidateIds.size > 0) {
+    const cardDocs = await sql`SELECT DISTINCT source_document_id AS document_id FROM cards
+      WHERE workspace_id=${workspaceId} AND id=ANY(${[...cardCandidateIds]}::uuid[])
+        AND source_document_id IS NOT NULL`;
+    for (const row of cardDocs) addUuid(documentIds, row.document_id);
+  }
+  const validDocIds = [...documentIds];
+  const validCardIds = [...cardCandidateIds];
+  const current = validDocIds.length || validCardIds.length ? await sql`SELECT p.document_id, p.workspace_id, p.context_source_refs
+    FROM opening_note_provenance p
+    WHERE (
+      ${validDocIds.length > 0 ? sql`(p.document_id=ANY(${validDocIds}::uuid[])
+        AND (p.workspace_id=${workspaceId}
+          OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=p.document_id AND d.workspace_id=${workspaceId})))` : sql`FALSE`}
+      ${validCardIds.length > 0 ? sql`OR (p.workspace_id=${workspaceId}
+        AND p.context_source_refs IS NOT NULL
+        AND COALESCE(jsonb_path_exists(p.context_source_refs, '$.**.publicationCardIds'), false)
+        AND EXISTS (
+          SELECT 1 FROM ${notePublicationCardIds(sql, () => sql`p.context_source_refs`)} AS pub(card_id)
+          WHERE pub.card_id=ANY(${validCardIds}::text[])
+        ))` : sql``}
+    )` : [];
   const existingById = new Map(current.map(row => [String(row.document_id).toLowerCase(), row]));
   type LineageCheck = {
+    documentId: string;
     rawJson: unknown;
     memoryIds: string[];
     originTurnIds: string[];
     backingSourceIds: string[];
+    requiresOriginalWorkspace: boolean;
   };
   const checks: LineageCheck[] = [];
   for (const row of current) {
+    if (row.workspace_id !== undefined && String(row.workspace_id).toLowerCase() !== workspaceId.toLowerCase()) {
+      throw new BackupRestoreError("VALIDATION", "Linked note provenance is unknown");
+    }
+    const documentId = String(row.document_id).toLowerCase();
     const parsed = parseNoteContextProvenanceRefs(row.context_source_refs);
     const backupRefs = parseBackupSourceRefs(row.context_source_refs);
     if (parsed === null || backupRefs === null) {
       throw new BackupRestoreError("VALIDATION", "Linked note provenance is unknown");
     }
+    const memoryIds = parsed.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [];
+    const originTurnIds = noteOriginTurnIds(row.context_source_refs);
     checks.push({
+      documentId,
       rawJson: row.context_source_refs,
-      memoryIds: parsed.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [],
-      originTurnIds: noteOriginTurnIds(row.context_source_refs),
+      memoryIds,
+      originTurnIds,
       backingSourceIds: memoryOnlyRefSourceIds(parsed),
+      requiresOriginalWorkspace: backupRefs.length > 0 || memoryIds.length > 0 || originTurnIds.length > 0,
     });
   }
   for (const record of asRecords(packed.records.documents)) {
     const value = readNoteBackupProvenance(record, modern);
-    const existing = existingById.get(record.id.toLowerCase());
+    const documentId = record.id.toLowerCase();
+    const existing = existingById.get(documentId);
     if (existing && !value) throw new BackupRestoreError("VALIDATION", "Restore cannot remove existing note provenance");
     if (value) {
-      if ((value.contextSourceRefs.length > 0
-        || (value.memoryDependencyIds?.length ?? 0) > 0
-        || (value.originTurnIds?.length ?? 0) > 0)
-        && packed.sourceWorkspaceId !== workspaceId) {
-        throw new BackupRestoreError("VALIDATION", "Linked notes require their original workspace and source material; native backup does not restore Opening sources");
-      }
+      const memoryIds = value.memoryDependencyIds ?? [];
+      const originTurnIds = value.originTurnIds ?? [];
       const serialized = canonicalNoteProvenanceEntries(
         value.contextSourceRefs,
         value.answerKeyBlockIds ?? [],
@@ -247,10 +318,12 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
       const parsed = parseNoteContextProvenanceRefs(serialized);
       if (parsed === null) throw new BackupRestoreError("VALIDATION", "Linked note provenance is unknown");
       checks.push({
+        documentId,
         rawJson: serialized,
-        memoryIds: value.memoryDependencyIds ?? [],
-        originTurnIds: value.originTurnIds ?? [],
+        memoryIds,
+        originTurnIds,
         backingSourceIds: memoryOnlyRefSourceIds(parsed),
+        requiresOriginalWorkspace: value.contextSourceRefs.length > 0 || memoryIds.length > 0 || originTurnIds.length > 0,
       });
     }
   }
@@ -262,6 +335,9 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
     return ownerScope;
   };
   for (const check of checks) {
+    if (check.requiresOriginalWorkspace && packed.sourceWorkspaceId !== workspaceId) {
+      throw new BackupRestoreError("VALIDATION", "Linked notes require their original workspace and source material; native backup does not restore Opening sources");
+    }
     const admitted = await sql`SELECT ${noteContextSourceRefsIncluded(sql, workspaceId, () => sql`${sql.json(check.rawJson as never)}::jsonb`, true)} AS included`;
     if (!admitted[0]?.included) {
       throw new BackupRestoreError("VALIDATION", "Linked note source is deleted, excluded, or unavailable; restore was not applied");

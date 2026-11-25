@@ -8,6 +8,7 @@ import {
 } from "../../../database/src/repositories/opening-backup-library";
 import {
   containsDisallowedNoteMetadataOrArray as dbContainsDisallowedNoteMetadataOrArray,
+  parseContextSourceRefs,
   parseNoteContextProvenanceRefs,
   parseNoteContextSourceRefs,
 } from "../../../database/src/repositories/opening-context-provenance";
@@ -324,6 +325,22 @@ describe("context provenance at the backup boundary", () => {
       name: "valid source ref with deeply nested array property",
       refs: [{ sourceId, sourceVersion: 1, deep: { nested: [1] } }, { publicationCardIds: [candidateId] }],
     },
+    {
+      name: "note source ref with string publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: "legacy" }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with false publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: false }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with numeric publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: 1 }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with null publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: null }, { publicationCardIds: [candidateId] }],
+    },
   ])("fails closed on $name so linked root-null and observation cards are excluded from backup", ({ refs }) => {
     const docId = "99999999-9999-4999-8999-999999999999";
     const obsCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -473,5 +490,16 @@ describe("context provenance at the backup boundary", () => {
     expect(dbContainsDisallowedNoteMetadataOrArray(deepBadObj)).toBe(true);
     expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepBadObj }])).toBeNull();
     expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepCleanObj }])).toEqual([{ sourceId, sourceVersion: 1 }]);
+    expect(parseContextSourceRefs([{
+      chunkId: turnId,
+      sourceId: sourceId.toUpperCase(),
+      sourceVersion: 2,
+      label: "Section 1",
+      page: 3,
+      startMs: 100,
+      endMs: 250,
+      keyframeChunkId: "frame-1",
+      slideLabel: "Slide 2",
+    }])).toEqual([{ sourceId, sourceVersion: 2 }]);
   });
 });

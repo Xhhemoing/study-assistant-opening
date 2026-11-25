@@ -579,6 +579,59 @@ describe("persisted dataset provenance", () => {
     expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:clean-anchored"]);
   });
 
+  it.each(["legacy", false, 1, null] as const)("withholds a note, its publicationCardIds card, and linked card_review_variant activity when note source ref has malformed publication=%j", badPublication => {
+    const cleanCardId = "abcdef12-3456-4789-abcd-ef1234567923";
+    const cleanDocId = "abcdef12-3456-4789-abcd-ef1234567924";
+    const result = project({
+      cards: [{ ...owner, id: variantCardId }, { ...owner, id: cleanCardId }],
+      opening_sources: [{ ...owner, id: knownSourceId }],
+      library_documents: [{ ...owner, id: publishedDocumentId }, { ...owner, id: cleanDocId }],
+      opening_note_provenance: [
+        {
+          ...owner,
+          document_id: publishedDocumentId,
+          snippet_origin: false,
+          context_source_refs: [
+            { sourceId: knownSourceId, sourceVersion: 1, publication: badPublication },
+            { publicationCardIds: [variantCardId] },
+          ],
+        },
+        {
+          ...owner,
+          document_id: cleanDocId,
+          snippet_origin: false,
+          context_source_refs: [
+            { sourceId: knownSourceId, sourceVersion: 1, publication: true },
+            { publicationCardIds: [cleanCardId] },
+          ],
+        },
+      ],
+      opening_teaching_activities: [
+        { ...activity("bad-note-activity"), source_ids: [knownSourceId] },
+        { ...activity("variant"), source_ids: [knownSourceId], create_intent: { kind: "card_review_variant", cardId: variantCardId } },
+        { ...activity("clean-variant"), source_ids: [knownSourceId], create_intent: { kind: "card_review_variant", cardId: cleanCardId } },
+      ],
+      opening_teaching_activity_specs: [
+        { ...owner, activity_id: "bad-note-activity", document_id: publishedDocumentId, source_refs: [] },
+      ],
+      opening_learning_sessions: [
+        { ...owner, id: "variant-session", activity_id: "variant" },
+        { ...owner, id: "clean-session", activity_id: "clean-variant" },
+      ],
+      opening_learning_attempts: [
+        { ...owner, id: "variant", activity_id: "variant", session_id: "variant-session", source_ids: [] },
+        { ...owner, id: "clean-variant", activity_id: "clean-variant", session_id: "clean-session", source_ids: [] },
+      ],
+      opening_turns: [
+        turn("anchored", { context_anchor: { cardId: variantCardId } }),
+        turn("clean-anchored", { context_anchor: { cardId: cleanCardId } }),
+      ],
+    });
+    expect(result.coursePackageQuality.map(row => row.identity)).toEqual(["activity:clean-variant"]);
+    expect(result.answerSequences.map(row => row.identity)).toEqual(["attempt:clean-variant"]);
+    expect(result.dialogueEvaluation.map(row => row.identity)).toEqual(["turn:clean-anchored"]);
+  });
+
   it.each([undefined, null])("withholds a card whose owner is %s", owner_user_id => {
     expectVariantExcluded(project({ ...variantRows, cards: [{ ...variantRows.cards[0], owner_user_id }] }));
   });

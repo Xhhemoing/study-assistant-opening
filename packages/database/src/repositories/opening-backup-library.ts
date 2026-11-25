@@ -1,8 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import { notePublicationMetadata } from "@aistudy/domain";
 import {
-  containsDisallowedNoteMetadataOrArray,
-  isMemoryDependencyMetadata,
+  hasValidNoteMetadataStructure,
   noteContextSourceRefsIncluded,
   parseContextMemoryDependencyIds,
 } from "./opening-context-provenance";
@@ -16,12 +15,7 @@ type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
 
 function hasValidBackupNoteMetadataStructure(value: unknown): boolean {
-  if (!Array.isArray(value)) return false;
-  return value.every(ref =>
-    notePublicationMetadata(ref) !== null
-    || isMemoryDependencyMetadata(ref)
-    || !containsDisallowedNoteMetadataOrArray(ref),
-  );
+  return hasValidNoteMetadataStructure(value);
 }
 
 function collectPublicationCardIds(root: unknown, initialInPub: boolean, out: Set<string>) {

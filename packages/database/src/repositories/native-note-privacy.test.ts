@@ -177,5 +177,49 @@ describe("native linked note privacy", () => {
     } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
     await expect(assertNativeNoteRestorePrivacy(dbMalformedCurrent, "workspace", retainPacked))
       .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("unknown") });
+
+    const retainedBlockId = "50000000-0000-4000-8000-000000000005";
+    const retainedCardId = "60000000-0000-4000-8000-000000000006";
+    const otherEntityId = "70000000-0000-4000-8000-000000000007";
+    const childId = "80000000-0000-4000-8000-000000000008";
+
+    for (const retainedRefs of [
+      [{ sourceId, sourceVersion: 1 }, { snippetLineageVersion: 1 }],
+      [{ memoryDependencyIds: [memoryId] }, { snippetLineageVersion: 1 }],
+      [{ snippetLineageVersion: 1 }, { originTurnIds: [turnId] }],
+    ]) {
+      const dbRetainedChildOnly = ((parts: TemplateStringsArray) => {
+        const query = parts.join("");
+        if (query.includes("FROM library_blocks")) return [{ document_id: docId }];
+        if (query.includes("FROM cards")) return [{ document_id: docId }];
+        if (query.includes("FROM opening_note_provenance")) {
+          return [{ document_id: docId, workspace_id: "target-workspace", context_source_refs: retainedRefs }];
+        }
+        return [{ included: true }];
+      }) as unknown as Sql;
+
+      for (const childRecords of [
+        { documents: [], blocks: [{ id: childId, documentId: docId }] },
+        { documents: [], revisions: [{ id: childId, documentId: docId }] },
+        { documents: [], cards: [{ id: childId, sourceDocumentId: docId }] },
+        { documents: [], cards: [{ id: retainedCardId, sourceDocumentId: null }] },
+        { documents: [], memberships: [{ id: childId, assetType: "document", assetId: docId }] },
+        { documents: [], memberships: [{ id: childId, assetType: "block", assetId: retainedBlockId }] },
+        { documents: [], relations: [{ id: childId, fromType: "document", fromId: docId, toType: "document", toId: otherEntityId }] },
+        { documents: [], relations: [{ id: childId, fromType: "document", fromId: otherEntityId, toType: "block", toId: retainedBlockId }] },
+        { documents: [], promotions: [{ id: childId, targetType: "document", targetId: docId }] },
+        { documents: [], promotions: [{ id: childId, targetId: retainedBlockId }] },
+        { documents: [], promotions: [{ id: childId, targets: [{ id: otherEntityId, targetId: docId }] }] },
+        { documents: [], promotions: [{ id: childId, targets: [{ id: otherEntityId, targetId: retainedBlockId }] }] },
+      ]) {
+        const childOnlyPacked = {
+          schemaManifest: { latestMigrationId: "0064_card_source_lineage.sql" },
+          sourceWorkspaceId: "source-workspace",
+          records: childRecords,
+        } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
+        await expect(assertNativeNoteRestorePrivacy(dbRetainedChildOnly, "target-workspace", childOnlyPacked))
+          .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("original workspace") });
+      }
+    }
   });
 });
