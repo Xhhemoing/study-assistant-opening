@@ -127,9 +127,37 @@ describe("source content self-read versus additional PDF retry access", () => {
     expect(inventory).toContain("pdf_archive_sealed_spans AS MATERIALIZED");
     expect(inventory).toContain("archived_page.source_id=c.source_id AND archived_page.source_version=c.source_version AND archived_page.page=c.page");
     expect(inventory).toContain("archived_chunk.chunk_id=c.id");
+    expect(inventory).toContain("ORDER BY c.page NULLS LAST,c.created_at,c.id");
     expect(body).toContain("c.source_id=? AND c.source_version=? AND c.page IS NOT DISTINCT FROM ? AND c.id=ANY(?::uuid[])");
     expect(body).not.toContain("pdf_archive_sealed_spans");
     await expect(readOpeningSourceContent(sql, scope, "source", { page: 3 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("seals same-page split Solutions chunks across chunk boundaries while isolating auxiliary blocks and keeping question chunks public", async () => {
+    const splitSolutions = [
+      ...defaultChunks,
+      { id: "sol-head", page: 2, text: "Solutions\n######\n[图片描述]\nDiagram", characters: 33, readable: true },
+      { id: "sol-ctx", page: 2, text: "1. The result is 42.", characters: 20, readable: true },
+      { id: "sol-tail", page: 2, text: "2. More hidden answers.", characters: 23, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, splitSolutions), scope, "source", { page: 2 }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(readOpeningSourceContent(database(source, splitSolutions), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1], text: "private" });
+
+    const splitQuestionAndSolution = [
+      { id: "q1", page: 1, text: "1. Find x.", characters: 10, readable: true },
+      { id: "s1", page: 1, text: "Solution:\nx = 2", characters: 15, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, splitQuestionAndSolution), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1], characters: 10, text: "1. Find x." });
+
+    const isolatedAuxiliary = [
+      { id: "aux-sol", page: 1, text: "Chapter 1\n[图片描述]\nSolutions", characters: 26, readable: true },
+      { id: "prim-q", page: 1, text: "1. Find x.", characters: 10, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, isolatedAuxiliary), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1], text: "Chapter 1\n[图片描述]\nSolutions\n\n1. Find x." });
   });
 
   it("does not convert owner/source lookup failures or future versions into readable content", async () => {

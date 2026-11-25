@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v56-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v57-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -4292,6 +4292,58 @@ describe("bounded resumable PDF parser", () => {
         ? { exitCode: 0, stdout: '{"pageCount":1}' }
         : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 1, text: overLimit, imagePath: null }] }) };
       await expect(collectPdfSegments(bad.input)).rejects.toBeInstanceOf(BoundsExceededError);
+    }
+  });
+
+  it("matches CommonMark empty/non-empty ATX headings, 4-unit Chinese counters, container paren counters, and emphasis parity", () => {
+    const makeState = (mode: "none" | "section_sealed" = "none") =>
+      ({ mode, inWorkedExample: false, inExercise: false, afterAllSealedPage: false });
+
+    for (const emptyAtx of ["######", "###   ", "## ##", "#   #", "## **** ##"]) {
+      const state = makeState();
+      expect(sealTextWithState(`Solutions\n${emptyAtx}\n1. The result is 42.`, state), emptyAtx).toBe("");
+      expect(state.mode, emptyAtx).toBe("section_sealed");
+    }
+
+    for (const nonEmpty of ["## # ##", "## ## ##", "## Title ##", "#######"]) {
+      const state = makeState();
+      const input = `Solutions\n${nonEmpty}\n1. The result is 42.`;
+      expect(sealTextWithState(input, state), nonEmpty).toBe(input);
+      expect(state.mode, nonEmpty).toBe("none");
+    }
+
+    for (const counter of ["第2张（共10张）", "第2張, 共5張", "共5頁第2張", "共10张第2张", "共5张 2张"]) {
+      const state = makeState();
+      expect(sealTextWithState(`Solutions\n${counter}\n1. The result is 42.`, state), counter).toBe("");
+      expect(state.mode, counter).toBe("section_sealed");
+    }
+    const proseTotalState = makeState();
+    expect(sealTextWithState("Solutions\n共10张\n1. The result is 42.", proseTotalState))
+      .toBe("Solutions\n共10张\n1. The result is 42.");
+
+    for (const running of ["Chapter 2: Algebra (第2张)", "Chapter 2 (Page 5)", "第二章 代数（第2张）", "Chapter 2: 第2张"]) {
+      const state = makeState("section_sealed");
+      expect(sealTextWithState(`${running}\n2. y = 3`, state), running).toBe("");
+      expect(state.mode, running).toBe("section_sealed");
+    }
+
+    for (const reopen of ["Chapter 2: Groups (Lagrange)", "Chapter 2: Linear Maps (Part 1)"]) {
+      const state = makeState("section_sealed");
+      expect(sealTextWithState(`${reopen}\nPublic theorem.`, state), reopen).toBe(`${reopen}\nPublic theorem.`);
+      expect(state.mode, reopen).toBe("none");
+    }
+
+    const unpairedState = makeState();
+    expect(sealTextWithState("Solutions\n** Page 42\n1. The result is 42.", unpairedState))
+      .toBe("Solutions\n** Page 42\n1. The result is 42.");
+    const pairedState = makeState();
+    expect(sealTextWithState("Solutions\n**Page 42**\n1. The result is 42.", pairedState)).toBe("");
+    expect(pairedState.mode).toBe("section_sealed");
+
+    for (const label of ["Solution: 2张", "解答： 2张", "Solution: Page 2"]) {
+      const state = makeState();
+      expect(sealTextWithState(`1. Find x.\n${label}`, state), label).toBe("1. Find x.");
+      expect(state.mode, label).toBe("inline_sealed");
     }
   });
 });

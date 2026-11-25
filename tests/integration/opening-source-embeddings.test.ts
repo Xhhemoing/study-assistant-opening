@@ -2193,7 +2193,7 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       "Solutions\n## ##\n1. The result is 42.",
       "## ##\nChapter 2: Vector Spaces\nPublic theorem.",
       "1. Find x.\n## ##\nSolution:\nx = 42",
-      "Chapter 3: Linear Maps\nSolutions\n##\n1. Propositions.",
+      "Chapter 3: Linear Maps\nSolutions\n#######\n1. Propositions.",
       "Answer: x = 1\n## ##\nx = 2",
       "Continuation after non-blank empty ATX heading",
       "Chapter 4: Determinants\nPublic definition.",
@@ -2231,5 +2231,140 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     expect([...new Set((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page))]
       .sort((a, b) => a! - b!)).toEqual(expectedPages);
     expect((await pdf.repository.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual(publicChunks);
+  });
+
+  it("enforces Round-63 CommonMark ATX, 4-unit Chinese counters, container paren counters, paired emphasis, inline Solution: 2张, same-page split Solutions, and 2/4/5 JOIN invariants", async () => {
+    const nearMatchStarEnd = "Page 42" + "** ".repeat(5_000) + "x";
+    const nearMatchSpaceEnd = "Algebra : Page 42" + " ".repeat(5_000) + "x";
+    const pages = [
+      "Solutions\n######\n1. The result is 42.",
+      "Chapter 2: Groups (Lagrange)\nPublic theorem.",
+      "Solutions\n###   \n1. The result is 42.",
+      "Chapter 2: Linear Maps (Part 1)\nPublic definition.",
+      "Solutions\n## **** ##\n1. The result is 42.",
+      "Chapter 3: Rings\nSolutions\n## # ##\n1. Propositions.",
+      "Chapter 4: Fields\nSolutions\n## ## ##\n1. Propositions.",
+      "Solutions\n第2张（共10张）\n1. The result is 42.",
+      "Chapter 5: Modules\nPublic module notes.",
+      "Solutions\n第2張, 共5張\n1. The result is 42.",
+      "Chapter 6: Algebras\nSolutions\n共10张\n1. Propositions.",
+      "Solutions\n共5頁第2張\n1. The result is 42.",
+      "Chapter 7: Tensors\nPublic tensor notes.",
+      "Solutions\n共5张 2张\n1. The result is 42.",
+      "Chapter 8: Categories\nPublic category notes.",
+      "Answer Key\n1. x = 2",
+      "Chapter 2: Algebra (第2张)\n2. y = 3",
+      "Chapter 2 (Page 5)\n3. z = 4",
+      "第二章 代数（第2张）\n4. w = 5",
+      "Chapter 2: 第2张\n5. u = 6",
+      "Chapter 9: Homology\nSolutions\n** Page 42\n1. Propositions.",
+      "Solutions\n**Page 42**\n1. The result is 42.",
+      "Chapter 10: Cohomology\nPublic cohomology notes.",
+      "1. Find x.\nSolution: 2张.",
+      "1. Find y.\n解答： 2张。",
+      "Chapter 11: Sheaves\n" + nearMatchStarEnd + "\n" + nearMatchSpaceEnd,
+    ];
+    // Pages 1, 3, 5, 8, 10, 12, 14, 16..20, 22, 24, 25 are sealed;
+    // Note page 5 ("Solutions\n## **** ##\n1. The result is 42.") seals page 5, and page 6 ("Chapter 3: Rings...") reopens!
+    const expectedSingleChunkPages = [2, 4, 6, 7, 9, 11, 13, 15, 21, 23, 26];
+    const pdf = await seed(pages);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+
+    // Verify defense-in-depth when multiple chunks share the same physical page (split chunks on pages 27..30):
+    // page 27: same-page split Solutions across two chunks (both sealed),
+    // page 28: Chapter 12 reopening page (public, closes page 27's section seal),
+    // page 29: same-page split "1. Find x." + "Solution:\nx = 2." (chunk 1 public, chunk 2 sealed),
+    // page 30: auxiliary "[图片描述]\nSolutions" + primary "1. Find z." (both public).
+    await f.sql`ALTER TABLE opening_source_chunks DROP CONSTRAINT opening_source_chunks_source_id_source_version_page_key`;
+    try {
+      const inserted = await f.sql<{ id: string; page: number; text: string }[]>`
+        INSERT INTO opening_source_chunks(id,source_id,source_version,page,text,created_at)
+        VALUES
+          ('00000000-0000-4000-8000-000000000631'::uuid,${pdf.sourceId},1,27,'Solutions',now() + interval '1 millisecond'),
+          ('00000000-0000-4000-8000-000000000632'::uuid,${pdf.sourceId},1,27,'1. The result is 42.',now() + interval '2 milliseconds'),
+          ('00000000-0000-4000-8000-000000000633'::uuid,${pdf.sourceId},1,28,'Chapter 12: Schemes' || chr(10) || 'Public scheme notes.',now() + interval '3 milliseconds'),
+          ('00000000-0000-4000-8000-000000000634'::uuid,${pdf.sourceId},1,29,'1. Find x.',now() + interval '4 milliseconds'),
+          ('00000000-0000-4000-8000-000000000635'::uuid,${pdf.sourceId},1,29,'Solution:' || chr(10) || 'x = 2.',now() + interval '5 milliseconds'),
+          ('00000000-0000-4000-8000-000000000636'::uuid,${pdf.sourceId},1,30,'Chapter 13: Stacks' || chr(10) || '[图片描述]' || chr(10) || 'Solutions',now() + interval '6 milliseconds'),
+          ('00000000-0000-4000-8000-000000000637'::uuid,${pdf.sourceId},1,30,'1. Find z.',now() + interval '7 milliseconds')
+        RETURNING id,page,text`;
+      expect(inserted).toHaveLength(7);
+
+      const expectedPages = [...expectedSingleChunkPages, 28, 29, 30];
+      const chunks = createOpeningSourceChunksRepository(f.sql);
+
+      const t0 = performance.now();
+      const listed = await chunks.listChunks(f.scope, pdf.sourceId);
+      const forSources = await chunks.listForSources(f.scope, [pdf.sourceId]);
+      const atVersion = await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1);
+      expect(performance.now() - t0).toBeLessThan(1000);
+
+      expect([...new Set(listed.map(c => c.page))]).toEqual(expectedPages);
+      expect(forSources).toEqual(listed);
+      expect(atVersion).toEqual(listed);
+      expect(listed.filter(c => c.page === 29).map(c => c.text)).toEqual(["1. Find x."]);
+      expect(listed.filter(c => c.page === 30)).toHaveLength(2);
+
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 27 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 28 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "Chapter 12: Schemes\nPublic scheme notes." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 29 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 30 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "Chapter 13: Stacks\n[图片描述]\nSolutions\n\n1. Find z." });
+    } finally {
+      await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=27`;
+      await f.sql`ALTER TABLE opening_source_chunks ADD CONSTRAINT opening_source_chunks_source_id_source_version_page_key UNIQUE (source_id, source_version, page)`;
+    }
+
+    // Verify raw_line preservation on ######, ###   , ## **** ##, ## # ##, and ## ## ##.
+    const rawLines = await f.sql<{ page: number; raw_line: string; atx: boolean; empty_atx: boolean }[]>`
+      ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+      SELECT page, raw_line, atx, empty_atx FROM pdf_archive_lines
+      WHERE page IN (1, 3, 5, 6, 7) AND raw_line LIKE '#%' ORDER BY position`;
+    expect(rawLines).toEqual([
+      { page: 1, raw_line: "######", atx: true, empty_atx: true },
+      { page: 3, raw_line: "### ", atx: true, empty_atx: true },
+      { page: 5, raw_line: "## ****", atx: true, empty_atx: true },
+      { page: 6, raw_line: "## #", atx: true, empty_atx: false },
+      { page: 7, raw_line: "## ##", atx: true, empty_atx: false },
+    ]);
+
+    // Verify explicit 2 / 4 / 5 JOIN counts across listChunksAtVersion (2), search (4), and readCitedChunk (5).
+    const capturedQueries: string[] = [];
+    const debugSql = postgres(process.env.OPENING_TEST_DATABASE_URL!, {
+      max: 1,
+      debug: (_, query) => {
+        if (query.trimStart().startsWith("WITH pdf_read_sources")) capturedQueries.push(query);
+      },
+    });
+    try {
+      await createOpeningSourceChunksRepository(debugSql).listChunksAtVersion(f.scope, pdf.sourceId, 1);
+      await createOpeningSourceEmbeddingsRepository(debugSql).search(f.scope, { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] });
+      const courseId = randomUUID();
+      const citedChunkId = pdf.snapshot.chunks[1]!.id;
+      await debugSql.begin(async tx => {
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${pdf.sourceId} ON CONFLICT DO NOTHING`;
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'JOIN check',${courseId})`;
+        await tx`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+          VALUES(${randomUUID()},${f.scope.workspaceId},${courseId},'source',${pdf.sourceId},'core',0,'course')`;
+        await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+          VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},1,${tx.json({
+            courseId, version: 1, nodes: [{ id: randomUUID(), courseId, label: "Page 2", kind: "concept", evidenceChunkIds: [citedChunkId], status: "supported" }], edges: [],
+          })},${tx.json({ [pdf.sourceId]: 1 })})`;
+        await preserveOpeningKnowledgeDefinitions(tx, f.scope, pdf.sourceId, 1);
+        await tx`DELETE FROM opening_course_knowledge WHERE course_id=${courseId}`;
+        await tx`DELETE FROM course_asset_memberships WHERE course_id=${courseId}`;
+        await tx`DELETE FROM courses WHERE id=${courseId}`;
+      });
+      expect(capturedQueries[0]?.match(/\bJOIN\b/giu)).toHaveLength(2);
+      expect(capturedQueries[1]?.match(/\bJOIN\b/giu)).toHaveLength(4);
+      expect(capturedQueries[2]?.match(/\bJOIN\b/giu)).toHaveLength(5);
+    } finally {
+      await debugSql.end({ timeout: 5 });
+    }
+    expect(await backfilledPages(pdf)).toEqual(expectedSingleChunkPages);
   });
 });

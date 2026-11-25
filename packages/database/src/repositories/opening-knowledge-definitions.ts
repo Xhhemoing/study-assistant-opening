@@ -74,7 +74,7 @@ const blockedReopeningHeading = [
   String.raw`${lineStart}(?:(?:\d+|[a-z])[.)](?: |$)|[a-z] *$|[（(] *(?:\d+|[a-z]|[一二三四五六七八九十]+) *[)）])`,
   String.raw`${lineStart}(?:\d+(?:\.\d+)*[.)]? +)?(?:true|false|yes|no|none|[a-f](?: *, *[a-f])*)[.。]? *$`,
   String.raw`\m(?:answers?|solutions?|keys?|exercises?|problems?|questions?|review|practice|quiz|drills?|self[- ]check|homework|assignments?|problem +sets?|worksheets?|tutorials?|recitations?|labs?|continued|cont(?:['’]?d)?)\M`,
-  String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千]+(?: *(?:[/／–-]|共) *(?:第 *)?[\d一二三四五六七八九十百千]+)? *[页頁]`,
+  String.raw`(?:pages?|slides?|pp?\.) *\d+ *(?:(?:of +|[/／–—-] *)\d+ *)?[)）\]]? *[.。]?$|(?:第 *)?[\d一二三四五六七八九十百千零〇]+(?: *(?:[/／–—-]|共) *(?:第 *)?[\d一二三四五六七八九十百千零〇]+)? *[页頁张張]`,
   String.raw`答案|解答|习题|练习|复习题|自测题|思考题|作业|课后题|单元测试|第 *[一二三四五六七八九十百千\d]+ *[题小题]|续上页|接上页|[（(] *续 *[）)]`,
   String.raw`${lineStart}(?:[\[【(] *)?(?:图表观察描述|识别不确定)`,
 ].join("|");
@@ -116,8 +116,8 @@ const invalidReferenceBody = String.raw`^(?:${headingDelimiter}(?! *(?:$|${refer
 const englishReferenceVerb = String.raw`\m(?:am|is|are|was|were|has|have|had|can|will|gives|shows|lists|states|implies|requires|yields|equals|explains|approximates|denotes|represents|follows|illustrates|demonstrates|describes|contains|provides|depicts|presents|indicates|says|proves|discusses)\M`;
 const englishReferenceProse = String.raw`${invalidReferenceBody}|, *(?:which|where|applied|used|shown|given|as)\M|^(?!${headingDelimiter})(?:[a-z]|.*[.!?;] *$|.*${englishReferenceVerb})|^${headingDelimiter} *(?:[a-z]+|This|That|It|They|We)\M.*${englishReferenceVerb}|^${headingDelimiter} *${englishReferenceVerb}`;
 const qualifiedEnglishProse = String.raw`^${headingQualifier}+ *${headingDelimiter}.*${englishReferenceVerb}`;
-const chineseReferenceProse = String.raw`${invalidReferenceBody}|^(?:${headingDelimiter} *)?(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)|[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)|^(?!${headingDelimiter}).*[。！？；] *$`;
-const markdownProse = String.raw`[=<>≈]|[.!?;。！？；] *$|${englishReferenceVerb}|, *(?:which|where|applied|used|shown|given|as)\M|[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)`;
+const chineseReferenceProse = String.raw`${invalidReferenceBody}|^(?:${headingDelimiter} *)?(?:给出|显示|展示|表明|说明|证明|解释|指出|列出|描述|表示|讨论|介绍|包含|汇总|满足|成立|可由|由|中|里|内|上|下|的|是|为|有|在|与|和|将|把|对|见|如)|^[^，,]*[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)|^(?!${headingDelimiter}).*[。！？；] *$`;
+const markdownProse = String.raw`[=<>≈]|[.!?;。！？；] *$|${englishReferenceVerb}|, *(?:which|where|applied|used|shown|given|as)\M|^[^，,]*[，,].*(?:可得|得到|显示|表明|说明|给出|成立|满足)`;
 const dottedSectionPrefix = String.raw`${lineStart}\d+(?:\.\d+)+ +`;
 const latinSectionTitle = String.raw`^[A-Z][A-Za-z0-9'’&-]*(?:[ ,]+(?:[A-Z0-9][A-Za-z0-9'’&-]*|and|as|at|by|for|from|in|of|on|or|the|to|a|an|with|without|via)){0,12} *$`;
 const cjkSectionTitle = "^[【「『〈《（(]?[一-鿿]";
@@ -143,8 +143,8 @@ const answerProofCore = String.raw`(?:(?:Proof|Sketch +of +Proof)\M|【 *(?:证�
 const answerProofStar = String.raw`\*(?=[^ *\r\n])(?:(?:Proof|Sketch +of +Proof)(?=\*|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ *\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${starEmphasisInterior})*[^ *\r\n])?\*(?!\*)${singleEmphasisAfter}`;
 const answerProofUnder = String.raw`_(?=[^ _\r\n])(?:(?:Proof|Sketch +of +Proof)(?=_|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ _\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${underEmphasisInterior})*[^ _\r\n])?_(?!_)${singleEmphasisAfter}`;
 const answerProofHeading = String.raw`${lineStart}(?:${answerProofCore}|${answerProofStar}|${answerProofUnder})`;
-const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
-const emptyAtxHeading = String.raw`^ *(?:#{1,6}(?: +|$))+$`;
+const explicitHeadingMarkup = String.raw`^ *#{1,6}(?: +|$)`;
+const emptyAtxHeading = String.raw`^ *#{1,6} *$`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
 const jsEnglishExample = new RegExp(asJsPattern(englishExamplePrefix), "iu");
@@ -201,41 +201,125 @@ function stripArchiveClosingAtxHashes(line: string): string {
   return line.slice(0, bodyEnd);
 }
 
-export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
+const jsSectionAnswer = new RegExp(sectionAnswerLine, "iu");
+const archiveEmphasisOpenPredecessors = "([【（:： ";
+const archiveEmphasisCloseFollowers = " :：.,;!?。，；：！？)]】）";
+
+function stripArchivePairedEmphasisLine(line: string, marker: "**" | "__", ch: "*" | "_"): string {
+  let pos = line.indexOf(marker);
+  if (pos === -1) return line;
+  const n = line.length;
+  let out = "";
+  let lastCopy = 0;
+  while (pos !== -1 && pos + 4 <= n) {
+    if (pos > 0 && line[pos - 1] === ch || line[pos + 2] === ch) {
+      let endRun = pos + 2;
+      while (endRun < n && line[endRun] === ch) endRun++;
+      pos = line.indexOf(marker, endRun);
+      continue;
+    }
+    const validOpener = (pos === 0 || archiveEmphasisOpenPredecessors.includes(line[pos - 1]!))
+      && line[pos + 2] !== " ";
+    if (!validOpener) {
+      pos = line.indexOf(marker, pos + 2);
+      continue;
+    }
+    let j = line.indexOf(marker, pos + 3);
+    while (j !== -1) {
+      if (line[j - 1] === ch || j + 2 < n && line[j + 2] === ch) {
+        let endRun = j + 2;
+        while (endRun < n && line[endRun] === ch) endRun++;
+        j = line.indexOf(marker, endRun);
+        continue;
+      }
+      if (line[j - 1] !== " " && (j + 2 === n || archiveEmphasisCloseFollowers.includes(line[j + 2]!))) {
+        break;
+      }
+      j = line.indexOf(marker, j + 2);
+    }
+    if (j === -1) break;
+    out += line.slice(lastCopy, pos) + line.slice(pos + 2, j);
+    lastCopy = j + 2;
+    pos = line.indexOf(marker, lastCopy);
+  }
+  if (lastCopy === 0) return line;
+  return out + line.slice(lastCopy);
+}
+
+function stripArchivePairedEmphasis(line: string): string {
+  const afterBold = stripArchivePairedEmphasisLine(line, "**", "*");
+  const afterUnder = stripArchivePairedEmphasisLine(afterBold, "__", "_");
+  return stripArchivePairedEmphasisLine(afterUnder, "**", "*");
+}
+
+type ArchivePdfLine = { atx: boolean; line: string; unstarredLine: string; contentLine: boolean };
+
+function parseArchivePdfBlocks(text: string): {
+  primary: ArchivePdfLine[];
+  blocks: ArchivePdfLine[][];
+  hasUnconditionalLabel: boolean;
+} {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ");
-  const primary: { atx: boolean; line: string }[] = [];
+  const primary: ArchivePdfLine[] = [];
   const blocks = [primary];
   let block = primary;
+  let hasUnconditionalLabel = false;
   for (const splitLine of normalized.split("\n")) {
-    const rawAuxHeader = jsVisionAuxiliary.exec(splitLine);
-    const postAuxRaw = rawAuxHeader ? splitLine.slice(rawAuxHeader[0].length) : splitLine;
-    const atx = jsExplicitHeading.test(postAuxRaw);
-    const strippedRaw = stripArchiveClosingAtxHashes(postAuxRaw);
-    let line = (rawAuxHeader ? splitLine.slice(0, rawAuxHeader[0].length) + strippedRaw : strippedRaw).replace(/\*\*|__/gu, "");
-    const auxiliaryHeader = jsVisionAuxiliary.exec(line);
-    if (auxiliaryHeader) {
+    const rawUnstarred = splitLine.includes("**") || splitLine.includes("__")
+      ? splitLine.replace(/\*\*|__/gu, "") : splitLine;
+    const auxPiece = splitLine.includes("[") || splitLine.includes("【")
+      ? splitLine.replace(jsVisionAuxiliary, "") : splitLine;
+    const atx = jsExplicitHeading.test(auxPiece);
+    const auxStripped = stripArchiveClosingAtxHashes(auxPiece);
+    const hasEmphasis = auxStripped.includes("**") || auxStripped.includes("__");
+    const unstarredLine = hasEmphasis
+      ? auxStripped.replace(/\*\*|__/gu, "").replace(jsVisionAuxiliary, "").replace(/ {2,}/gu, " ")
+      : auxStripped;
+    let line = hasEmphasis
+      ? stripArchivePairedEmphasis(auxStripped).replace(/ {2,}/gu, " ")
+      : auxStripped;
+    if (jsVisionAuxiliary.test(rawUnstarred)) {
       block = [];
       blocks.push(block);
-      line = line.slice(auxiliaryHeader[0].length);
-    } else if (jsVisionTranscription.test(line)) block = primary;
-    if (jsPdfLeadingTextWrappers.test(line) || !line.trim() || (atx && jsEmptyAtxHeading.test(line))) continue;
-    if (answerLabel.test(line) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) return true;
-    if (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)) block.push({ atx, line });
+      line = line.replace(jsVisionAuxiliary, "");
+    } else if (jsVisionTranscription.test(rawUnstarred)) {
+      block = primary;
+    }
+    if (jsPdfLeadingTextWrappers.test(line) || !line.trim() || (atx && jsEmptyAtxHeading.test(unstarredLine))) continue;
+    if (answerLabel.test(unstarredLine) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) {
+      hasUnconditionalLabel = true;
+    }
+    block.push({
+      atx,
+      line,
+      unstarredLine,
+      contentLine: !isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line),
+    });
   }
-  if (blocks.some(lines => lines.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
-    && jsAssessmentSolutionsContext.test(lines[index + 1]?.line ?? "")))) return true;
+  return { primary, blocks, hasUnconditionalLabel };
+}
+
+export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
+  const { primary, blocks, hasUnconditionalLabel } = parseArchivePdfBlocks(text);
+  if (hasUnconditionalLabel) return true;
+  if (blocks.some(lines => {
+    const content = lines.filter(entry => entry.contentLine);
+    return content.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+      && jsAssessmentSolutionsContext.test(content[index + 1]?.line ?? ""));
+  })) return true;
   if (!checkContext) return false;
   let inWorkedExample = false;
   for (const lines of blocks) {
     let previousNumberedQuestion = false;
-    for (const { atx, line } of lines) {
-      const followsNumberedQuestion = previousNumberedQuestion;
-      previousNumberedQuestion = jsNumberedQuestion.test(line);
-      if (explanationLabel.test(line) || jsEnglishSolutionLabel.test(line) || jsSolutionPeriod.test(line)) {
+    for (const { atx, line, unstarredLine, contentLine } of lines) {
+      const followsNumberedQuestion = lines === primary && contentLine && previousNumberedQuestion;
+      if (lines === primary && contentLine) previousNumberedQuestion = jsNumberedQuestion.test(line);
+      if (explanationLabel.test(line) || jsEnglishSolutionLabel.test(line) || jsSolutionPeriod.test(line)
+        || jsSectionAnswer.test(unstarredLine)) {
         if (!inWorkedExample || followsNumberedQuestion && jsStandaloneNumberedSolution.test(line)) return true;
         continue;
       }
-      if (lines !== primary || jsProofHeading.test(line)) continue;
+      if (!contentLine || lines !== primary || jsProofHeading.test(line)) continue;
       const englishExample = jsEnglishExample.exec(line);
       const chineseExample = jsChineseExample.exec(line);
       if (jsWorkedExample.test(line)
@@ -270,32 +354,55 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
 const pageNumberRatio = String.raw`\d+ *(?:of +|[/／–—-] *)\d+`;
 const chinesePageNumber = String.raw`[\d一二三四五六七八九十百千零〇]+`;
 const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁张張]`;
-const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁]`;
+const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁张張]`;
 const chineseCounter = String.raw`(?:(?:(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *)?${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal}(?: *第 *${chinesePageNumber} *[页頁张張]| +${chinesePageNumber} *[页頁张張]))`;
+const parenInnerChineseCounter = String.raw`(?:(?:(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *)?${chinesePage}(?: *[/／,，] *${chinesePageTotal})?|${chinesePageTotal}(?: *第 *${chinesePageNumber} *[页頁张張]| +${chinesePageNumber} *[页頁张張]))`;
 const romanCounter = "[ivxlcdm]{1,8}";
 const counter = String.raw`(?:\d+(?:\.\d+)*|${romanCounter})`;
 const shortFurniturePrefix = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|${romanCounter})|第 *${chinesePageNumber} *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])) *[|:：—–-] *`;
 const furnitureSeparator = String.raw`(?: *[|｜—–] *| +- +)`;
 const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|[。！；!]|(?:见|参见)第 *\d+ *页`;
-const pageCounter = String.raw`(?:(?:[(（\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
-const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
+const pageCounter = String.raw`(?:(?:[(（\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)?(?: *[)）\]】])?|${chineseCounter})(?: *[.。．、])?`;
+const parenInnerPageCounter = String.raw`(?:(?:[\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)?(?: *[\]】])?|${parenInnerChineseCounter})(?: *[.。．、])?`;
+const parenthesizedPageCounterSuffix = String.raw` *[（(] *${parenInnerPageCounter} *[）)](?: *[.。])? *$`;
+const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix})(?:.*${furnitureSeparator}| *[|｜:：—–-] *)|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
 const titledPageCounterSuffix = String.raw`(?:[|｜—–] *| - +|[:：] +)${pageCounter} *$`;
 const titledPageCounter = String.raw`${lineStart}(?!#{1,6} +#)([^ |｜—–][^|｜—–]{0,95}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
 const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
 const ocrPlaceholder = String.raw`${lineStart}[\[【(（] *(?:illegible|unreadable|blank|unclear|ocr|no +(?:readable +)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[ \]】)）：:]|$)`;
 const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
-const bareAnswerCounter = String.raw`${lineStart}(?:(?:[(（\[【] *)?(?:${counter}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|${romanCounter}) *[-–—]) *[.。．、]? *$`;
-const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter} *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
+const bareAnswerCounter = String.raw`${lineStart}(?:(?:[(（\[【] *)?(?:${counter}|${pageNumberRatio})(?: *[)）\]】])?|[-–—] *(?:\d+|${romanCounter}) *[-–—])(?: *[.。．、])? *$`;
+const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter}(?: *[.。．、])?|[(（\[【] *${counter} *[)）\]】](?: *[.。．、])?|[-–—] *${counter} *[-–—](?: *[.。．、])?|${pageNumberRatio}(?: *[)）\]】])?(?: *[.。．、])?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
+const jsStandalonePageCounter = new RegExp(`^ *${pageCounter} *$`, "iu");
+const jsLeadingHeadingDelimiter = new RegExp(`^${headingDelimiter}`, "u");
 const jsTitledPageCounterSuffix = new RegExp(titledPageCounterSuffix, "iu");
 const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
 const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
 const jsEnglishReferenceVerb = new RegExp(asJsPattern(englishReferenceVerb), "u");
 
+function hasParenthesizedContainerPageCounter(suffix: string): boolean {
+  let end = suffix.length;
+  while (end > 0 && suffix[end - 1] === " ") end--;
+  if (end > 0 && (suffix[end - 1] === "." || suffix[end - 1] === "。")) end--;
+  while (end > 0 && suffix[end - 1] === " ") end--;
+  if (end < 3 || suffix[end - 1] !== ")" && suffix[end - 1] !== "）") return false;
+  let open = end - 2;
+  while (open >= 0 && suffix[open] !== "(" && suffix[open] !== "（" && suffix[open] !== ")" && suffix[open] !== "）") open--;
+  if (open < 0 || suffix[open] !== "(" && suffix[open] !== "（") return false;
+  const inner = suffix.slice(open + 1, end - 1).trim();
+  if (!jsStandalonePageCounter.test(inner)) return false;
+  const title = suffix.slice(0, open).trim().replace(jsLeadingHeadingDelimiter, "").trim();
+  return !title || jsLatinTitle.test(title)
+    || jsCjkTitle.test(title) && !jsCjkSectionUnits.test(title) && !jsSectionProse.test(title);
+}
+
 function isArchiveRunningHeading(line: string): boolean {
   if (jsInlineRunningHeading.test(line)) return true;
   const title = jsTitledPageCounterSuffix.test(line) ? jsTitledPageCounter.exec(line)?.[1] : undefined;
-  return Boolean(title && !jsEnglishReferenceVerb.test(title) && !jsFurnitureTitleProse.test(title));
+  if (title && !jsEnglishReferenceVerb.test(title) && !jsFurnitureTitleProse.test(title)) return true;
+  const container = jsEnglishContainer.exec(line) ?? jsChineseContainer.exec(line);
+  return Boolean(container && hasParenthesizedContainerPageCounter(line.slice(container[0].length)));
 }
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
@@ -400,7 +507,12 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND line !~ ${markdownProse}))
         AND line !~* ${blockedReopeningHeading} AS other_reopening,
       NOT empty_atx AND (line ~* ${inlineRunningHeading} OR (furniture_title IS NOT NULL
-        AND furniture_title !~ ${englishReferenceVerb} AND furniture_title !~* ${furnitureTitleProse})) AS running_heading
+        AND furniture_title !~ ${englishReferenceVerb} AND furniture_title !~* ${furnitureTitleProse})
+        OR (container_paren_title IS NOT NULL AND (container_paren_title=''
+          OR container_paren_title ~ ${latinSectionTitle}
+          OR (container_paren_title ~ ${cjkSectionTitle}
+            AND container_paren_title !~ ${cjkSectionUnits}
+            AND container_paren_title !~ ${sectionProse})))) AS running_heading
     FROM (
       SELECT *, coalesce(last_auxiliary>coalesce(last_transcription,0),false) AS auxiliary,
         atx AND unstarred_line ~ ${emptyAtxHeading} AS empty_atx,
@@ -411,14 +523,25 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         NULLIF(regexp_replace(line,${englishExamplePrefix},'','i'),line) AS english_example,
         NULLIF(regexp_replace(line,${chineseExamplePrefix},''),line) AS chinese_example,
         CASE WHEN line ~* ${titledPageCounterSuffix} THEN (regexp_match(line,${titledPageCounter},'i'))[1] END AS furniture_title,
+        CASE WHEN line ~* ${parenthesizedPageCounterSuffix} THEN
+          btrim(regexp_replace(btrim(regexp_replace(
+            COALESCE(
+              NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line),
+              NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line)
+            ),
+            ${parenthesizedPageCounterSuffix},'','i')),
+            ${"^" + headingDelimiter},''))
+        END AS container_paren_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
         SELECT id,source_id,source_version,page,max_source_page,created_at,aux_stripped AS raw_line,line_number,atx,unstarred_line,
           CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0 THEN
-            regexp_replace(regexp_replace(regexp_replace(
+            regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
               aux_stripped,${pairedBoldEmphasis},${emphasisReplacement},'g'),
               ${pairedUnderEmphasis},${emphasisReplacement},'g'),
-              ${pairedBoldEmphasis},${emphasisReplacement},'g')
+              ${pairedBoldEmphasis},${emphasisReplacement},'g'),
+              ${visionAuxiliary},''),
+              ' {2,}',' ','g')
           ELSE aux_stripped END AS line,
           max(line_number) FILTER (WHERE raw_unstarred ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
           max(line_number) FILTER (WHERE raw_unstarred ~ ${visionTranscription}) OVER vision_block AS last_transcription
@@ -427,14 +550,13 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
             CASE WHEN position('**' in raw_piece)>0 OR position('__' in raw_piece)>0
               THEN replace(replace(raw_piece,'**',''),'__','') ELSE raw_piece END AS raw_unstarred,
             CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0
-              THEN regexp_replace(replace(replace(aux_stripped,'**',''),'__',''),${visionAuxiliary},'')
+              THEN regexp_replace(regexp_replace(replace(replace(aux_stripped,'**',''),'__',''),${visionAuxiliary},''),' {2,}',' ','g')
               ELSE aux_stripped END AS unstarred_line
           FROM (
             SELECT id,source_id,source_version,page,max_source_page,created_at,line_number,raw_piece,
               left(lead_trimmed,1)='#'
                 AND length(lead_trimmed)-length(after_open_hashes)<=6
-                AND left(after_open_hashes,1)=' '
-                AND ltrim(after_open_hashes,' ')<>'' AS atx,
+                AND (after_open_hashes='' OR left(after_open_hashes,1)=' ') AS atx,
               CASE
                 WHEN left(lead_trimmed,1)='#'
                   AND right(trail_trimmed,1)='#'
@@ -494,7 +616,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
         line ~* ${qualifiedSolutionLabel} AS qualified_solution,
         content_line AND line ~* ${assessmentSolutionsHeading} AND COALESCE(
-           lead(line) OVER (PARTITION BY id,content_line,auxiliary_block ORDER BY line_number)
+           lead(line) OVER (PARTITION BY source_id,source_version,page,content_line,auxiliary_chunk,auxiliary_block
+             ORDER BY created_at,id,line_number)
              ~* ${assessmentSolutionsContext},false) AS assessment_solutions
       FROM (
          SELECT *, CASE WHEN auxiliary THEN id END AS auxiliary_chunk,
@@ -947,6 +1070,40 @@ export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) 
 export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
   // The archive scans physical pages in order. Page-less chunks have only local context.
   return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string, { checkContext: row.page == null });
+}
+
+export function filterPublicSamePagePdfChunks<T extends { text: string; page?: number | null }>(rows: readonly T[]): T[] {
+  if (!rows.length) return [];
+  if (rows.length === 1 || rows[0]?.page == null) {
+    return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
+  }
+  const parsed = rows.map((row, chunkIndex) => {
+    const info = parseArchivePdfBlocks(row.text);
+    const individuallySealed = info.hasUnconditionalLabel
+      || info.blocks.some(lines => {
+        const content = lines.filter(entry => entry.contentLine);
+        return content.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+          && jsAssessmentSolutionsContext.test(content[index + 1]?.line ?? ""));
+      });
+    return { chunkIndex, primaryContent: info.primary.filter(entry => entry.contentLine), individuallySealed };
+  });
+  const pagePrimary = parsed.flatMap(({ chunkIndex, primaryContent }) =>
+    primaryContent.map(entry => ({ chunkIndex, line: entry.line })));
+  if (pagePrimary.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+    && jsAssessmentSolutionsContext.test(pagePrimary[index + 1]?.line ?? ""))) {
+    return [];
+  }
+  const crossChunkSealed = new Set<number>();
+  for (let index = 0; index + 1 < pagePrimary.length; index++) {
+    const current = pagePrimary[index]!;
+    const next = pagePrimary[index + 1]!;
+    if (current.chunkIndex !== next.chunkIndex
+      && jsNumberedQuestion.test(current.line)
+      && jsStandaloneNumberedSolution.test(next.line)) {
+      crossChunkSealed.add(next.chunkIndex);
+    }
+  }
+  return rows.filter((_, index) => !parsed[index]!.individuallySealed && !crossChunkSealed.has(index));
 }
 
 type ArchivedSealSpan = { first_page: number; reopen_page: number | null; chunk_id: string | null };

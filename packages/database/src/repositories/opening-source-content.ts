@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
-import { isPublicSourceChunk, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { filterPublicSamePagePdfChunks, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
 
 type PageStats = { page: number | null; characters: number; readable: boolean };
 
@@ -39,14 +39,16 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
         AND ${publicPdfChunkPredicate(tx)}` : tx``;
     let stats: PageStats[];
     if (pdf) {
-      // Stream complete chunks so the shared label check can normalize every line.
+      // Stream complete chunks in deterministic intra-page order so same-page split chunks share primary lookahead.
       const query = tx`${pdfBoundary}
         SELECT c.id,c.page,length(c.text)::int AS characters,c.text ~ '[^[:space:]]' AS readable,c.text
-        ${fromPdf} ORDER BY c.page NULLS LAST`;
+        ${fromPdf} ORDER BY c.page NULLS LAST,c.created_at,c.id`;
       const byPage = new Map<number | null, PageStats>();
-      for await (const rows of query.cursor(16)) {
-        for (const row of rows) {
-          if (!isPublicSourceChunk({ ...row, mime: "application/pdf" })) continue;
+      let bufferedPage: number | null | undefined;
+      let pageRows: Array<Record<string, unknown> & { text: string; page: number | null }> = [];
+      const flushPage = () => {
+        if (!pageRows.length) return;
+        for (const row of filterPublicSamePagePdfChunks(pageRows)) {
           const page = row.page == null ? null : Number(row.page);
           const current = byPage.get(page);
           byPage.set(page, { page, characters: (current?.characters ?? 0) + Number(row.characters), readable: Boolean(current?.readable || row.readable) });
@@ -54,7 +56,17 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
           ids.push(String(row.id));
           permittedIds.set(page, ids);
         }
+        pageRows = [];
+      };
+      for await (const rows of query.cursor(16)) {
+        for (const row of rows) {
+          const page = row.page == null ? null : Number(row.page);
+          if (bufferedPage !== undefined && page !== bufferedPage) flushPage();
+          bufferedPage = page;
+          pageRows.push(row as Record<string, unknown> & { text: string; page: number | null });
+        }
       }
+      flushPage();
       stats = [...byPage.values()];
     } else {
       stats = await tx<PageStats[]>`SELECT page,sum(length(text))::int AS characters,bool_or(text ~ '[^[:space:]]') AS readable

@@ -141,7 +141,6 @@ function scanMathSpans(text: string): MathSpan[] {
   const displayEnvStack: Array<{ name: string; start: number }> = [];
   const displayEnvCounts = new Map<string, number>();
   let displayDollarStart: number | null = null;
-  let displaySpanBaseline = 0;
   let inlineDollarStart: number | null = null;
   const commentEnds = new Int32Array(text.length);
   const displayCloseFrom = new Uint8Array(text.length + 1);
@@ -296,10 +295,13 @@ function scanMathSpans(text: string): MathSpan[] {
             }
             inlineDollarStart = null;
           }
+          if (!displayCloseFrom[i + 2]) {
+            i += 2;
+            continue;
+          }
           displayDollarStart = i;
           displayEnvStack.length = 0;
           displayEnvCounts.clear();
-          displaySpanBaseline = spans.length;
           i += 2;
           continue;
         }
@@ -328,20 +330,6 @@ function scanMathSpans(text: string): MathSpan[] {
   };
 
   scanRange(0, text.length);
-  if (displayDollarStart !== null) {
-    // At most one unclosed $$ can exist (near EOF); discard its provisional inner spans and re-scan its suffix.
-    const suffixStart = displayDollarStart + 2;
-    spans.length = displaySpanBaseline;
-    displayDollarStart = null;
-    inlineDollarStart = null;
-    displayEnvStack.length = 0;
-    displayEnvCounts.clear();
-    bracketStack.length = 0;
-    parenStack.length = 0;
-    envStack.length = 0;
-    envCounts.clear();
-    scanRange(suffixStart, text.length);
-  }
   return spans;
 }
 

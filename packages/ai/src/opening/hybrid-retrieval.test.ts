@@ -455,4 +455,25 @@ describe("material hybrid retrieval", () => {
     const straddlingSegments = segmentMaterialChunks([chunk("straddling-stray-end", straddling)], 6000);
     expect(straddlingSegments[0]?.chunk.text.length).toBe(6000);
   });
+
+  it("rejects unclosed $$ via displayCloseFrom in single pass while protecting closed $$ with % comments", () => {
+    const unclosedWithCommentedDisplay = "$$ a % comment $$\n";
+    const padBeforeInline = "p".repeat(5998 - unclosedWithCommentedDisplay.length);
+    const inlineFormula = "$x+y$";
+    const unclosedText = unclosedWithCommentedDisplay + padBeforeInline + inlineFormula + " tail";
+    const unclosedSegments = segmentMaterialChunks([chunk("unclosed-comment-display", unclosedText)], 6000);
+    expect(unclosedSegments.map(s => s.chunk.text)).toEqual([
+      unclosedWithCommentedDisplay + padBeforeInline,
+      inlineFormula + " tail",
+    ]);
+
+    const closedWithComment = "$$ a % $$\nb $$";
+    const padBeforeClosed = "p".repeat(5995);
+    const closedText = padBeforeClosed + closedWithComment + " tail";
+    const closedSegments = segmentMaterialChunks([chunk("closed-comment-display", closedText)], 6000);
+    expect(closedSegments.map(s => s.chunk.text)).toEqual([
+      padBeforeClosed,
+      closedWithComment + " tail",
+    ]);
+  });
 });

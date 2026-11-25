@@ -1838,6 +1838,71 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertFalse(ext.inline_sealed_by_page[2])
         self.assertEqual(ext.texts_by_page[3], ["Public prose after proof."])
 
+    def test_round63_commonmark_atx_chinese_counters_and_emphasis_parity(self):
+        for empty_atx in ("######", "###   ", "## ##", "#   #", "## **** ##"):
+            self.assertEqual(physical_pages._strip_heading_markup(empty_atx), "", empty_atx)
+            ext_empty = physical_pages.extract_physical_pages(
+                result_for([text_element(1, f"Solutions\n{empty_atx}\n1. The result is 42.", 1)], start_page=1)
+            )
+            self.assertEqual(ext_empty.texts_by_page[1], [], empty_atx)
+            self.assertTrue(ext_empty.section_sealed_by_page[1], empty_atx)
+
+        for non_empty, expected in (("## # ##", "#"), ("## ## ##", "##"), ("## Title ##", "Title"), ("#######", "#######")):
+            self.assertEqual(physical_pages._strip_heading_markup(non_empty), expected, non_empty)
+            ext_non_empty = physical_pages.extract_physical_pages(
+                result_for([text_element(1, f"Solutions\n{non_empty}\n1. The result is 42.", 1)], start_page=1)
+            )
+            self.assertIn("1. The result is 42.", "\n".join(ext_non_empty.texts_by_page[1]), non_empty)
+            self.assertFalse(ext_non_empty.section_sealed_by_page[1], non_empty)
+
+        for counter in ("第2张（共10张）", "第2張, 共5張", "共5頁第2張", "共10张第2张", "共5张 2张"):
+            self.assertTrue(physical_pages._is_running_page_heading(counter), counter)
+            ext_counter = physical_pages.extract_physical_pages(
+                result_for([text_element(1, f"Solutions\n{counter}\n1. The result is 42.", 1)], start_page=1)
+            )
+            self.assertEqual(ext_counter.texts_by_page[1], [], counter)
+        self.assertFalse(physical_pages._is_running_page_heading("共10张"))
+
+        for running_container in ("Chapter 2: Algebra (第2张)", "Chapter 2 (Page 5)", "第二章 代数（第2张）", "Chapter 2: 第2张"):
+            self.assertTrue(physical_pages._is_running_page_heading(running_container), running_container)
+            ext_run = physical_pages.extract_physical_pages(
+                result_for(
+                    [text_element(1, "Answer Key\n1. x = 2", 1)],
+                    [text_element(2, f"{running_container}\n2. y = 3", 1)],
+                    start_page=1,
+                )
+            )
+            self.assertEqual(ext_run.texts_by_page[2], [], running_container)
+            self.assertTrue(ext_run.section_sealed_by_page[2], running_container)
+
+        for public_container in ("Chapter 2: Groups (Lagrange)", "Chapter 2: Linear Maps (Part 1)"):
+            self.assertFalse(physical_pages._is_running_page_heading(public_container), public_container)
+            ext_reopen = physical_pages.extract_physical_pages(
+                result_for(
+                    [text_element(1, "Answer Key\n1. x = 2", 1)],
+                    [text_element(2, f"{public_container}\nTheorem 2.1.", 1)],
+                    start_page=1,
+                )
+            )
+            self.assertIn(public_container, "\n".join(ext_reopen.texts_by_page[2]), public_container)
+            self.assertFalse(ext_reopen.section_sealed_by_page[2], public_container)
+
+        ext_unpaired = physical_pages.extract_physical_pages(
+            result_for([text_element(1, "Solutions\n** Page 42\n1. The result is 42.", 1)], start_page=1)
+        )
+        self.assertIn("1. The result is 42.", "\n".join(ext_unpaired.texts_by_page[1]))
+        ext_paired = physical_pages.extract_physical_pages(
+            result_for([text_element(1, "Solutions\n**Page 42**\n1. The result is 42.", 1)], start_page=1)
+        )
+        self.assertEqual(ext_paired.texts_by_page[1], [])
+
+        for inline_label in ("Solution: 2张", "解答： 2张", "Solution: Page 2"):
+            ext_inline = physical_pages.extract_physical_pages(
+                result_for([text_element(1, f"1. Find x.\n{inline_label}", 1)], start_page=1)
+            )
+            self.assertEqual(ext_inline.texts_by_page[1], ["1. Find x."], inline_label)
+            self.assertTrue(ext_inline.inline_sealed_by_page[1], inline_label)
+
 
 if __name__ == "__main__":
     if WORKER_FIXTURE_MODE:

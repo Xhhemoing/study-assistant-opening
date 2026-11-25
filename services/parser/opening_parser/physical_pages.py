@@ -41,7 +41,7 @@ _EMPHASIS_OPEN_PREDECESSOR_RE = re.compile(r"[\s(\[【（:：]")
 _EMPHASIS_CLOSE_FOLLOWER_RE = re.compile(r"[\s:：.,;!?。，；：！？)\]】）]")
 _UNICODE_SPACE_RE = re.compile(r"\s")
 _LINE_BREAK_SPLIT_RE = re.compile(r"(\r\n|\r|\n)")
-_MD_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+_MD_HEADING_LINE_RE = re.compile(r"^#{1,6}(?:\s|$)")
 _CAPTION_NAME = r"(?:Figure|Fig\.?|Table|Tab\.?|Chart|Diagram|Scheme|Algorithm|Listing)"
 _CAPTION_NAME_RE = re.compile(rf"^{_CAPTION_NAME}(?=\s|[:：]|$)", re.IGNORECASE)
 _BLOCK_ID = r"(?:(?:[a-z][.-]?)?\d+(?:[.-]\d+)*[a-z]?|[ivxlcdm]+)\b(?=[\s:：.．、—–(（-]|$)"
@@ -293,10 +293,12 @@ _PAGE_METADATA_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _CHINESE_COUNTER_NUMBER = r"[\d一二三四五六七八九十百千零〇]+"
+_CHINESE_PAGE_UNIT = r"[页頁张張]"
+_CHINESE_PAGE_TOTAL = rf"共\s*{_CHINESE_COUNTER_NUMBER}\s*{_CHINESE_PAGE_UNIT}"
 _CHINESE_PAGE_COUNTER = (
-    rf"(?:(?:第\s*)?{_CHINESE_COUNTER_NUMBER}(?:\s*(?:[/／–—-]|共)\s*(?:第\s*)?{_CHINESE_COUNTER_NUMBER})?\s*[页頁张張]"
-    rf"(?:\s*(?:[（(]\s*共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]\s*[）)]|[/／,，]\s*共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]))?"
-    rf"|共\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁]\s*第\s*{_CHINESE_COUNTER_NUMBER}\s*[页頁])"
+    rf"(?:(?:第\s*)?{_CHINESE_COUNTER_NUMBER}(?:\s*(?:[/／–—-]|共)\s*(?:第\s*)?{_CHINESE_COUNTER_NUMBER})?\s*{_CHINESE_PAGE_UNIT}"
+    rf"(?:\s*(?:[（(]\s*{_CHINESE_PAGE_TOTAL}\s*[）)]|[/／,，]\s*{_CHINESE_PAGE_TOTAL}))?"
+    rf"|{_CHINESE_PAGE_TOTAL}(?:\s*第\s*{_CHINESE_COUNTER_NUMBER}\s*{_CHINESE_PAGE_UNIT}|\s+{_CHINESE_COUNTER_NUMBER}\s*{_CHINESE_PAGE_UNIT}))"
 )
 _PAGE_COUNTER = (
     r"(?:[(（\[【]?\s*(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+|pp?\.\s*)\d+"
@@ -715,6 +717,8 @@ def _strip_heading_markup(line_text: str) -> str:
         if re.fullmatch(r"#{1,6}", s):
             return ""
         s = _MD_HASH_PREFIX_RE.sub("", s).strip()
+        if not s.replace("**", "").replace("__", "").strip():
+            return ""
     return _strip_markdown_emphasis(s).strip()
 
 
@@ -797,7 +801,8 @@ def _is_running_page_heading(stripped: str, *, bare_containers_are_counters: boo
     if (_FURNITURE_PAGE_COUNTER_RE.match(suffix)
             or (parenthesized and _PAGE_COUNTER_RE.match(parenthesized[2].strip())
                 and (not title or _LATIN_SECTION_TITLE_RE.fullmatch(title)
-                     or (_CJK_SECTION_TITLE_RE.match(title) and not _SECTION_PROSE_RE.search(title))))):
+                     or (_CJK_SECTION_TITLE_RE.match(title) and not _CJK_SECTION_UNITS_RE.match(title)
+                         and not _SECTION_PROSE_RE.search(title))))):
         return True
     return bare_containers_are_counters and not container[0].lower().startswith(("appendix", "附录")) and not suffix.strip(" \t:：.．—–-")
 

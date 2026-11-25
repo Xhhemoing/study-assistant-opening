@@ -249,28 +249,72 @@ describe("page-less archived PDF chunks", () => {
     [`${example}\n ## \nSolution:\nYes.`, true],
     [`${example}\n${stem}\n## ##\nSolution:\nYes.`, false],
     [`${example}\n${stem}\n## ****\nSolution:\nYes.`, false],
-    [`${example}\n${stem}\n##\nSolution:\nYes.`, true],
+    [`${example}\n${stem}\n## **** ##\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n######\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n###   \nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n#   #\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n##\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n## # ##\nSolution:\nYes.`, true],
+    [`${example}\n${stem}\n## ## ##\nSolution:\nYes.`, true],
+    [`${example}\n${stem}\n#######\nSolution:\nYes.`, true],
     ["Solutions\n## ##\n1. The result is 42.", false],
+    ["Solutions\n######\n1. The result is 42.", false],
+    ["Solutions\n###   \n1. The result is 42.", false],
+    ["Solutions\n#   #\n1. The result is 42.", false],
     ["Solutions\n## ****\n1. The result is 42.", false],
+    ["Solutions\n## **** ##\n1. The result is 42.", false],
     ["Solutions\n## __\n1. The result is 42.", false],
     ["[图片描述] ## ##\nSolutions\n1. The result is 42.", false],
     ["[图片描述] Solutions\n## ##\n1. The result is 42.", false],
+    ["[图片描述] Solutions\n######\n1. The result is 42.", false],
     ["[图片描述] ## Answers ##", false],
-    ["Solutions\n##\n1. Propositions.", true],
+    ["Solutions\n##\n1. Propositions.", false],
+    ["Solutions\n## # ##\n1. Propositions.", true],
+    ["Solutions\n## ## ##\n1. Propositions.", true],
+    ["Solutions\n## Title ##\n1. Propositions.", true],
+    ["Solutions\n#######\n1. Propositions.", true],
+    ["Solutions\n** Page 42\n1. The result is 42.", true],
+    ["Solutions\n**Page 42**\n1. The result is 42.", false],
     ["Solutions\nAlgebra | 第2张\n1. The result is 42.", false],
     ["Solutions\n第2张（共5页）\n1. The result is 42.", false],
+    ["Solutions\n第2张（共10张）\n1. The result is 42.", false],
+    ["Solutions\n第2張, 共5張\n1. The result is 42.", false],
+    ["Solutions\n共5頁第2張\n1. The result is 42.", false],
+    ["Solutions\n共10张第2张\n1. The result is 42.", false],
+    ["Solutions\n共5张 2张\n1. The result is 42.", false],
+    ["Solutions\n共10张\n1. The result is 42.", true],
     ["Solutions\n1/3张\n1. The result is 42.", false],
     ["Solutions\n共5页第2页\n1. The result is 42.", false],
+    ["Solutions\nChapter 2: Algebra (第2张)\n1. The result is 42.", false],
+    ["Solutions\nChapter 2 (Page 5)\n1. The result is 42.", false],
+    ["Solutions\n第二章 代数（第2张）\n1. The result is 42.", false],
+    ["Solutions\nChapter 2: 第2张\n1. The result is 42.", false],
+    [`${example}\nChapter 2: Algebra (第2张)\nSolution: 2张`, true],
+    [`${example}\nChapter 2 (Page 5)\nSolution: 2张`, true],
+    [`${example}\n第二章 代数（第2张）\nSolution: 2张`, true],
+    [`${example}\nChapter 2: 第2张\nSolution: 2张`, true],
+    [`${example}\nChapter 2: Groups (Lagrange)\nSolution: 2张`, false],
+    [`${example}\nChapter 2: Linear Maps (Part 1)\nSolution: 2张`, false],
+    ["Solution: 2张", false],
+    ["解答： 2张", false],
+    ["Solution: Page 2", false],
   ])("checks local answer context in %j", (text, isPublic) => {
     expect(isPublicSourceChunk({ mime: "application/pdf", page: null, text })).toBe(isPublic);
   });
 
-  it("normalizes closing ATX hashes on long whitespace and hash-space lines in O(N) time (< 50 ms)", () => {
+  it("normalizes closing ATX hashes and emphasis/counter suffixes in O(N) time (< 50 ms)", () => {
     expect(containsPdfAnswerLabel("## Answers ##   ")).toBe(true);
     expect(containsPdfAnswerLabel("## Answer#")).toBe(false);
     expect(containsPdfAnswerLabel("Solutions\n## ##\n1. The result is 42.")).toBe(true);
-    expect(containsPdfAnswerLabel("Solutions\n##\n1. Propositions.")).toBe(false);
+    expect(containsPdfAnswerLabel("Solutions\n######\n1. The result is 42.")).toBe(true);
+    expect(containsPdfAnswerLabel("Solutions\n## # ##\n1. Propositions.")).toBe(false);
+    expect(containsPdfAnswerLabel("Solutions\n#######\n1. Propositions.")).toBe(false);
     expect(containsPdfAnswerLabel("Solutions\nAlgebra | 第2张\n1. The result is 42.")).toBe(true);
+    expect(containsPdfAnswerLabel("Solutions\n** Page 42\n1. The result is 42.")).toBe(false);
+    expect(containsPdfAnswerLabel("Solutions\n**Page 42**\n1. The result is 42.")).toBe(true);
+    expect(containsPdfAnswerLabel("Solution: 2张")).toBe(true);
+    expect(containsPdfAnswerLabel("解答： 2张")).toBe(true);
+    expect(containsPdfAnswerLabel("Solution: Page 2")).toBe(true);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answers ##   " })).toBe(false);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answer#" })).toBe(true);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "Solutions\n## ##\n1. The result is 42." })).toBe(false);
@@ -279,9 +323,13 @@ describe("page-less archived PDF chunks", () => {
     const longSpaces = "## " + " ".repeat(25_000) + "prose";
     const longHashSpaces = "## " + "# ".repeat(25_000) + "prose";
     const longClosingAnswer = "## Answers" + " ".repeat(25_000) + "##   ";
-    const longStarPage = "** ".repeat(25_000) + "Page 42";
-    const longUnderSheet = "__ ".repeat(25_000) + "第2张";
+    const longUnpairedStarPage = "** ".repeat(25_000) + "Page 42";
+    const longUnpairedUnderSheet = "__ ".repeat(25_000) + "第2张";
+    const longPairedStarPage = "**Page " + "4".repeat(25_000) + "**";
     const longStarTitled = "** ".repeat(25_000) + "a".repeat(200) + "| Page 42";
+    const nearMatchStarEnd = "Page 42" + "** ".repeat(5_000) + "x";
+    const nearMatchSpaceEnd = "Algebra : Page 42" + " ".repeat(5_000) + "x";
+    const nearMatchLeadStar = "** ".repeat(5_000) + "Page 42 x";
 
     const t0 = performance.now();
     expect(containsPdfAnswerLabel(longSpaces)).toBe(false);
@@ -299,10 +347,17 @@ describe("page-less archived PDF chunks", () => {
     expect(performance.now() - t2).toBeLessThan(50);
 
     const t3 = performance.now();
-    expect(containsPdfAnswerLabel(`Solutions\n${longStarPage}\n1. The result is 42.`)).toBe(true);
-    expect(containsPdfAnswerLabel(`Solutions\n${longUnderSheet}\n1. The result is 42.`)).toBe(true);
+    expect(containsPdfAnswerLabel(`Solutions\n${longUnpairedStarPage}\n1. The result is 42.`)).toBe(false);
+    expect(containsPdfAnswerLabel(`Solutions\n${longUnpairedUnderSheet}\n1. The result is 42.`)).toBe(false);
+    expect(containsPdfAnswerLabel(`Solutions\n${longPairedStarPage}\n1. The result is 42.`)).toBe(true);
     expect(containsPdfAnswerLabel(longStarTitled)).toBe(false);
     expect(performance.now() - t3).toBeLessThan(50);
+
+    const t4 = performance.now();
+    expect(containsPdfAnswerLabel(`Solutions\n${nearMatchStarEnd}\n1. The result is 42.`)).toBe(false);
+    expect(containsPdfAnswerLabel(`Solutions\n${nearMatchSpaceEnd}\n1. The result is 42.`)).toBe(false);
+    expect(containsPdfAnswerLabel(`Solutions\n${nearMatchLeadStar}\n1. The result is 42.`)).toBe(false);
+    expect(performance.now() - t4).toBeLessThan(50);
   });
 });
 

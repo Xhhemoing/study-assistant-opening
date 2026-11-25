@@ -110,7 +110,7 @@ function stripMarkdownEmphasis(line: string): string {
 
 function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading: boolean } {
   const trimmed = line.trim();
-  const isMarkdownHeading = /^#{1,6}\s+\S/u.test(trimmed);
+  const isMarkdownHeading = /^#{1,6}(?:\s|$)/u.test(trimmed);
   let s = trimmed;
   if (isMarkdownHeading) {
     if (s.endsWith("#")) {
@@ -122,6 +122,7 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
     }
     if (/^#{1,6}$/u.test(s)) return { stripped: "", isMarkdownHeading };
     s = s.replace(/^(?:#{1,6}\s+)+/u, "").trim();
+    if (!s.replace(/\*\*|__/gu, "").trim()) return { stripped: "", isMarkdownHeading };
   }
   return { stripped: stripMarkdownEmphasis(s).trim(), isMarkdownHeading };
 }
@@ -337,7 +338,9 @@ const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s
 const CONTINUATION_HEADING_RE = /(?:\b(?:continued|cont(?:['’]?d)?)(?:\s+(?:from|on)\s+.+)?[.\s:：]*$|[([（【]\s*(?:(?:to\s+be\s+)?continued|cont(?:['’]?d)?\.?|续|续上页|接上页)\s*[)\]）】]|(?:接上页|续上页|\s续)\s*[:：.]?$)/iu;
 
 const CHINESE_COUNTER_NUMBER = "[\\d一二三四五六七八九十百千零〇]+";
-const CHINESE_PAGE_COUNTER = String.raw`(?:(?:第\s*)?${CHINESE_COUNTER_NUMBER}(?:\s*(?:[/／–—-]|共)\s*(?:第\s*)?${CHINESE_COUNTER_NUMBER})?\s*[页頁张張](?:\s*(?:[（(]\s*共\s*${CHINESE_COUNTER_NUMBER}\s*[页頁]\s*[）)]|[/／,，]\s*共\s*${CHINESE_COUNTER_NUMBER}\s*[页頁]))?|共\s*${CHINESE_COUNTER_NUMBER}\s*[页頁]\s*第\s*${CHINESE_COUNTER_NUMBER}\s*[页頁])`;
+const CHINESE_PAGE_UNIT = "[页頁张張]";
+const CHINESE_PAGE_TOTAL = String.raw`共\s*${CHINESE_COUNTER_NUMBER}\s*${CHINESE_PAGE_UNIT}`;
+const CHINESE_PAGE_COUNTER = String.raw`(?:(?:第\s*)?${CHINESE_COUNTER_NUMBER}(?:\s*(?:[/／–—-]|共)\s*(?:第\s*)?${CHINESE_COUNTER_NUMBER})?\s*${CHINESE_PAGE_UNIT}(?:\s*(?:[（(]\s*${CHINESE_PAGE_TOTAL}\s*[）)]|[/／,，]\s*${CHINESE_PAGE_TOTAL}))?|${CHINESE_PAGE_TOTAL}(?:\s*第\s*${CHINESE_COUNTER_NUMBER}\s*${CHINESE_PAGE_UNIT}|\s+${CHINESE_COUNTER_NUMBER}\s*${CHINESE_PAGE_UNIT}))`;
 const PAGE_COUNTER = String.raw`(?:[(（[【]?\s*(?:(?:(?:scanned|physical|printed|pdf)\s+)*(?:pages?|slides?)\s+|pp?\.\s*)\d+(?:\s*(?:of\s+|[/／–—-]\s*)\d+)?\s*[)）\]】]?|${CHINESE_PAGE_COUNTER})\s*[.。．、]?$`;
 const PAGE_COUNTER_RE = new RegExp("^" + PAGE_COUNTER, "iu");
 const FURNITURE_PAGE_COUNTER_RE = new RegExp(String.raw`^\s*[|:：—–-]\s*${PAGE_COUNTER}`, "iu");
@@ -363,7 +366,7 @@ function isRunningPageHeading(stripped: string, bareContainersAreCounters = true
   if (FURNITURE_PAGE_COUNTER_RE.test(suffix)
     || (bracketed?.[2] && PAGE_COUNTER_RE.test(bracketed[2].trim())
       && (!bracketedTitle || LATIN_SECTION_TITLE_RE.test(bracketedTitle)
-        || CJK_SECTION_TITLE_RE.test(bracketedTitle) && !SECTION_PROSE_RE.test(bracketedTitle)))) return true;
+        || CJK_SECTION_TITLE_RE.test(bracketedTitle) && !CJK_SECTION_UNITS_RE.test(bracketedTitle) && !SECTION_PROSE_RE.test(bracketedTitle)))) return true;
   return Boolean(bareContainersAreCounters && !/^(?:Appendix\b|附录)/iu.test(container)
     && /^[\s:：.．—–-]*$/u.test(suffix));
 }
