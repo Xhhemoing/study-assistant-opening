@@ -36,6 +36,9 @@ async function seed(){
   const gateway={call:async(...args:Parameters<typeof rawGateway.call>)=>{try{return await rawGateway.call(...args);}catch(error){throw Object.assign(new Error(`controlled grading gateway: ${error instanceof Error?error.message:String(error)}`,{cause:error}),{code:"CONFLICT"});}}};
   const service=createOpeningAiGradingService({repository,gateway,budget:scope=>({reserve:input=>budget.reserve(scope,input),release:(id,reason)=>budget.release(scope,id,reason),
     claimExecution:id=>budget.claimExecution(scope,id),settle:(...args)=>budget.settle(scope,...args),markUnknown:id=>budget.markUnknown(scope,id)}),
+    multimodalEvidence:({observation,answerRevision,workSource})=>({observationId:observation.id,answerRevision,workSource,
+      photoStorageKey:observation.photoStorageKey,steps:[{stepId:"power",bbox:[0,0,1,1],
+        ast:{kind:"expression",tokens:[{tokenId:"exponent",kind:"digit",rawText:"2",confidence:.99}]}}]}),
     images:async()=>[{mediaType:"image/png",data:"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=",sourceId:photoId,physicalPage:1}]});
   const graded=await service.grade(f.scope,{observationId:original.id});
   const interpretations=createOpeningAnswerInterpretationRepository(f.sql),input={expectedHead:graded.id,correctedTranscription:"A²v=A(Av)=A(λv)=λAv=λ²v",reason:"原图第二行的平方被漏识别",clientKey:randomUUID()};

@@ -1,7 +1,22 @@
 import { describe, expect, it } from "vitest";
+import {
+  parseBackupSourceRefs,
+} from "../../../database/src/repositories/backup-publication-provenance";
+import {
+  projectOpeningBackupCardSources,
+  projectOpeningBackupProvenance,
+} from "../../../database/src/repositories/opening-backup-library";
+import {
+  containsDisallowedNoteMetadataOrArray as dbContainsDisallowedNoteMetadataOrArray,
+  parseContextSourceRefs,
+  parseNoteContextProvenanceRefs,
+  parseNoteContextSourceRefs,
+} from "../../../database/src/repositories/opening-context-provenance";
 import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
+import { projectPrivacyGuardedOpeningDataset } from "./deidentified-dataset";
 import {
+  containsDisallowedNoteMetadataOrArray,
   noteProvenanceSourceReferences,
   sourceReferences,
   turnMemoryDependencyIds,
@@ -46,6 +61,16 @@ describe("context provenance at the backup boundary", () => {
     expect(sourceReferences(note)).toBeNull();
     expect(noteProvenanceSourceReferences({ context_source_refs: [source, { answerKeyBlockIds: [null] }] })).toBeNull();
     expect(noteProvenanceSourceReferences({ context_source_refs: [{ sourceId, answerKeyBlockIds: [turnId] }] })).toBeNull();
+  });
+
+  it("accepts valid memory metadata on notes and rejects malformed entries", () => {
+    const source = { sourceId, sourceVersion: 1 };
+    const memory = { memoryDependencyIds: [turnId.toUpperCase()] };
+    expect(noteProvenanceSourceReferences({ context_source_refs: [source, memory] })).toEqual([sourceId]);
+    expect(noteProvenanceSourceReferences({ context_source_refs: [memory] })).toEqual([]);
+    for (const ref of [{ memoryDependencyIds: [] }, { memoryDependencyIds: [null] }, { ...source, ...memory }]) {
+      expect(noteProvenanceSourceReferences({ context_source_refs: [ref] })).toBeNull();
+    }
   });
 
   it.each([{}, "[]", [null], [{}], [{ sourceId, sourceVersion: "1" }],
@@ -117,9 +142,9 @@ describe("context provenance at the backup boundary", () => {
     });
     expect(turnMemoryDependencyIds(mixedTurn)).toEqual([memoryId]);
     expect(turnSourceReferences(mixedTurn)).toEqual([sourceId]);
-    // Non-turn tables must still reject memoryDependencyIds strictly.
+    // Only the turn and note readers admit memory dependency metadata.
     expect(sourceReferences(documentlessTurn)).toBeNull();
-    expect(noteProvenanceSourceReferences(documentlessTurn)).toBeNull();
+    expect(noteProvenanceSourceReferences(documentlessTurn)).toEqual([]);
 
     const originTurn = turn({ id: originTurnId, role: "user", context_source_refs: null });
     const memoryRow = row({ id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [originTurnId] });
@@ -194,18 +219,18 @@ describe("context provenance at the backup boundary", () => {
     expect(preview.errors).toContain("table opening_turns has invalid source lineage");
   });
 
-  it("rejects memoryDependencyIds on non-turn tables and rejects dangling or deleted turn memory dependencies", () => {
+  it("preserves note dependencies as lineage markers and rejects unavailable turn dependencies", () => {
     const originTurnId = "77777777-7777-4777-8777-777777777777";
     const memoryId = "88888888-8888-4888-8888-888888888888";
 
-    // 1. Non-turn table (opening_note_provenance) carrying memoryDependencyIds fails closed.
+    // Opening archives retain the marker even when the personal note's memory is gone.
     const noteBackup = backup([]);
+    noteBackup.tables.library_documents = [row({ id: candidateId })];
     noteBackup.tables.opening_note_provenance = [row({
       document_id: candidateId,
       context_source_refs: [{ memoryDependencyIds: [memoryId] }],
     })];
-    expect(validateOpeningRestore(noteBackup, [], currentMemoryDeletions).errors)
-      .toContain("table opening_note_provenance has invalid source lineage");
+    expect(validateOpeningRestore(noteBackup, [], currentMemoryDeletions).allowed).toBe(true);
 
     // 2. Dangling memoryDependencyIds (missing from opening_memories) fails closed and requires live memory deletion facts.
     const danglingBackup = backup([turn({ context_source_refs: [{ memoryDependencyIds: [memoryId] }] })]);
@@ -227,5 +252,254 @@ describe("context provenance at the backup boundary", () => {
     const deletedPreview = validateOpeningRestore(deletedBackup, [], deletedFacts);
     expect(deletedPreview.allowed).toBe(false);
     expect(deletedPreview.errors).toContain("table opening_turns references a deleted memory");
+  });
+
+  it.each([
+    {
+      name: "mixed source ref with scalar publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, publicationCardIds: candidateId }],
+    },
+    {
+      name: "mixed source ref with array publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "nested array publicationCardIds",
+      refs: [[{ publicationCardIds: [candidateId] }]],
+    },
+    {
+      name: "valid source ref alongside nested array publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1 }, [[{ publicationCardIds: [candidateId] }]]],
+    },
+    {
+      name: "nested object metadata under valid source ref",
+      refs: [{ sourceId, sourceVersion: 1, nested: { publicationCardIds: [candidateId] } }],
+    },
+    {
+      name: "mixed source ref with answerKeyBlockIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, answerKeyBlockIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with originTurnIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, originTurnIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with snippetLineageVersion alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, snippetLineageVersion: 1 }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with memoryDependencyIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, memoryDependencyIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "33-level nested array publicationCardIds with tab/newline/NBSP/BOM whitespace",
+      refs: [{
+        publicationCardIds: Array.from({ length: 33 }).reduce<unknown>(
+          acc => [acc],
+          `\t\r\n\u00a0${candidateId.toUpperCase()}\ufeff\v\f`,
+        ),
+      }],
+    },
+    {
+      name: "64-level nested array publicationCardIds inside nested publicationCardIds object",
+      refs: [{
+        publicationCardIds: [{
+          other: {
+            publicationCardIds: Array.from({ length: 64 }).reduce<unknown>(acc => [acc], `\t${candidateId.toUpperCase()}\n`),
+          },
+        }],
+      }],
+    },
+    {
+      name: "valid source ref with extra array-valued legacy property",
+      refs: [
+        { sourceId, sourceVersion: 1, legacy: [{ sourceId: otherSourceId, sourceVersion: 1 }] },
+        { publicationCardIds: [candidateId] },
+      ],
+    },
+    {
+      name: "valid source ref with empty array property",
+      refs: [{ sourceId, sourceVersion: 1, extra: [] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "valid source ref with deeply nested array property",
+      refs: [{ sourceId, sourceVersion: 1, deep: { nested: [1] } }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with string publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: "legacy" }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with false publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: false }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with numeric publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: 1 }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "note source ref with null publication value",
+      refs: [{ sourceId, sourceVersion: 1, publication: null }, { publicationCardIds: [candidateId] }],
+    },
+  ])("fails closed on $name so linked root-null and observation cards are excluded from backup", ({ refs }) => {
+    const docId = "99999999-9999-4999-8999-999999999999";
+    const obsCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const keepCardId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const obsId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const activityId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const rootNullCard = {
+      id: candidateId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: null,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const observationCard = {
+      id: obsCardId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: obsId,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const cleanCard = {
+      id: keepCardId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: null,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const provenanceRow = {
+      document_id: docId,
+      workspace_id: workspaceId,
+      context_source_refs: refs,
+    };
+
+    expect(parseNoteContextProvenanceRefs(refs)).toBeNull();
+    expect(parseNoteContextSourceRefs(refs)).toBeNull();
+    expect(noteProvenanceSourceReferences(provenanceRow)).toBeNull();
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, observationCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+      opening_learning_observations: [{ id: obsId, activity_id: activityId }],
+      opening_teaching_activities: [{ id: activityId, source_ids: [sourceId] }],
+      opening_teaching_activity_specs: [{ activity_id: activityId, document_id: docId, source_refs: [] }],
+    }, [provenanceRow])).toEqual([cleanCard]);
+    expect(projectOpeningBackupProvenance([provenanceRow], new Set([candidateId, obsCardId]))).toEqual([provenanceRow]);
+
+    const datasetResult = projectPrivacyGuardedOpeningDataset({
+      scope: { workspaceId, ownerUserId: ownerId },
+      privacyEpoch: 0,
+      mode: "solo",
+      role: "learner",
+      tables: {
+        cards: [{ ...rootNullCard, owner_user_id: ownerId }, { ...cleanCard, owner_user_id: ownerId }],
+        library_documents: [],
+        opening_sources: [{ id: sourceId, workspace_id: workspaceId, upload_state: "uploaded" }],
+        opening_teaching_activities: [
+          {
+            id: activityId,
+            workspace_id: workspaceId,
+            owner_user_id: ownerId,
+            generate_status: "ready",
+            source_ids: [sourceId],
+            create_intent: { kind: "card_review_variant", cardId: candidateId },
+          },
+          {
+            id: obsId,
+            workspace_id: workspaceId,
+            owner_user_id: ownerId,
+            generate_status: "ready",
+            source_ids: [sourceId],
+            create_intent: { kind: "card_review_variant", cardId: keepCardId },
+          },
+        ],
+        opening_note_provenance: [{ ...provenanceRow, snippet_origin: false }],
+      },
+    }, (kind, id) => `${kind}:${id}`);
+    expect(datasetResult.dataset.coursePackageQuality.map(item => item.identity)).toEqual([`activity:${obsId}`]);
+  });
+
+  it.each([4_096, 10_000])("handles %i-deep nested publicationCardIds arrays and deep object structures without RangeError", depth => {
+    const allEcmaSpaces = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+    const docId = "99999999-9999-4999-8999-999999999999";
+    const objCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const keepCardId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const activityA = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const activityB = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const activityKeep = "11111111-1111-4111-8111-111111111111";
+
+    let deepIds: unknown = [
+      `${allEcmaSpaces}${candidateId.toUpperCase()}${allEcmaSpaces}`,
+      { cardId: `${allEcmaSpaces}${objCardId.toUpperCase()}${allEcmaSpaces}` },
+    ];
+    for (let i = 0; i < depth; i++) {
+      deepIds = [deepIds];
+    }
+    const refs = [{ publicationCardIds: deepIds }];
+    const provenanceRow = {
+      document_id: docId,
+      workspace_id: workspaceId,
+      context_source_refs: refs,
+    };
+
+    expect(parseBackupSourceRefs(refs)).toBeNull();
+    expect(parseNoteContextProvenanceRefs(refs)).toBeNull();
+    expect(parseNoteContextSourceRefs(refs)).toBeNull();
+    expect(noteProvenanceSourceReferences(provenanceRow)).toBeNull();
+
+    const cards = [
+      { id: candidateId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+      { id: objCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+      { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+    ];
+    expect(projectOpeningBackupCardSources({
+      cards,
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, [provenanceRow])).toEqual([cards[2]]);
+
+    const datasetResult = projectPrivacyGuardedOpeningDataset({
+      scope: { workspaceId, ownerUserId: ownerId },
+      privacyEpoch: 0,
+      mode: "solo",
+      role: "learner",
+      tables: {
+        cards: cards.map(card => ({ ...card, owner_user_id: ownerId })),
+        library_documents: [{ id: docId, workspace_id: workspaceId, deleted_at: null }],
+        opening_sources: [{ id: sourceId, workspace_id: workspaceId, upload_state: "uploaded" }],
+        opening_teaching_activities: [
+          { id: activityA, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: candidateId } },
+          { id: activityB, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: objCardId } },
+          { id: activityKeep, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: keepCardId } },
+        ],
+        opening_note_provenance: [{ ...provenanceRow, snippet_origin: false }],
+      },
+    }, (kind, id) => `${kind}:${id}`);
+    expect(datasetResult.dataset.coursePackageQuality.map(item => item.identity)).toEqual([`activity:${activityKeep}`]);
+
+    let deepCleanObj: Record<string, unknown> = { leaf: "ok" };
+    let deepBadObj: Record<string, unknown> = { legacy: [] };
+    for (let i = 0; i < depth; i++) {
+      deepCleanObj = { next: deepCleanObj };
+      deepBadObj = { next: deepBadObj };
+    }
+    expect(containsDisallowedNoteMetadataOrArray(deepCleanObj)).toBe(false);
+    expect(dbContainsDisallowedNoteMetadataOrArray(deepCleanObj)).toBe(false);
+    expect(containsDisallowedNoteMetadataOrArray(deepBadObj)).toBe(true);
+    expect(dbContainsDisallowedNoteMetadataOrArray(deepBadObj)).toBe(true);
+    expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepBadObj }])).toBeNull();
+    expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepCleanObj }])).toEqual([{ sourceId, sourceVersion: 1 }]);
+    expect(parseContextSourceRefs([{
+      chunkId: turnId,
+      sourceId: sourceId.toUpperCase(),
+      sourceVersion: 2,
+      label: "Section 1",
+      page: 3,
+      startMs: 100,
+      endMs: 250,
+      keyframeChunkId: "frame-1",
+      slideLabel: "Slide 2",
+    }])).toEqual([{ sourceId, sourceVersion: 2 }]);
   });
 });

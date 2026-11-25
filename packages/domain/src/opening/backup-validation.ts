@@ -328,7 +328,7 @@ export function turnMemoryDependencyIds(row: Record<string, unknown>): string[] 
 
 type BackupHistoryRow = Record<string, unknown>;
 
-function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
+export function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
   if (row.status !== "active" || row.course_id != null) return false;
   if (row.kind === "confirmed") return true;
   if (row.kind !== "temporary") return false;
@@ -385,6 +385,10 @@ export function unavailableBackupMemoryLineage(
 /** Note provenance can carry publication metadata alongside its versioned source refs. */
 export function notePublicationMetadata(value: unknown) {
   if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (value.snippetLineageVersion === 1) return { snippetLineageVersion: 1 as const };
+  if (Array.isArray(value.originTurnIds) && value.originTurnIds.length > 0 && value.originTurnIds.every(isUuid)) {
+    return { originTurnIds: value.originTurnIds.map(id => id.toLowerCase()) };
+  }
   if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {
     return { answerKeyBlockIds: value.answerKeyBlockIds.map(id => id.toLowerCase()) };
   }
@@ -489,9 +493,42 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
   return refs.map((id) => id.toLowerCase());
 }
 
+const noteMetadataKeys = new Set([
+  "publicationCardIds",
+  "answerKeyBlockIds",
+  "originTurnIds",
+  "snippetLineageVersion",
+  "memoryDependencyIds",
+]);
+
+export function containsDisallowedNoteMetadataOrArray(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) return true;
+    if (!isRecord(node)) continue;
+    for (const [key, child] of Object.entries(node)) {
+      if (noteMetadataKeys.has(key) || Array.isArray(child)) return true;
+      if (isRecord(child)) stack.push(child);
+    }
+  }
+  return false;
+}
+
 export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
   if (!Array.isArray(row.context_source_refs)) return null;
-  return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
+  const refs: unknown[] = [];
+  for (const ref of row.context_source_refs) {
+    if (notePublicationMetadata(ref)) continue;
+    if (isRecord(ref) && "memoryDependencyIds" in ref) {
+      if (!turnMemoryDependencyMetadata(ref)) return null;
+    } else if (!isRecord(ref)
+      || (ref.publication !== undefined && ref.publication !== true)
+      || containsDisallowedNoteMetadataOrArray(ref)) {
+      return null;
+    } else refs.push(ref);
+  }
+  return sourceReferences({ ...row, context_source_refs: refs });
 }
 
 export function turnSourceReferences(row: Record<string, unknown>): string[] | null {

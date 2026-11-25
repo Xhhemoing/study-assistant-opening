@@ -247,7 +247,11 @@ it.each([
     reserve: input => budget.reserve(scope, input), release: (...args) => budget.release(scope, ...args),
     claimExecution: id => budget.claimExecution(scope, id), settle: (...args) => budget.settle(scope, ...args),
     markUnknown: id => budget.markUnknown(scope, id),
-  }), images: async (_scope, input) => [{ sourceId: input.sourceIds[0]!, physicalPage: input.physicalPage,
+  }), multimodalEvidence: photo ? ({ observation, answerRevision, workSource }) => ({
+    observationId: observation.id, answerRevision, workSource, photoStorageKey: observation.photoStorageKey,
+    steps: [{ stepId: "sum", bbox: [0, 0, 1, 1],
+      ast: { kind: "expression", tokens: [{ tokenId: "result", kind: "digit", rawText: "1", confidence: .99 }] } }],
+  }) : undefined, images: async (_scope, input) => [{ sourceId: input.sourceIds[0]!, physicalPage: input.physicalPage,
     mediaType: "image/png", data: "data:image/png;base64,AA==" }] });
   expect(await runJob(queue, confirmed.jobId!, handler)).toBe(true);
   const job = await queue.get(fixture.scope, confirmed.jobId!);

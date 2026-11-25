@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { EphemeralProvenanceError, mergeContextSourceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
+import { EphemeralProvenanceError, mergeContextProvenanceRefs, type EphemeralProvenanceRepository } from "@aistudy/database";
 import {
   providerOutputSchema,
   type StudyContextAnchor,
@@ -15,7 +15,7 @@ import {
   type TutorLearnerContext,
 } from "@aistudy/contracts";
 import { composerMessageText, inferComposerIntent, learningContinuationIntent, tutorLearnerContextInstruction, makeStudyLanguageSupport, studyIntentForMessage, studyIntentInstruction } from "@aistudy/domain";
-import type { SystemQueryService } from "@aistudy/ai";
+import type { EphemeralSystemQueryService } from "../../../../../worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "./ephemeral-system-query";
 import { EphemeralServiceError } from "./ephemeral-error";
 export { EphemeralServiceError } from "./ephemeral-error";
@@ -71,7 +71,7 @@ export type EphemeralTutorDeps = {
     assertCurrent(scope: EphemeralScope, context: TutorLearnerContext): Promise<void> };
   studyContext?: { resolve(scope: EphemeralScope, anchor: StudyContextAnchor, expected?: { courseId?: string | null; sourceIds?: readonly string[] }): Promise<StudyContextAnchor>; languageSupport?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<string | null>; sessionIntent?(scope: EphemeralScope, anchor: StudyContextAnchor): Promise<StudyIntentEvent | null> };
   exposures?: { deliver(scope: EphemeralScope, input: { releaseKey: string; contextAnchor: StudyContextAnchor; origin: "assistant"; kind: "hint" | "solution"; level: "hinted" | "revealed"; supportDomain: "unknown" | "language" }): Promise<StudyExposureReceipt> };
-  systemQuery?: SystemQueryService;
+  systemQuery?: EphemeralSystemQueryService;
   sources: { listOwnedIds(scope: EphemeralScope, sourceIds: string[]): Promise<string[]> };
   chunks: { listForSources(scope: EphemeralScope, sourceIds: string[]): Promise<SourceChunk[]>; listChunksAtVersion?(scope: EphemeralScope, sourceId: string, version: number): Promise<SourceChunk[]> };
   privacy: {
@@ -249,18 +249,20 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       const assertMaterialsCurrent = () => withLearnerContextError(async () => { await retrieved?.assertCurrent?.(); });
       const context = retrieved?.chunks ?? selectContext(retrievalInput);
       const historyToResolve = epochChanged ? [] : input.history;
-      const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : [];
-      const historyDiscarded = epochChanged || historyRefs === null;
+      const historyRefs = historyToResolve.length ? await deps.provenance?.resolveHistory(scope, historyToResolve, privacy.epoch) ?? null : null;
+      const historyDiscarded = epochChanged || (historyToResolve.length > 0 && historyRefs === null);
       const history = historyDiscarded ? [] : historyToResolve;
+      const assertHistoryCurrent = async () => {
+        if (history.length && await deps.provenance!.resolveHistory(scope, history, privacy.epoch) === null) {
+          throw new EphemeralServiceError("PRIVACY_CHANGED", "关联学习记忆已不可用，请重新提问。", 409);
+        }
+      };
       // Discarded/unverified temporary history cannot turn a first request into a repeat.
       if (request.mode === undefined) input = { ...input, mode: inferComposerIntent({ ...request, history,
         practiceMode: Boolean(contextAnchor?.attemptId || contextAnchor?.activityId), studyIntent: sessionIntent,
       }).mode };
       const learnerContext = deps.learnerContext ? await withLearnerContextError(() => deps.learnerContext!.read(scope, {
         courseId: input.courseId ?? contextAnchor?.courseId, sourceIds: allowedSourceIds })) : null;
-      const contextSourceRefs = mergeContextSourceRefs(
-        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), historyRefs ?? [], learnerContext?.sourceRefs ?? [],
-      );
       let streamedExposure: StudyExposureReceipt | undefined;
       const deliverHelp = async () => {
         if (!streamedExposure && contextAnchor && deps.exposures) streamedExposure = await deps.exposures.deliver(scope, {
@@ -276,9 +278,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         if (await deps.privacy.currentEpoch(scope) !== privacy.epoch) {
           throw new EphemeralServiceError("PRIVACY_CHANGED", "隐私设置已变化，本次回答已停止。", 409);
         }
+        await assertHistoryCurrent();
         // A partial hint already shown to the learner must count even if the stream later fails.
         await deliverHelp();
         await assertMaterialsCurrent();
+        await assertHistoryCurrent();
         await onTextDelta(delta);
       } : undefined;
       let selected: ResolvedTaskModel | undefined;
@@ -298,8 +302,23 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         throw new EphemeralServiceError("VISION_REQUIRED", VISION_REQUIRED_MESSAGE, 422);
       }
       const pageForImages = selectedPage ?? (imageOnlySources ? 1 : null);
+      const imageSourceVersions = new Map(chunks.filter(chunk => allowedSourceIds.includes(chunk.sourceId))
+        .map(chunk => [chunk.sourceId, chunk.sourceVersion]));
+      const sourceVersions = Object.fromEntries(imageSourceVersions);
       const imageParts = selected?.supportsVision && pageForImages != null && deps.pageImages
-        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])), physicalPage: pageForImages }) : [];
+        ? await deps.pageImages(scope, { sourceIds: allowedSourceIds, sourceVersions, physicalPage: pageForImages }) : [];
+      const imageSourceRefs = imageParts.map(image => {
+        const sourceId = image.sourceId;
+        const sourceVersion = sourceId === undefined ? undefined : imageSourceVersions.get(sourceId);
+        if (sourceId === undefined || sourceVersion === undefined) {
+          throw new EphemeralServiceError("SOURCE_UNAVAILABLE", "图片来源不可用，请重新选择材料后重试。", 422);
+        }
+        return { sourceId, sourceVersion };
+      });
+      const contextSourceRefs = mergeContextProvenanceRefs(
+        context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })), imageSourceRefs,
+        historyRefs ?? [], learnerContext?.sourceRefs ?? [],
+      );
       const providerInput: ProviderInput = {
         instruction: instructionFor(input.mode, { text: input.text })+tutorLearnerContextInstruction(learnerContext)+studyIntentInstruction(studyIntentForMessage(sessionIntent, composerMessageText(input.text))),
         text: input.text,
@@ -357,6 +376,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
               throw new EphemeralServiceError("ABORTED", "ephemeral request aborted before sending", 499);
             }
             await assertMaterialsCurrent();
+            await assertHistoryCurrent();
           },
         }).catch((error: unknown) => {
           // Keep fallback semantics; only an acknowledged pre-send release may
@@ -396,8 +416,11 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       if (signal?.aborted) throw new EphemeralServiceError("ABORTED", "ephemeral request aborted", 499);
       let provenanceId: string | null = null;
       try {
+        await assertHistoryCurrent();
         provenanceId = await deps.provenance?.record(scope, {
           reservationId: completed.reservation.id, requestId: completed.reservation.requestId, privacyEpoch: privacy.epoch, contextSourceRefs,
+          ...(history.length && !historyRefs?.verifiedLineage ? { verifiedLineage: false as const } : {}),
+          ...(historyRefs?.originTurnIds?.length ? { originTurnIds: historyRefs.originTurnIds } : {}),
         }) ?? null;
       } catch (error) {
         if (error instanceof EphemeralProvenanceError) {
@@ -414,6 +437,7 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         clientSourceIds.length === 0 && allowedSourceIds.length > 0;
       const exposureReceipt = await deliverHelp();
       await assertMaterialsCurrent();
+      await assertHistoryCurrent();
       return {
         ...(contextAnchor ? { contextAnchor } : {}),
         ...(exposureReceipt ? { exposureReceipt } : {}),

@@ -29,6 +29,15 @@ const base = () => ({ authorization, question: "我现在学到哪里？", priva
 afterEach(() => vi.useRealTimers());
 
 describe("bounded system query planner", () => {
+  it.each([["刷新", true], ["我有哪些课程？", false]] as const)(
+    "reports only previous-question context used by %s", async (question, inherits) => {
+      const onPreviousQuestionUsed = vi.fn();
+      const input = base();
+      input.read.mockImplementation(async () => result("courses"));
+      await runSystemQuery({ ...input, question, previousQuestion: ["模型设置"], resolveObjects: true, onPreviousQuestionUsed });
+      expect(onPreviousQuestionUsed).toHaveBeenCalledTimes(inherits ? 1 : 0);
+    },
+  );
   it("resolves course identifiers from a real read, ignores model prose and emits only server evidence", async () => {
     const input = base();
     input.read.mockImplementation(async request => request.name === "courses" ? result("courses", [{ id: courseId, summary: "数学" }]) : result(request.name));

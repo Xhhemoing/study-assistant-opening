@@ -8,7 +8,7 @@ import {
 } from "@aistudy/contracts";
 import { localDateKeyInZone, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { readSystemStateQuery } from "./opening-system-query-state";
-import { readSystemRecordQuery } from "./opening-system-query-records";
+import { publicSystemQueryOffset, readSystemRecordQuery, type RecordNoteLineage } from "./opening-system-query-records";
 import { readSystemLearningQuery } from "./opening-system-query-learning";
 import { withSystemQueryReadDeadline } from "./opening-system-query-deadline";
 import { systemQueryOwnerGrant } from "./opening-system-query-admission";
@@ -18,7 +18,8 @@ export type OpeningSystemQueryDraft = Omit<SystemQueryResult, "name" | "data"> &
 const iso = (value: unknown) => new Date(value as string | Date).toISOString();
 const literalSearch = (value: string) => `%${value.replace(/[\\%_]/g, "\\$&")}%`;
 export type SystemQueryPublicSettings = { process: "web" | "worker"; adaptivePlanning: boolean; teachingLoop: boolean };
-export type SystemQueryReadOptions = { now?: () => Date; publicSettings?: () => SystemQueryPublicSettings; purpose?: SystemQueryAuthorization["purpose"] };
+export type SystemQueryReadOptions = { now?: () => Date; publicSettings?: () => SystemQueryPublicSettings; purpose?: SystemQueryAuthorization["purpose"];
+  collectLineage?: (lineage: RecordNoteLineage) => void };
 
 /** Fixed SELECTs in a read-only snapshot. Scope comes from authenticated server code, never model arguments. */
 export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, options: SystemQueryReadOptions = {}) {
@@ -26,6 +27,8 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
     const request = systemQueryRequestSchema.parse(raw);
     const now = options.now?.() ?? new Date();
     if (signal.aborted) throw new Error("system query cancelled");
+    const memoryIds = new Set<string>();
+    const originTurnIds = new Set<string>();
     const result = await sql.begin("isolation level repeatable read read only", async tx => {
       await tx`SET LOCAL statement_timeout='2000ms'`;
       const [owner] = await tx`SELECT transaction_timestamp() AS snapshot_as_of,w.privacy_epoch,p.adaptive_planning,p.ai_settings,p.planning_settings,p.updated_at AS preferences_updated_at,
@@ -42,7 +45,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       const args = request.arguments;
       const limit = "limit" in args ? args.limit : 10, offset = "offset" in args ? args.offset : 0;
       const page = (rows: Row[]) => {
-        if (rows.length > limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = offset + limit; }
+        if (rows.length > limit) { out.status = "partial"; out.reason = "truncated"; out.nextOffset = publicSystemQueryOffset(offset + limit); }
         return rows.slice(0, limit);
       };
       const evidence = (row: Row, kind: string, title: string, href: string, revision: string) => {
@@ -51,7 +54,11 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
       if (request.name === "learner_state" || request.name === "explain_decision") {
         await readSystemStateQuery(tx, scope, request, out);
       } else if (request.name === "notes" || request.name === "cards" || request.name === "exam_sprint") {
-        await readSystemRecordQuery(tx, scope, request, out);
+        await readSystemRecordQuery(tx, scope, request, out, signal,
+          options.collectLineage ? lineage => {
+            for (const id of lineage.memoryIds) memoryIds.add(id);
+            for (const id of lineage.originTurnIds) originTurnIds.add(id);
+          } : undefined);
       } else if (request.name === "courses") {
         const prefs = openingAdaptivePrefsSchema.safeParse(await readProjectedOpeningAdaptivePrefs(tx, scope, owner.adaptive_planning));
         const rows = await tx`SELECT id,title,updated_at FROM courses WHERE workspace_id=${scope.workspaceId} AND archived_at IS NULL
@@ -70,6 +77,7 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
         if (owner.adaptive_planning != null && !prefs.success) { out.status = "partial"; out.reason = "unavailable"; }
       } else if (request.name === "learning" || request.name === "recommendation") {
         await readSystemLearningQuery(tx, scope, request, out, limit, offset);
+        out.nextOffset = request.name === "learning" && out.nextOffset !== null ? publicSystemQueryOffset(out.nextOffset) : null;
       } else if (request.name === "materials") {
         if (!request.arguments.sourceId && !request.arguments.courseId && !request.arguments.query?.trim()) return { ...out, status: "unknown" as const, reason: "invalid_arguments" as const };
         const a = request.arguments;
@@ -184,7 +192,11 @@ export function createScopedOpeningSystemQueryReader(sql: Sql, scope: Scope, opt
     });
     if (signal.aborted) throw new Error("system query cancelled");
     if (!current || result.authorization.permissionRevision !== systemQueryOwnerGrant(scope, Number(current.privacy_epoch), options.purpose ?? "system_record_lookup").permissionRevision) throw new Error("system query privacy changed");
-    return systemQueryResultSchema.parse(result);
+    const parsed = systemQueryResultSchema.parse(result);
+    if (parsed.data.length && (memoryIds.size || originTurnIds.size)) {
+      options.collectLineage?.({ memoryIds: [...memoryIds], originTurnIds: [...originTurnIds] });
+    }
+    return parsed;
   });
 }
 

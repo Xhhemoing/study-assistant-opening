@@ -22,6 +22,7 @@ export interface OpeningAiGradingContext {
   referenceSourceMetadata: { mime: string; bytes: number }[];
   workSource: { id: string; version: number; physicalPage: number } | null;
   workSourceMetadata: { mime: string; bytes: number } | null;
+  multimodalEvidence: import("@aistudy/ai").OpeningHandwritingEvidence | null;
   existing: LearningObservation | null;
   answerRevision: number;
   operationId: string;
@@ -199,7 +200,7 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
     sourceVersions[workSource.id] = workSource.version;
   }
   if (options.photoAdmissionOnly) return { observation, stem: item.stem_snapshot, referenceText: "", misconceptions: [],
-    sourceIds, sourceVersions, workSource, workSourceMetadata, referenceSources: [], referenceSourceMetadata: [], existing: null,
+    sourceIds, sourceVersions, workSource, workSourceMetadata, multimodalEvidence: null, referenceSources: [], referenceSourceMetadata: [], existing: null,
     answerRevision: Number(row.answer_revision), operationId: String(row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`) };
   const teaching = await readTeachingQuestionForGrading(tx, scope, item, options);
   const referenceIds = sourceIds.filter(id => id !== input.workSourceId);
@@ -221,7 +222,8 @@ async function readContextInternal(tx: TransactionSql, scope: Scope, raw: AiGrad
       .map(chunk => [`${chunk.source_id}:${chunk.source_version}:${chunk.page}`, { mime: String(chunk.mime), bytes: Number(chunk.bytes) }] as const)).values()],
     referenceSources: [...new Map(chunks.filter(chunk => chunk.image_object_key && chunk.page != null)
       .map(chunk => [`${chunk.source_id}:${chunk.source_version}:${chunk.page}`, { sourceId: String(chunk.source_id), sourceVersion: Number(chunk.source_version), physicalPage: Number(chunk.page) }] as const)).values()],
-    sourceIds, sourceVersions, workSource, workSourceMetadata, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
+    // The sealed work source identifies the page. Stored recognition summaries do not establish glyph-level evidence for this revision.
+    sourceIds, sourceVersions, workSource, workSourceMetadata, multimodalEvidence: null, existing: existingRow ? await qualifyObservationRevision(tx, scope, existingRow) : null,
     answerRevision: Number(row.answer_revision), operationId: String(request?.operation_id ?? row.grading_operation_id ?? `ai-grade:${scope.workspaceId}:${input.observationId}`),
     ...(request ? { regradeRequestId: String(request.id) } : {}),...(interpretation?{interpretation}:{}) };
 }

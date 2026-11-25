@@ -245,7 +245,7 @@ type MemoryMaterialRules = {
 };
 type OriginBinding = {
   id: string; turn_course_id: string | null; ids: string[] | null; backings: string[][]; material_use: MaterialUse | null;
-  ancestors: HistoryAncestorAuthority[]; source_ids?: string[]; backingSourceIds?: string[];
+  ancestors: HistoryAncestorAuthority[]; source_ids?: string[]; backingSourceIds?: string[]; origin_turn_ids?: string[];
   user?: {
     courseId: string | null; materialUse: MaterialUse; destinationUse: MaterialUse;
     ids: string[] | null; backings: string[][]; backingSourceIds?: string[];
@@ -287,7 +287,19 @@ async function readOriginBindings(
     user_refs: unknown; user_backings?: string[][]; user_material_use?: MaterialUse | null; paired_destination_use?: MaterialUse;
   })[]>`
     SELECT m.id, course.id AS turn_course_id, t.context_source_refs AS refs,
-      ${savedSnippet ? db`` : db`${historicalUserTurnId(db)} AS historical_user_turn_id,`}
+      ${historicalUserTurnId(db)} AS historical_user_turn_id,
+      ${savedSnippet ? db`ARRAY[t.id] || CASE WHEN u.id IS NULL THEN '{}'::uuid[] ELSE ARRAY[u.id] END || ARRAY(
+        SELECT prior.id FROM opening_tutor_jobs job
+        JOIN opening_turns prior_user ON prior_user.id=job.user_turn_id AND prior_user.workspace_id=t.workspace_id
+          AND prior_user.conversation_id=t.conversation_id AND prior_user.role='user'
+        JOIN opening_turns prior_assistant ON prior_assistant.id=job.assistant_turn_id AND prior_assistant.workspace_id=t.workspace_id
+          AND prior_assistant.conversation_id=t.conversation_id AND prior_assistant.role='assistant'
+        CROSS JOIN LATERAL unnest(ARRAY[prior_user.id,prior_assistant.id]) prior(id)
+        WHERE job.workspace_id=t.workspace_id AND job.conversation_id=t.conversation_id
+          AND (prior_user.created_at,prior_user.id)<(u.created_at,u.id)
+          AND prior_user.status='complete' AND prior_assistant.status='complete'
+          AND NOT prior_user.query_system AND NOT prior_assistant.query_system AND prior_assistant.system_query IS NULL
+      ) AS origin_turn_ids,` : db``}
       u.context_source_refs AS user_refs, CASE WHEN u.id IS NOT NULL THEN ${userCourse()} END AS user_course_id,
       CASE WHEN u.id IS NOT NULL THEN ${turnMaterialUse(db, "u")} END AS user_material_use,
       CASE WHEN u.id IS NOT NULL THEN ${originUse ? originUse() : turnMaterialUse(db, "t")} END AS paired_destination_use,
@@ -428,6 +440,17 @@ export async function readMemoryDependencyStatus(
   if (!rootIds.length) return new Map();
   const graphFor = await readMemoryDependencyGraphs(db, scope, rootIds.map(id => ({ id, use: rules?.materialUse })), rules);
   return graphFor(rules?.materialUse);
+}
+
+/** A persisted credential has already scoped consumption; recheck every root in its original policy. */
+export async function openingCredentialMemoriesAvailable(db: Db, scope: OpeningScope, ids: string[], backingSourceIds: string[] = []) {
+  if (!ids.length) return !backingSourceIds.length;
+  const graph = await readMemoryDependencyStatus(db, scope, ids, { materialUse: "origin" });
+  const [clock] = await db<{ checked_at: Date }[]>`SELECT clock_timestamp() AS checked_at`;
+  const nodes = ids.flatMap(id => graph.get(id) ?? []);
+  const coveredSources = new Set(nodes.flatMap(node => node.sourceIds ?? []));
+  return ids.every(id => graph.has(id)) && backingSourceIds.every(id => coveredSources.has(id))
+    && nodes.every(node => node.usable && (node.expires_at === null || new Date(node.expires_at).getTime() > clock!.checked_at.getTime()));
 }
 
 async function readMemoryDependencyGraphs(db: Db, scope: OpeningScope, roots: MemoryRoot[], rules?: MemoryMaterialRules) {
@@ -658,41 +681,93 @@ function lockedMemorySourceRefs(versions: ReadonlyMap<string, number>, sourceIds
   return refs;
 }
 
-/** After history and workspace locks, resolve memory evidence on both sides of the saved exchange. */
-export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: OpeningScope, turnId: string): Promise<ContextSourceRef[] | null> {
-  const origin: MemoryOrigin = { id: turnId, course_id: null, turn_ids: [turnId] };
-  // The note repository separately checks the assistant's recorded refs and citations.
-  const bindings = (await readOriginBindings(tx, scope, [origin], { materialUse: "origin" }, true)).get(turnId);
-  const binding = bindings?.[0];
-  const user = binding?.user;
-  if (!binding || binding.ids === null || user?.ids === null) return null;
-  const pairedMemory = user && (user.ids.length > 0 || user.backings.length > 0);
-  if (!binding.ids.length && !binding.backings.length && !pairedMemory) return [];
-  origin.course_id = binding.turn_course_id;
-  const roots = bindingRoots([binding], "origin");
+/** After history and workspace locks, resolve the snippet's exact memories and backing material. */
+export async function lockAndReadSnippetMemoryRefs(tx: TransactionSql, scope: OpeningScope,
+  input: { turnId: string } | { dependencyIds: string[] },
+): Promise<{ sourceRefs: ContextSourceRef[]; dependencyIds: string[]; originTurnIds: string[] } | null> {
   const courseIds = new Set<string>();
-  if (origin.course_id !== null) courseIds.add(origin.course_id);
-  if (pairedMemory && user.courseId !== null) courseIds.add(user.courseId);
+  let roots: MemoryRoot[];
+  let userRefs: ContextSourceRef[] = [];
+  let originTurnIds: string[] = [];
   const sourceIds = new Set<string>();
+  let refreshBinding: ((versions: ReadonlyMap<string, number>) => Promise<boolean>) | undefined;
+  let resolve: (graphFor: (use: MemoryUse) => MemoryGraph) => { dependencies: MemoryDependencyStatus[]; sourceIds: string[] } | null;
+  if ("turnId" in input) {
+    const origin: MemoryOrigin = { id: input.turnId, course_id: null, turn_ids: [input.turnId] };
+    // The note repository separately checks the assistant's recorded refs and citations.
+    const readBinding = async (rules: MemoryMaterialRules) => (await readOriginBindings(tx, scope, [origin], rules, true))
+      .get(input.turnId)?.[0];
+    const initial = await readBinding({
+      materialUse: "origin", collectCourseIds: courseIds,
+    });
+    if (!initial || initial.ids === null || initial.user?.ids === null) return null;
+    let binding = initial;
+    originTurnIds = [...new Set(binding.origin_turn_ids ?? [input.turnId])].sort();
+    const user = binding.user;
+    roots = bindingRoots([binding], "origin");
+    if (!roots.length && !binding.backings.length && !user?.backings.length && !binding.ancestors.length) {
+      return { sourceRefs: [], dependencyIds: [], originTurnIds };
+    }
+    for (const ancestor of binding.ancestors) for (const id of ancestor.sourceIds) sourceIds.add(id);
+    origin.course_id = binding.turn_course_id;
+    userRefs = user?.memoryOnlyRefs ?? [];
+    if (binding.ancestors.length) refreshBinding = async versions => {
+      const currentCourses = new Set<string>();
+      const current = await readBinding({
+        materialUse: "origin", collectCourseIds: currentCourses, lockedSourceIds: [...versions.keys()],
+      });
+      if (!current || [...currentCourses].some(id => !courseIds.has(id))) return false;
+      binding = current;
+      originTurnIds = [...new Set(current.origin_turn_ids ?? [input.turnId])].sort();
+      return true;
+    };
+    resolve = graphFor => {
+      const resolved = resolveOrigins(graphFor, origin, [binding], "origin");
+      if (!resolved) return null;
+      // resolveOrigins has already validated these historical exchanges and locked their material.
+      const historyDependencies = binding.ancestors.flatMap(entry => resolveMemoryDependencyStatus(
+        graphFor(entry.materialUse), entry.memoryIds, entry.backings, entry.courseId, undefined, entry.backingSourceIds,
+      ) ?? []);
+      const dependencies = [...resolved.dependencies, ...historyDependencies];
+      return { sourceIds: [...resolved.sourceIds, ...dependencies.flatMap(memory => memory.sourceIds ?? [])], dependencies };
+    };
+  } else {
+    roots = input.dependencyIds.map(id => ({ id, use: "origin" }));
+    resolve = graphFor => {
+      const graph = graphFor("origin");
+      const dependencies: MemoryDependencyStatus[] = [];
+      for (const id of input.dependencyIds) {
+        const root = graph.get(id)?.find(node => node.dep_id === id);
+        if (!root) return null;
+        const nodes = resolveMemoryDependencyStatus(graph, [id], [], root.course_id);
+        if (!nodes) return null;
+        dependencies.push(...nodes);
+      }
+      return { dependencies, sourceIds: dependencies.flatMap(memory => memory.sourceIds ?? []) };
+    };
+  }
   await readMemoryDependencyGraphs(tx, scope, roots, { collectCourseIds: courseIds, collectSourceIds: sourceIds });
   if (!await lockActiveMemoryCourses(tx, scope, [...courseIds])) return null;
   const versions = await lockMemoryMaterialSources(tx, scope, sourceIds);
+  if (refreshBinding && !await refreshBinding(versions)) return null;
   const currentCourseIds = new Set<string>();
   const graphFor = await readMemoryDependencyGraphs(tx, scope, roots, {
     collectCourseIds: currentCourseIds, lockedSourceIds: [...versions.keys()],
   });
-  const resolved = resolveOrigins(graphFor, origin, [binding], "origin");
+  const resolved = resolve(graphFor);
   if (!resolved || [...currentCourseIds].some(id => !courseIds.has(id))) return null;
   const refs = lockedMemorySourceRefs(versions, resolved.sourceIds);
   if (!refs) return null;
 
-  const dependencyIds = [...new Set(resolved.dependencies.map(memory => memory.dep_id))].sort();
+  const dependencyIds = [...new Set(resolved.dependencies.map(memory => memory.dep_id.toLowerCase()))].sort();
   const active = await tx`SELECT id FROM opening_memories
     WHERE workspace_id=${scope.workspaceId} AND id=ANY(${dependencyIds}::uuid[]) AND status='active'
       AND (kind='confirmed' OR (kind='temporary' AND expires_at > clock_timestamp()))
     ORDER BY id FOR SHARE`;
   if (active.length !== dependencyIds.length) return null;
-  return [...(user?.memoryOnlyRefs ?? []), ...refs.map(ref => ({ ...ref, memoryOnly: true }))];
+  const memorySourceIds = new Set(resolved.dependencies.flatMap(memory => memory.sourceIds ?? []));
+  return { dependencyIds, originTurnIds, sourceRefs: [...userRefs, ...refs.map(ref =>
+    memorySourceIds.has(ref.sourceId) ? { ...ref, memoryOnly: true } : ref)] };
 }
 
 /** Discover material first, then repeat admission under sorted course and source locks. */

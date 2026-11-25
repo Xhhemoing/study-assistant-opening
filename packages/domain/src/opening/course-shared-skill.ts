@@ -1,4 +1,5 @@
 import type { CourseRequirement } from "@aistudy/contracts";
+import { computeCrossCourseWeakPrior, type ComputeCrossCourseWeakPriorInput } from "../offline-companion-bridge";
 import type { CourseRouteObservation } from "./course-route";
 export type CourseEvidenceLink={id:string;sourceRequirementId:string;sourceRequirementRevision:number;targetRequirementId:string;targetRequirementRevision:number;stableSkillId:string;active:boolean};
 const normalized=(text:string|null)=>text?.normalize("NFKC").replace(/\s+/gu," ").trim()??null;
@@ -21,4 +22,45 @@ export function projectSharedCourseEvidence(input:{source:CourseRequirement;targ
   &&(source.evidenceConditions!.timeLimitSeconds===null||row.evidenceContext.elapsedSeconds!==null&&row.evidenceContext.elapsedSeconds>=0&&row.evidenceContext.elapsedSeconds<=source.evidenceConditions!.timeLimitSeconds);
  if(!bound[0]||!eligible(bound[0]))return [];
  return bound.filter(eligible).map(row=>({...row,sharedFor:[{linkId:link.id,requirementId:target.id,requirementRevision:target.revision,stableSkillId:target.stableSkillId,sourceCourseId:source.courseId,sourceRequirementId:source.id}]}));
+}
+
+export type DeriveSharedCourseWeakPriorInput = Pick<ComputeCrossCourseWeakPriorInput,
+  "coursePrivacyEpochs" | "activeCourseSharingEnabled" | "revokedSourceIds"> & {
+  readonly source: CourseRequirement;
+  readonly target: CourseRequirement;
+  readonly link: CourseEvidenceLink;
+  readonly observations: readonly CourseRouteObservation[];
+  readonly alignmentWeight: number;
+  readonly edgePrivacyEpoch: number;
+};
+
+/** Only direct source-course outcomes can inform the target's initial prior. */
+export function deriveSharedCourseWeakPrior(input: DeriveSharedCourseWeakPriorInput) {
+  const { source, target, link, observations, alignmentWeight, edgePrivacyEpoch,
+    coursePrivacyEpochs, activeCourseSharingEnabled, revokedSourceIds } = input;
+  const compatible = link.active && link.sourceRequirementId === source.id && link.targetRequirementId === target.id
+    && link.sourceRequirementRevision === source.revision && link.targetRequirementRevision === target.revision
+    && link.stableSkillId === source.stableSkillId && courseRequirementsShareCompatible(source, target);
+  const directOutcomes = new Map<string, "yes" | "no">();
+  if (compatible) {
+    for (const row of observations) {
+      const bound = row.courseRequirement;
+      if (row.sharedFor?.length || bound?.id !== source.id || bound.revision !== source.revision
+        || bound.stableSkillId !== source.stableSkillId || bound.requirementKey !== source.requirementKey
+        || row.usableForCurrentVersion !== "yes" || row.independentAttempt !== "yes" || row.assistance !== "independent"
+        || (row.verifiedCorrect !== "yes" && row.verifiedCorrect !== "no")) continue;
+      directOutcomes.set(row.id, row.verifiedCorrect);
+    }
+  }
+  return computeCrossCourseWeakPrior({
+    targetCourseId: target.courseId, targetConceptId: target.stableSkillId,
+    coursePrivacyEpochs, activeCourseSharingEnabled, revokedSourceIds,
+    edges: compatible ? [{
+      edgeId: link.id, sourceCourseId: source.courseId, sourceConceptId: source.stableSkillId,
+      targetCourseId: target.courseId, targetConceptId: target.stableSkillId,
+      alignmentWeight, edgePrivacyEpoch, supportingSourceIds: source.sourceRefs.map(ref => ref.sourceId),
+      sourceDirectObservationCount: directOutcomes.size,
+      sourceDirectSuccessCount: [...directOutcomes.values()].filter(outcome => outcome === "yes").length,
+    }] : [],
+  });
 }

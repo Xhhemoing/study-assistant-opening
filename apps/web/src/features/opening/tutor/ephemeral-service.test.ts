@@ -1,8 +1,9 @@
 import { format } from "node:util";
 import type { EphemeralProvenanceRepository } from "@aistudy/database";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderInput, ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
+import type { ProviderOutput, SourceChunk, StudyIntentEvent } from "@aistudy/contracts";
 import { OpeningProviderError, selectContext, type BudgetedRepository } from "@aistudy/ai";
+import { projectOpeningBackupCardSources, projectOpeningBackupProvenance } from "../../../../../../packages/database/src/repositories/opening-backup-library";
 import { createEphemeralTutorService, type EphemeralTutorDeps } from "./ephemeral-service";
 
 const workspaceId = "10000000-0000-4000-8000-000000000001";
@@ -34,11 +35,12 @@ const output: ProviderOutput = {
 };
 
 function deps(overrides?: {
-  complete?: (input: ProviderInput, signal?: AbortSignal) => Promise<ProviderOutput>;
+  complete?: NonNullable<EphemeralTutorDeps["provider"]>["complete"];
   chunks?: SourceChunk[];
   sources?: string[];
   provenance?: EphemeralProvenanceRepository;
   resolveModel?: EphemeralTutorDeps["resolveModel"];
+  pageImages?: EphemeralTutorDeps["pageImages"];
   listReadySourceIdsForCourse?: EphemeralTutorDeps["listReadySourceIdsForCourse"];
   studyContext?: EphemeralTutorDeps["studyContext"];
   exposures?: EphemeralTutorDeps["exposures"];
@@ -78,6 +80,7 @@ function deps(overrides?: {
     exposures: overrides?.exposures,
     provider: { complete },
     resolveModel: overrides?.resolveModel,
+    pageImages: overrides?.pageImages,
     listReadySourceIdsForCourse: overrides?.listReadySourceIdsForCourse,
     config: {
       maxContextCharacters: 12_000,
@@ -152,6 +155,37 @@ describe("ephemeral tutor service", () => {
     await service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId], currentPage: 2, mode: "explain", history: [] });
     expect(complete.mock.calls[0]?.[0]).toMatchObject({ mediaCapability: "text_plus_page_images", imageParts: images });
   });
+  it.each([true, false])("requires verified provenance for every dispatched page image (known=%s)", async known => {
+    const second = { ...chunk, id: "10000000-0000-4000-8000-000000000005", sourceId: foreignSource, sourceVersion: 2 };
+    const images = [sourceId, known ? foreignSource : chunkId].map(id => ({
+      mediaType: "image/png" as const, data: "data:image/png;base64,aGVsbG8=", sourceId: id, physicalPage: 2,
+    }));
+    const complete = vi.fn<NonNullable<EphemeralTutorDeps["provider"]>["complete"]>(async () => output);
+    const record = vi.fn(async () => chunkId);
+    const pageImages = vi.fn(async () => images);
+    const f = deps({
+      chunks: [chunk, second], pageImages, provenance: { record, resolveHistory: async () => [] },
+      retrieveContext: async () => ({ chunks: [chunk], mode: "lexical", assertCurrent: async () => {} }),
+      resolveModel: async () => ({ provider: { complete }, supportsVision: true,
+        modelSnapshot: { id: "v", providerId: "p", modelName: "v", mediaInputTokenUpperBound: 8192, mediaMaxInputBytes: 1048576,
+          mediaInputCentsPerMillion: 100, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+        inputCentsPerMillion: 1, outputCentsPerMillion: 1 }),
+    });
+    const pending = f.service.replyEphemeral(scope, { text: "read page", sourceIds: [sourceId, foreignSource], currentPage: 2, mode: "explain", history: [] });
+    if (!known) {
+      await expect(pending).rejects.toMatchObject({ code: "SOURCE_UNAVAILABLE" });
+      expect(complete).not.toHaveBeenCalled();
+      expect(record).not.toHaveBeenCalled();
+      return;
+    }
+    await pending;
+    expect(pageImages).toHaveBeenCalledWith(scope, { sourceIds: [sourceId, foreignSource], sourceVersions: { [sourceId]: 1, [foreignSource]: 2 }, physicalPage: 2 });
+    expect(complete.mock.calls[0]?.[0]).toMatchObject({ chunks: [chunk], imageParts: images });
+    expect(record).toHaveBeenCalledWith(scope, expect.objectContaining({
+      contextSourceRefs: [{ sourceId, sourceVersion: 1 }, { sourceId: foreignSource, sourceVersion: 2 }],
+    }));
+  });
+
   it("blocks an unavailable temporary route without a fallback provider or charge", async () => {
     const f = deps({ resolveModel: async () => { throw new Error("route unavailable"); } });
     await expect(f.service.replyEphemeral(scope, { text: "hello", sourceIds: [], mode: "listen", history: [] })).rejects.toThrow("route unavailable");
@@ -313,10 +347,82 @@ describe("ephemeral content-free provenance", () => {
     const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
     const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
     expect(provenance.resolveHistory).toHaveBeenCalledWith(scope, history, 0);
-    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: historyRefs, verifiedLineage: false });
     expect(reply.provenanceId).toBe(chunkId);
     expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
   });
+  it("carries verified history lineage and origins into a follow-up credential", async () => {
+    const historyRefs = Object.assign([], { verifiedLineage: true as const, originTurnIds: [sourceId] });
+    const provenance = { resolveHistory: vi.fn(async () => historyRefs), record: vi.fn(async () => chunkId) };
+    const f = deps({ sources: [], chunks: [], provenance });
+    await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", historyPrivacyEpoch: 0,
+      history: [{ role: "assistant", text: "prior answer", provenanceId: chunkId }],
+    });
+    expect(provenance.record).toHaveBeenCalledWith(scope, { reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0,
+      contextSourceRefs: [], originTurnIds: [sourceId] });
+  });
+
+  it("carries the consumed history's memory dependency into the follow-up credential", async () => {
+    const memoryRef = { memoryDependencyIds: [foreignSource] };
+    const provenance = { resolveHistory: vi.fn(async () => [{ sourceId, sourceVersion: 1 }, memoryRef]), record: vi.fn(async () => chunkId) };
+    const f = deps({ sources: [], chunks: [], provenance });
+    const history = [{ role: "assistant" as const, text: "prior answer", provenanceId: sourceId }];
+    const reply = await f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", history, historyPrivacyEpoch: 0 });
+    expect(f.complete.mock.calls[0]![0]!.history).toEqual([{ role: "assistant", text: "prior answer" }]);
+    expect(provenance.record).toHaveBeenCalledWith(scope, {
+      reservationId: "res-1", requestId: "eph-key", privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 1 }, memoryRef], verifiedLineage: false,
+    });
+    expect(reply.provenanceId).toBe(chunkId);
+  });
+  it.each([
+    ["send", "memory"], ["stream", "memory"], ["send", "source-free"], ["stream", "source-free"],
+  ] as const)("stops %s after %s history expires without an epoch change", async (boundary, kind) => {
+    let expired = false;
+    const provenance = {
+      resolveHistory: vi.fn(async () => expired ? null : kind === "memory" ? [{ memoryDependencyIds: [foreignSource] }] : []),
+      record: vi.fn(async () => chunkId),
+    };
+    const onText = vi.fn();
+    const f = deps({ sources: [], chunks: [], provenance, complete: async (_input, _signal, onDelta) => {
+      expired = true;
+      await onDelta?.("sensitive follow-up");
+      return output;
+    } });
+    if (boundary === "send") f.budget.reserve.mockImplementationOnce(async () => { expired = true; return { id: "res-1" }; });
+    await expect(f.service.replyEphemeral(scope, { text: "next", sourceIds: [], mode: "listen", historyPrivacyEpoch: 0,
+      history: [{ role: "assistant", text: "prior answer", provenanceId: sourceId }],
+    }, undefined, onText)).rejects.toThrow();
+    expect(f.complete).toHaveBeenCalledTimes(boundary === "send" ? 0 : 1);
+    expect(onText).not.toHaveBeenCalled();
+    expect(provenance.record).not.toHaveBeenCalled();
+  });
+  it.each(["before delivery", "during delivery"])("withholds streamed text when admitted history expires %s", async boundary => {
+    let expired = false;
+    const contextAnchor = { purpose: "learning_help" as const, attemptId: chunkId };
+    const deliver = vi.fn(async () => {
+      expired = true;
+      const at = "2026-10-19T00:00:00.000Z";
+      return { id: chunkId, releaseKey: "ephemeral:eph-key", contextAnchor, origin: "assistant" as const,
+        supportDomain: "unknown" as const, generatedAt: at, releasedAt: at, acknowledgedAt: null, historyRevision: 1 };
+    });
+    const provenance = { resolveHistory: vi.fn(async () => expired ? null : []), record: vi.fn(async () => chunkId) };
+    const onText = vi.fn();
+    const f = deps({ provenance, studyContext: { resolve: async () => contextAnchor }, exposures: { deliver },
+      complete: async (_input, _signal, onDelta) => {
+        expired = boundary === "before delivery";
+        await onDelta?.("solution");
+        return output;
+      },
+    });
+    await expect(f.service.replyEphemeral(scope, { text: "Explain", sourceIds: [], mode: "explain", contextAnchor,
+      historyPrivacyEpoch: 0, history: [{ role: "assistant", text: "Previous answer", provenanceId: sourceId }],
+    }, undefined, onText)).rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+    expect(f.complete).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledTimes(boundary === "before delivery" ? 0 : 1);
+    expect(onText).not.toHaveBeenCalled();
+    expect(provenance.record).not.toHaveBeenCalled();
+  });
+
   it.each([
     { label: "missing", provenanceId: undefined },
     { label: "unavailable or revoked", provenanceId: foreignSource },
@@ -552,4 +658,61 @@ it("uses the same course context and provenance for temporary tutoring and reche
   await expect(blocked.service.replyEphemeral(scope, { text: "讲讲这道题", courseId: chunkId, sourceIds: [sourceId], history: [] })).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
   expect(blocked.complete).not.toHaveBeenCalled();
   expect(blocked.budget.release).toHaveBeenCalled();
+});
+
+describe("backup card publication provenance projection", () => {
+  const docId = "20000000-0000-4000-8000-000000000001";
+  const cardId = "20000000-0000-4000-8000-000000000002";
+  const keepCardId = "20000000-0000-4000-8000-000000000003";
+
+  it("excludes root-null cards linked via publicationCardIds when their document is omitted or deleted, and propagates publication sources when admitted", () => {
+    const rootNullCard = { id: cardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const cleanCard = { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const provenance = [{ document_id: docId, workspace_id: workspaceId,
+      context_source_refs: [{ sourceId, sourceVersion: 1, publication: true }, { publicationCardIds: [cardId.toUpperCase()] }] }];
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([cleanCard]);
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: "2026-11-24T00:00:00Z" }],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([cleanCard]);
+
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, provenance)).toEqual([{ ...rootNullCard, source_ids: [sourceId] }]);
+  });
+
+  it.each([
+    { kind: "scalar string", refs: [{ publicationCardIds: cardId }] },
+    { kind: "nested array", refs: [{ publicationCardIds: [[cardId.toUpperCase()]] }] },
+    { kind: "mixed array", refs: [{ publicationCardIds: [cardId, { bad: 1 }] }] },
+    { kind: "id object", refs: [{ publicationCardIds: [{ id: cardId }] }] },
+    { kind: "cardId object", refs: [{ publicationCardIds: [{ cardId }] }] },
+    { kind: "top-level object", refs: { publicationCardIds: cardId } },
+  ])("excludes root-null cards referenced by malformed $kind publicationCardIds in backup provenance", ({ refs }) => {
+    const rootNullCard = { id: cardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    const cleanCard = { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] };
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, [{ document_id: docId, workspace_id: workspaceId, context_source_refs: refs }])).toEqual([cleanCard]);
+  });
+
+  it("matches publicationCardIds case-insensitively in projectOpeningBackupProvenance", () => {
+    const projected = projectOpeningBackupProvenance([
+      { document_id: docId, context_source_refs: [{ sourceId, sourceVersion: 1 }, { publicationCardIds: [cardId, keepCardId] }] },
+    ], new Set([` ${cardId.toUpperCase()} `]));
+    expect(projected).toEqual([
+      { document_id: docId, context_source_refs: [{ sourceId, sourceVersion: 1 }, { publicationCardIds: [cardId] }] },
+    ]);
+  });
 });

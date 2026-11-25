@@ -274,7 +274,7 @@ it.each(["missing", "invalid"] as const)("discards %s history receipts and issue
   expect(JSON.stringify(complete.mock.calls[0]![0])).not.toContain("UNVERIFIED-OLD-HISTORY");
   expect(complete.mock.calls[0]![0]!.chunks.map((chunk: { sourceId: string }) => chunk.sourceId)).toEqual([sourceId]);
   const receipt = (await sql`SELECT context_source_refs FROM opening_ephemeral_provenance WHERE id=${body.provenanceId}`)[0]!;
-  expect(receipt.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }]);
+  expect(receipt.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }, { snippetLineageVersion: 1 }]);
 
   const followup = await POST(postEphemeral({
     text: "continue", sourceIds: [], mode: "listen", historyPrivacyEpoch: body.privacyEpoch,

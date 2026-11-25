@@ -67,6 +67,19 @@ describe("saved answer AI grading", () => {
     expect(JSON.parse(call.mock.calls[0]![2].input.text).studentAnswer).toBe(original.answer);
   });
 
+  it.each(["unchecked", "unresolved"] as const)("withholds a verified grade for %s photo evidence from the repository", async state => {
+    const { service, context, repository } = setup();
+    const workSource = { id: id(6), version: 2, physicalPage: 1 };
+    context.workSource = workSource;
+    if (state === "unresolved") Object.assign(context, { multimodalEvidence: {
+      observationId: original.id, answerRevision: 1, workSource,
+      steps: [{ stepId: "first", bbox: [0, 0, 1, 1],
+        ast: { kind: "expression", tokens: [{ tokenId: "sign", rawText: "+", kind: "operator", confidence: 0.4 }] } }],
+    } });
+    const photo = { ...input, workSourceId: id(6), workSourceVersion: 2, physicalPage: 1 };
+    await service.grade(scope, photo);
+    expect(repository.apply).toHaveBeenCalledWith(scope, photo, { ...proposal, outcome: "unverified" }, "test-grader");
+  });
   it("returns an already saved result without another model request", async () => {
     const { service, context, call, images } = setup();
     context.existing = graded;

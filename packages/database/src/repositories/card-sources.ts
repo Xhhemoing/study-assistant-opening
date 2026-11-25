@@ -1,32 +1,85 @@
 import type { Sql, TransactionSql } from "postgres";
 import { CardRepositoryError } from "./cards-types";
-import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourceRefs } from "./opening-context-provenance";
+import { noteContextSourceRefsIncluded, parseNoteContextSourceRefs } from "./opening-context-provenance";
 
 type Db = Sql | TransactionSql;
 /** Identity-based lineage remains private after source exclusion/deletion, including historical text. */
 export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType<Db>) {
-  return db`NOT EXISTS (SELECT 1 FROM unnest(${ids}::uuid[]) card_source(id)
-    WHERE NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.id=card_source.id
-      AND s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
-      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)))`;
+  return db`COALESCE(${ids}::uuid[], '{}'::uuid[]) <@ ARRAY(
+    SELECT s.id FROM opening_sources s
+    WHERE s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)
+  )`;
 }
+/** Extract normalized publication card IDs from any depth without recursive CTE planner fanout. */
+export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
+  return db`(SELECT DISTINCT normalized.card_id
+    FROM (SELECT ${refs()} AS val) AS root
+    CROSS JOIN LATERAL unnest(ARRAY(
+      SELECT jsonb_array_elements(COALESCE((
+        WITH RECURSIVE pub_arr(arr) AS (
+          SELECT jsonb_path_query_array(
+            jsonb_path_query_array(jsonb_build_array(root.val), 'strict $.**.publicationCardIds', '{}'::jsonb, true),
+            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
+          )
+          WHERE root.val IS NOT NULL
+            AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
+          UNION ALL
+          SELECT jsonb_path_query_array(
+            pub_arr.arr,
+            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
+          )
+          FROM pub_arr
+          WHERE COALESCE(jsonb_path_exists(pub_arr.arr, 'strict $[*] ? (@.type() == "array")'), false)
+        )
+        SELECT pub_arr.arr
+        FROM pub_arr
+        WHERE NOT COALESCE(jsonb_path_exists(pub_arr.arr, 'strict $[*] ? (@.type() == "array")'), false)
+        LIMIT 1
+      ), '[]'::jsonb))
+    )) AS leaf(val)
+    CROSS JOIN LATERAL (
+      VALUES
+        (CASE WHEN jsonb_typeof(leaf.val)='string' THEN leaf.val #>> '{}' END),
+        (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'id')='string' THEN leaf.val->>'id' END),
+        (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'cardId')='string' THEN leaf.val->>'cardId' END)
+    ) AS linked(id)
+    CROSS JOIN LATERAL (
+      SELECT lower(btrim(linked.id, U&'\\0009\\000a\\000b\\000c\\000d\\0020\\00a0\\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200a\\2028\\2029\\202f\\205f\\3000\\feff')) AS card_id
+      WHERE linked.id IS NOT NULL
+    ) AS normalized
+    WHERE root.val IS NOT NULL
+      AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
+      AND normalized.card_id<>'')`;
+}
+
+/** Historical publication links survive reassignment of the card or its teaching spec. */
+export function cardLinkedToNotePublication(db: Db) {
+  return db`(COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+    AND EXISTS (
+      SELECT 1 FROM ${notePublicationCardIds(db, () => db`np.context_source_refs`)} AS pub(card_id)
+      WHERE pub.card_id=c.id::text
+    ))`;
+}
+
 export function cardReadable(db: Db, workspaceId: string) {
   return db`${cardSourcesIncluded(db, workspaceId, db`c.source_ids`)}
     AND (c.source_document_id IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=c.source_document_id AND d.workspace_id=${workspaceId}))
     AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=c.source_document_id
-      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})))
-    AND NOT EXISTS (
-      SELECT 1 FROM opening_note_provenance np
+      AND (np.workspace_id<>${workspaceId} OR NOT (${noteContextSourceRefsIncluded(db, workspaceId, () => db`np.context_source_refs`, true)})))
+    AND NOT COALESCE(c.id::text = ANY(ARRAY(
+      SELECT pub.card_id
+      FROM (
+        SELECT np.document_id, np.workspace_id, np.context_source_refs
+        FROM opening_note_provenance np
+        WHERE np.context_source_refs IS NOT NULL
+          AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+      ) np
       LEFT JOIN library_documents d ON d.id=np.document_id AND d.workspace_id=np.workspace_id
-      WHERE EXISTS (
-        SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(np.context_source_refs)='array'
-          THEN np.context_source_refs ELSE '[]'::jsonb END) AS metadata(ref)
-        CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(metadata.ref->'publicationCardIds')='array'
-          THEN metadata.ref->'publicationCardIds' ELSE '[]'::jsonb END) AS linked(id)
-        WHERE lower(linked.id)=c.id::text
-      ) AND (np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
-        OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)}))
-    )`;
+      CROSS JOIN LATERAL ${notePublicationCardIds(db, () => db`np.context_source_refs`)} AS pub(card_id)
+      WHERE np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
+        OR NOT (${noteContextSourceRefsIncluded(db, workspaceId, () => db`np.context_source_refs`, true)})
+    )), false)`;
 }
 
 export function withPublicationCardSourceIds(existing: unknown, publicationIds: Iterable<string>) {

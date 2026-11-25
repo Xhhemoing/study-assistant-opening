@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ephemeralTurnResponseSchema, type EphemeralTurnInput } from "@aistudy/contracts";
-import { applyOpeningRestore, createOpeningEphemeralProvenanceRepository, createOpeningPrivacyRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
+import { applyOpeningRestore, createOpeningBudgetRepository, createOpeningEphemeralProvenanceRepository, createOpeningPrivacyRepository, createOpeningTutorJobsRepository,
+  EphemeralProvenanceError } from "@aistudy/database";
 import { validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
+import { createScopedOpeningSystemQueryReader } from "../../packages/database/src/repositories/opening-system-query";
 import { getEphemeralTutorService, getTutorService } from "../../apps/web/src/features/opening/runtime";
 import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { replyEphemeralSystemQuery } from "../../apps/web/src/features/opening/tutor/ephemeral-system-query";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { insertOwnedTurn } from "./opening-memory-context-fixture";
 import { backupRows } from "./opening-backup-records-fixture";
 
 let fixture: OpeningFixture;
@@ -54,6 +57,87 @@ afterEach(async () => {
 });
 
 describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
+  it("counts the lineage marker toward the query credential's stored entry limit", async () => {
+    const { sql, scope } = fixture;
+    const sources = await sql<{ id: string }[]>`INSERT INTO opening_sources(workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      SELECT ${scope.workspaceId}, 'Source ' || n, 'application/pdf', 1, ${"a".repeat(64)}, 0, 'uploaded', 'ready'
+      FROM generate_series(1,256) n RETURNING id`;
+    const refs = sources.map(({ id }) => ({ sourceId: id, sourceVersion: 0 }));
+    const provenance = createOpeningEphemeralProvenanceRepository(sql);
+    const requestId = randomUUID();
+    const oversized = provenance.recordQuery!(scope, { requestId, privacyEpoch: 0, contextSourceRefs: refs });
+    await expect(oversized).rejects.toBeInstanceOf(EphemeralProvenanceError);
+    await expect(oversized).rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+
+    const id = await provenance.recordQuery!(scope, { requestId, privacyEpoch: 0, contextSourceRefs: refs.slice(0, 255) });
+    expect(await sql`SELECT jsonb_array_length(context_source_refs) AS entries FROM opening_query_ephemeral_provenance WHERE id=${id}`)
+      .toEqual([{ entries: 256 }]);
+  }, 30_000);
+
+  it("rejects oversized stored query lineage using the database's JSONB byte length", async () => {
+    const { sql, scope } = fixture;
+    const conversationId = randomUUID();
+    await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+      VALUES(${conversationId},${scope.workspaceId},${scope.ownerUserId},'Query origins')`;
+    const turns = await sql<{ id: string }[]>`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status)
+      SELECT gen_random_uuid(), ${scope.workspaceId}, ${conversationId}, 'assistant', 'Origin', 'explain', 'complete'
+      FROM generate_series(1,1640) RETURNING id`;
+    const originTurnIds = turns.map(({ id }) => id);
+    const provenance = createOpeningEphemeralProvenanceRepository(sql);
+    const requestId = randomUUID();
+    const oversized = provenance.recordQuery!(scope, { requestId, privacyEpoch: 0, contextSourceRefs: [], originTurnIds });
+    await expect(oversized).rejects.toBeInstanceOf(EphemeralProvenanceError);
+    await expect(oversized).rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+    expect(await sql`SELECT id FROM opening_query_ephemeral_provenance WHERE request_id=${requestId}`).toEqual([]);
+  }, 30_000);
+
+  it("stores one canonical origin for mixed-case credentials and replays the same query", async () => {
+    const { sql, scope } = fixture;
+    const origin = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+    const provenance = createOpeningEphemeralProvenanceRepository(sql);
+    const query = { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: [], originTurnIds: [origin, origin.toUpperCase()] };
+    const queryId = await provenance.recordQuery!(scope, query);
+    await expect(provenance.recordQuery!(scope, { ...query, originTurnIds: [origin] })).resolves.toBe(queryId);
+    const requestId = randomUUID();
+    const budget = createOpeningBudgetRepository(sql, { envCapCents: 10_000 });
+    await budget.reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+    const replyId = await provenance.record(scope, { ...query, requestId });
+    const stored = [{ context_source_refs: [{ snippetLineageVersion: 1 }, { originTurnIds: [origin] }] }];
+    expect(await sql`SELECT context_source_refs FROM opening_query_ephemeral_provenance WHERE id=${queryId}`).toEqual(stored);
+    expect(await sql`SELECT context_source_refs FROM opening_ephemeral_provenance WHERE id=${replyId}`).toEqual(stored);
+  }, 30_000);
+
+  it("replays a legacy receipt after canonicalizing only its origin metadata", async () => {
+    const { sql, scope } = fixture;
+    const first = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+    const second = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+    const provenance = createOpeningEphemeralProvenanceRepository(sql);
+    const query = { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: [], originTurnIds: [first, second] };
+    const id = randomUUID();
+    const legacy = { originTurnIds: [...[first, second].sort().reverse(), first].map(turn => turn.toUpperCase()) };
+    await sql`INSERT INTO opening_query_ephemeral_provenance(id,workspace_id,owner_user_id,request_id,privacy_epoch,context_source_refs)
+      VALUES (${id},${scope.workspaceId},${scope.ownerUserId},${query.requestId},${query.privacyEpoch},
+        ${sql.json([{ snippetLineageVersion: 1 }, legacy])})`;
+    await expect(provenance.recordQuery!(scope, query)).resolves.toBe(id);
+    await expect(provenance.recordQuery!(scope, { ...query, originTurnIds: [first] })).rejects.toThrow("query provenance replay differs");
+    await sql`UPDATE opening_query_ephemeral_provenance
+      SET context_source_refs=${sql.json([{ snippetLineageVersion: 1 }, { ...legacy, extra: true }])} WHERE id=${id}`;
+    await expect(provenance.recordQuery!(scope, query)).rejects.toThrow("query provenance replay differs");
+  }, 30_000);
+
+  it("reports truncated recommendation evidence without an unsupported continuation", async () => {
+    const f = await learningAttemptFixture(fixture);
+    for (let index = 0; index < 11; index++) await f.submit(await f.start());
+    const read = createScopedOpeningSystemQueryReader(fixture.sql, fixture.scope);
+    const signal = new AbortController().signal;
+    const result = await read({ name: "recommendation", arguments: { courseId: f.courseId } }, signal);
+    expect(result).toMatchObject({
+      status: "partial", reason: "truncated", nextOffset: null, data: [{ recommendationStatus: "unknown" }],
+    });
+    const learning = await read({ name: "learning", arguments: { courseId: f.courseId, offset: 0, limit: 10 } }, signal);
+    expect(learning).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 10 });
+  }, 30_000);
+
   it.each(["0", "1"])("persists a saved receipt exactly once without grading or charging (adaptive=%s)", async adaptive => {
     vi.stubEnv("OPENING_ADAPTIVE_PLANNING", adaptive);
     const f = await learningAttemptFixture(fixture); await f.submit(await f.start());
@@ -96,7 +180,7 @@ describe("saved and ephemeral record-query chat with real PostgreSQL", () => {
     expect(response).toMatchObject({ requestId: null, inputTokens: null, outputTokens: null, candidates: [], citations: [], historyDiscarded: false });
     expect(response.provenanceId).toBeTruthy(); expect(await counts()).toEqual(before); expect(forbidden).not.toHaveBeenCalled();
     const [row] = await fixture.sql`SELECT * FROM opening_query_ephemeral_provenance WHERE id=${response.provenanceId!}`;
-    expect(row).toMatchObject({ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, context_source_refs: [] });
+    expect(row).toMatchObject({ workspace_id: fixture.scope.workspaceId, owner_user_id: fixture.scope.ownerUserId, context_source_refs: [{ snippetLineageVersion: 1 }] });
     expect(JSON.stringify(row)).not.toContain(marker);
     expect(new Date(row!.expires_at).getTime() - new Date(row!.created_at).getTime()).toBe(86400000);
     const [durable] = await fixture.sql`SELECT (SELECT count(*)::int FROM opening_turns WHERE workspace_id=${fixture.scope.workspaceId}) AS turns,

@@ -1,9 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { createScopedOpeningSystemQueryReader } from "../../packages/database/src/repositories/opening-system-query";
 import { createOpeningDatasetRepository } from "../../packages/database/src/repositories/opening-dataset";
 import { OPENING_DATASET_POLICY_VERSION } from "@aistudy/contracts";
-import { createOpeningPrivacyRepository, createOpeningMemoryRepository } from "@aistudy/database";
+import { createBackupRestoreRepository, createCardRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
+  createOpeningEphemeralProvenanceRepository, createOpeningPrivacyRepository, createOpeningMemoryRepository,
+  createOpeningNoteRepository, createOpeningStudyNoteRepository, readOpeningBackupRecords } from "@aistudy/database";
+import { cardLinkedToNotePublication, cardReadable, notePublicationCardIds } from "../../packages/database/src/repositories/card-sources";
+import { noteContextSourceRefsIncluded, parseNoteContextProvenanceRefs, parseNoteContextSourceRefs } from "../../packages/database/src/repositories/opening-context-provenance";
+import { openingNoteReadable } from "../../packages/database/src/repositories/opening-note-provenance";
+import { createEphemeralTutorService } from "../../apps/web/src/features/opening/tutor/ephemeral-service";
+import { replyEphemeralSystemQuery } from "../../apps/web/src/features/opening/tutor/ephemeral-system-query";
+import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
 import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
+import { insertMemory, insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
+import { backupRows } from "./opening-backup-records-fixture";
 
 let f: OpeningFixture;
 let repo: ReturnType<typeof createOpeningDatasetRepository>;
@@ -70,5 +81,866 @@ describe("synthetic deidentified dataset repository", () => {
     await grantOther();
     expect((await repo.read(f.otherScope)).dialogueEvaluation).toEqual([]);
   });
+
+  it.each(["saved", "ephemeral"] as const)(
+    "keeps the source turn and retires a republished %s snippet once its memory expires",
+    async kind => {
+      const fixture = await createOpeningFixture();
+      try {
+        const { sql, scope } = fixture;
+        const datasets = createOpeningDatasetRepository(sql);
+        const notes = createOpeningNoteRepository(sql);
+        const sourceTurnId = await insertOwnedTurn(sql, scope);
+        const memory = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+          text: "Source-free preference", sourceTurnIds: [sourceTurnId],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        });
+        const memoryRefs = [{ memoryDependencyIds: [memory.id] }];
+        const snippet = { title: "Derived snippet", text: "Derived answer" };
+        const provenance = createOpeningEphemeralProvenanceRepository(sql);
+        let initialReceipt: string | undefined;
+        let documentId: string;
+        if (kind === "saved") {
+          const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: memoryRefs });
+          ({ documentId } = await notes.saveSnippet(scope, { ...snippet, savedTurnId }));
+        } else {
+          initialReceipt = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: memoryRefs });
+          const privacy = createOpeningPrivacyRepository(sql);
+          const budget = createOpeningBudgetRepository(sql, { envCapCents: 10_000 });
+          const service = createEphemeralTutorService({
+            sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+            privacy: { currentEpoch: privacy.getWorkspaceEpoch, snapshot: async current => ({
+              epoch: await privacy.getWorkspaceEpoch(current), excludedSourceIds: await privacy.listExcludedSourceIds(current),
+            }) },
+            budget: {
+              reserve: entry => budget.reserve(scope, entry),
+              release: (requestId, reason) => budget.release(scope, requestId, reason),
+              claimExecution: reservationId => budget.claimExecution(scope, reservationId),
+              settle: (...args) => budget.settle(scope, ...args),
+              markUnknown: reservationId => budget.markUnknown(scope, reservationId),
+            },
+            provenance,
+            provider: { complete: async input => ({
+              text: input.history[0]?.text ?? "History absent", citedChunkIds: [],
+              requestId: null, inputTokens: 1, outputTokens: 1, candidates: [],
+            }) },
+            config: { maxContextCharacters: 200, reservedCents: 5, maxOutputTokens: 64,
+              inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+          });
+          const reply = await service.replyEphemeral(scope, { text: "Follow up", mode: "listen", sourceIds: [], historyPrivacyEpoch: 0,
+            history: [{ role: "assistant", text: snippet.text, provenanceId: initialReceipt }] });
+          expect(reply).toMatchObject({ text: snippet.text, historyDiscarded: false, provenanceId: expect.any(String) });
+          ({ documentId } = await notes.saveSnippet(scope, { ...snippet, provenanceId: reply.provenanceId! }));
+          expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+            .toEqual([{ context_source_refs: [...memoryRefs, { snippetLineageVersion: 1 }] }]);
+        }
+        await publishSnippet(fixture, documentId);
+        await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+        const before = await datasets.read(scope);
+        expect(before.coursePackageQuality).toHaveLength(1);
+        expect(before.answerSequences).toHaveLength(1);
+        expect(before.dialogueEvaluation).toHaveLength(kind === "saved" ? 3 : 2);
+
+        await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${memory.id}`;
+        const after = await datasets.read(scope);
+        expect(after.coursePackageQuality).toEqual([]);
+        expect(after.answerSequences).toEqual([]);
+        expect(after.dialogueEvaluation.map(row => row.role)).toEqual(["user"]);
+        await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+          .resolves.toMatchObject({ id: documentId });
+        if (initialReceipt) await expect(provenance.resolveHistory(scope, [{ provenanceId: initialReceipt }], 0)).resolves.toBeNull();
+      } finally {
+        await fixture.close();
+      }
+    }, 30_000,
+  );
+
+  it.each(["empty legacy", "missing restored"])("keeps a %s snippet readable while excluding it from republished exports", async kind => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Old snippet", text: "Old answer", savedTurnId,
+      });
+      if (kind === "missing restored") {
+        // NativeBackup can retain the first revision while omitting its Opening provenance.
+        await sql`DELETE FROM opening_note_provenance WHERE document_id=${documentId}`;
+      } else {
+        await sql`UPDATE opening_note_provenance SET context_source_refs='[]'::jsonb WHERE document_id=${documentId}`;
+      }
+      await publishSnippet(fixture, documentId);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const dataset = await datasets.read(scope);
+      expect(dataset.coursePackageQuality).toEqual([]);
+      expect(dataset.answerSequences).toEqual([]);
+      expect(dataset.dialogueEvaluation.map(row => row.role)).toEqual(["assistant"]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally {
+      await fixture.close();
+    }
+  }, 30_000);
+
+  it("withholds variants of restored, historically published, and deleted cards from both dataset views", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const notes = createOpeningNoteRepository(sql);
+      const cards = createCardRepository(sql);
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const restored = await notes.saveSnippet(scope, { title: "Restored snippet", text: "Answer", savedTurnId });
+      const historical = await notes.saveSnippet(scope, { title: "Historical snippet", text: "Answer", savedTurnId });
+      const directCard = await cards.createCard({ ...scope, sourceDocumentId: restored.documentId, front: "Prompt", back: "Answer" });
+      const historicalCard = await cards.createCard({ ...scope, sourceDocumentId: historical.documentId, front: "Prompt", back: "Answer" });
+      const deletedCard = await cards.createCard({ ...scope, front: "Prompt", back: "Answer" });
+      const sourceId = await insertSource(sql, scope);
+      const cleanCard = await cards.createCard({ ...scope, front: "Prompt", back: "Answer" });
+      await sql`UPDATE cards SET source_ids=${[sourceId]}::uuid[] WHERE id=${cleanCard.id}`;
+
+      for (const card of [directCard, historicalCard, deletedCard, cleanCard]) {
+        const activity = await insertTestTeachingActivity(sql, scope);
+        const session = randomUUID();
+        await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+          create_intent=${sql.json({ kind: "card_review_variant", cardId: card.id })},
+          source_ids=${card === cleanCard ? [sourceId] : []}::uuid[] WHERE id=${activity}`;
+        await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+          VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Variant')`;
+        await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+          VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Variant',${randomUUID()},'{}',0)`;
+      }
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const before = await datasets.read(scope);
+      expect(before.coursePackageQuality).toHaveLength(4);
+      expect(before.answerSequences).toHaveLength(4);
+
+      await sql`DELETE FROM opening_note_provenance WHERE document_id=${restored.documentId}`;
+      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ publicationCardIds: [historicalCard.id] }])}
+        WHERE document_id=${historical.documentId}`;
+      await sql`UPDATE cards SET source_document_id=NULL WHERE id=${historicalCard.id}`;
+      await sql`DELETE FROM cards WHERE id=${deletedCard.id}`;
+
+      const after = await datasets.read(scope);
+      expect(after.coursePackageQuality).toHaveLength(1);
+      expect(after.coursePackageQuality[0]?.sources).toEqual([expect.any(String)]);
+      expect(after.answerSequences).toEqual([expect.objectContaining({ sequence: after.coursePackageQuality[0]?.identity })]);
+    } finally { await fixture.close(); }
+  }, 30_000);
+
+  it.each(["private exam", "malformed publication"] as const)("withholds a historical card variant from a %s", async kind => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const datasets = createOpeningDatasetRepository(sql);
+      const documentId = randomUUID();
+      await createLibraryRepository(sql).createDocument({
+        workspaceId: scope.workspaceId, documentId, title: "Teaching publication", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Teaching passage" } }],
+      });
+      const card = await createCardRepository(sql).createCard({ ...scope, front: "Prompt", back: "Answer" });
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${documentId},${scope.workspaceId},${sql.json([{ publicationCardIds: [card.id] }])})`;
+      const activity = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: card.id })} WHERE id=${activity}`;
+      const session = randomUUID();
+      await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+        VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Variant')`;
+      await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+        VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Variant',${randomUUID()},'{}',0)`;
+      const turn = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      await sql`UPDATE opening_turns SET learning_session_id=${session} WHERE id=${turn}`;
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const before = await datasets.read(scope);
+      expect(before.coursePackageQuality).toHaveLength(1);
+      expect(before.answerSequences).toHaveLength(1);
+      expect(before.dialogueEvaluation).toHaveLength(1);
+
+      if (kind === "private exam") {
+        await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
+          VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},'Private exam',${documentId},1,'{"extras":{"kind":"course_exam"}}')`;
+      } else {
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ publicationCardIds: card.id }])}
+          WHERE document_id=${documentId}`;
+      }
+      expect(await datasets.read(scope)).toMatchObject({ coursePackageQuality: [], answerSequences: [], dialogueEvaluation: [] });
+    } finally { await fixture.close(); }
+  }, 30_000);
+
+  it("withholds a source-backed legacy snippet whose original memory expired", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const source = { sourceId: await insertSource(sql, scope), sourceVersion: 0 };
+      const { id: memoryId } = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+        text: "Source-free memory", sourceTurnIds: [await insertOwnedTurn(sql, scope)],
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      });
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant",
+        contextSourceRefs: [source, { memoryDependencyIds: [memoryId] }] });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Mixed provenance", text: "Old answer", savedTurnId,
+      });
+      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([source])} WHERE document_id=${documentId}`;
+      await publishSnippet(fixture, documentId);
+      await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${memoryId}`;
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const dataset = await datasets.read(scope);
+      expect(dataset.coursePackageQuality).toEqual([]);
+      expect(dataset.answerSequences).toEqual([]);
+      expect(dataset.dialogueEvaluation.map(row => row.role)).toEqual(["user"]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally { await fixture.close(); }
+  });
+
+  it("withholds a snippet republished after its saved origin is deleted", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+      const memories = createOpeningMemoryRepository(sql);
+      const memory = await memories.proposeMemory(scope, { text: "Origin", sourceTurnIds: [savedTurnId], expiresAt: null });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Derived note", text: "Copied answer", savedTurnId,
+      });
+      await memories.deleteMemory(scope, { id: memory.id, expectedVersion: memory.version, deleteSourceText: false, clientKey: randomUUID() });
+      await publishSnippet(fixture, documentId);
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { consented: true, policyVersion: OPENING_DATASET_POLICY_VERSION,
+        expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      expect((await datasets.read(scope)).coursePackageQuality).toEqual([]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally { await fixture.close(); }
+  });
+
+  it("does not certify legacy ephemeral provenance on save", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const requestId = randomUUID();
+      const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+      await sql`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
+        VALUES(${reservation.id},${scope.workspaceId},${scope.ownerUserId},0,'[]')`;
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Legacy credential", text: "Personally readable", provenanceId: reservation.id,
+      });
+      expect(await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)
+        .toEqual([{ context_source_refs: [] }]);
+      await expect(createLibraryRepository(sql).getDocument({ workspaceId: scope.workspaceId, documentId }))
+        .resolves.toMatchObject({ id: documentId });
+    } finally { await fixture.close(); }
+  });
+
+  it("rejects a legacy memory-only credential even beside an unrelated active dependency", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const sourceId = await insertSource(sql, scope);
+      const budget = createOpeningBudgetRepository(sql, { envCapCents: 10_000 });
+      const reservation = await budget.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: randomUUID() });
+      await sql`INSERT INTO opening_ephemeral_provenance(id,workspace_id,owner_user_id,privacy_epoch,context_source_refs)
+        VALUES(${reservation.id},${scope.workspaceId},${scope.ownerUserId},0,${sql.json([{ sourceId, sourceVersion: 0, memoryOnly: true }])})`;
+      const id = await insertMemory(sql, scope, "Unrelated memory", [await insertOwnedTurn(sql, scope)]);
+      const provenance = createOpeningEphemeralProvenanceRepository(sql);
+      const provenanceId = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0,
+        contextSourceRefs: [{ memoryDependencyIds: [id] }] });
+      await expect(provenance.resolveHistory(scope, [{ provenanceId: reservation.id }, { provenanceId }], 0)).resolves.toBeNull();
+      await expect(provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0,
+        contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [id] }] }))
+        .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+    } finally { await fixture.close(); }
+  });
+
+  it("rechecks source-free history when a query actually uses the previous question", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const provenance = createOpeningEphemeralProvenanceRepository(sql);
+      const provenanceId = await provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: [] });
+      const callModel = vi.fn(async (_owner: unknown, _request: unknown, context: { beforeSend?: () => Promise<void> }) => {
+        await sql`UPDATE opening_query_ephemeral_provenance SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${provenanceId}`;
+        await context.beforeSend?.();
+        throw new Error("A stale referent reached dispatch");
+      });
+      await expect(replyEphemeralSystemQuery({
+        systemQuery: createDbSystemQueryService(sql, "web", { callModel }), provenance,
+      }, scope, { text: "刷新", purpose: "query", querySystem: true, mode: "listen", sourceIds: [],
+        history: [{ role: "user", text: "有哪些笔记？", provenanceId }], historyPrivacyEpoch: 0 }))
+        .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+      expect(callModel).toHaveBeenCalledTimes(1);
+      expect(await sql`SELECT id FROM opening_query_ephemeral_provenance WHERE workspace_id=${scope.workspaceId}`)
+        .toEqual([{ id: provenanceId }]);
+    } finally { await fixture.close(); }
+  });
+
+  it("saves an ephemeral snippet with a live course-scoped memory", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const course = await createCourseMembershipRepository(sql).createCourse({ workspaceId: scope.workspaceId, title: "Course", slug: randomUUID() });
+      const id = await insertMemory(sql, scope, "Course memory", [await insertOwnedTurn(sql, scope)]);
+      await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${id}`;
+      const requestId = randomUUID();
+      const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+      const provenanceId = await createOpeningEphemeralProvenanceRepository(sql).record(scope, {
+        reservationId: reservation.id, requestId, privacyEpoch: 0, contextSourceRefs: [{ memoryDependencyIds: [id] }],
+      });
+      await expect(createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Course snippet", text: "Answer", provenanceId: provenanceId!,
+      })).resolves.toMatchObject({ documentId: expect.any(String) });
+    } finally { await fixture.close(); }
+  });
+
+  it("exports a verified material-free ephemeral snippet", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const requestId = randomUUID();
+      const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+      const provenanceId = await createOpeningEphemeralProvenanceRepository(sql).record(scope, {
+        reservationId: reservation.id, requestId, privacyEpoch: 0, contextSourceRefs: [],
+      });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Verified empty lineage", text: "Answer", provenanceId: provenanceId!,
+      });
+      await publishSnippet(fixture, documentId);
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const dataset = await datasets.read(scope);
+      expect(dataset.coursePackageQuality).toHaveLength(1);
+      expect(dataset.answerSequences).toHaveLength(1);
+      expect(dataset.dialogueEvaluation.map(row => row.role)).toEqual(["assistant"]);
+    } finally { await fixture.close(); }
+  });
+
+  it("uses the database snapshot time even when the JavaScript clock runs ahead", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const sourceTurnId = await insertOwnedTurn(sql, scope);
+      const { id } = await createOpeningMemoryRepository(sql).proposeMemory(scope, {
+        text: "Temporary but still eligible", sourceTurnIds: [sourceTurnId],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      });
+      await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [{ memoryDependencyIds: [id] }] });
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const ahead = Date.now() + 120_000;
+      const clock = vi.spyOn(Date, "now").mockReturnValue(ahead);
+      try {
+        expect((await datasets.read(scope)).dialogueEvaluation.map(row => row.role).sort()).toEqual(["assistant", "user"]);
+      } finally { clock.mockRestore(); }
+    } finally { await fixture.close(); }
+  });
+
+  it.each(["notes", "cards"] as const)("paginates only admitted %s and collects only the returned page's lineage", async name => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const addRow = async (index: number, verified: boolean) => {
+        const sourceId = await insertSource(sql, scope);
+        await backupRows(sql, scope).chunk(sourceId, 0);
+        const memoryId = await insertMemory(sql, scope, "Preference", [await insertOwnedTurn(sql, scope)]);
+        const turnId = await insertOwnedTurn(sql, scope, { role: "assistant",
+          contextSourceRefs: [{ sourceId, sourceVersion: 0 }, { memoryDependencyIds: [memoryId] }] });
+        const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+          title: "Paginated note", text: "Answer", savedTurnId: turnId,
+        });
+        if (!verified) await sql`UPDATE opening_note_provenance SET context_source_refs='[]' WHERE document_id=${documentId}`;
+        const card = await createCardRepository(sql).createCard({ ...scope, sourceDocumentId: documentId, front: "Prompt", back: "Answer" });
+        await sql`UPDATE library_documents SET updated_at='2025-01-01'::timestamptz - ${index}::int * interval '1 day' WHERE id=${documentId}`;
+        await sql`UPDATE card_review_states SET due_at='2025-01-01'::timestamptz + ${index}::int * interval '1 day' WHERE card_id=${card.id}`;
+        return { id: name === "notes" ? documentId : card.id, sourceId, memoryId, turnId };
+      };
+      await addRow(0, false);
+      await addRow(1, false);
+      const collectLineage = vi.fn();
+      const read = createScopedOpeningSystemQueryReader(sql, scope, { collectLineage });
+      const page = (offset: number) => read({ name, arguments: { limit: 1, offset } }, new AbortController().signal);
+
+      expect(await page(0)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
+      expect(collectLineage).not.toHaveBeenCalled();
+
+      const admitted = await addRow(2, true);
+      const second = await addRow(3, true);
+      const third = await addRow(4, true);
+      const checkPage = async (offset: number, row: typeof admitted, nextOffset: number | null) => {
+        collectLineage.mockClear();
+        const result = await page(offset);
+        expect(result).toMatchObject({ status: nextOffset === null ? "ok" : "partial",
+          reason: nextOffset === null ? "read" : "truncated", nextOffset,
+          data: [{ id: row.id }], evidence: [{ recordId: row.id }], sourceRefs: [{ sourceId: row.sourceId, sourceVersion: 0 }] });
+        expect(collectLineage).toHaveBeenCalledExactlyOnceWith({ memoryIds: [row.memoryId], originTurnIds: [row.turnId] });
+      };
+      await checkPage(0, admitted, 1);
+      await checkPage(1, second, 2);
+      await checkPage(2, third, null);
+      expect(await page(3)).toMatchObject({ status: "unknown", reason: "no_data", nextOffset: null, data: [], evidence: [], sourceRefs: [] });
+    } finally { await fixture.close(); }
+  }, 30_000);
+
+  it.each(["notes", "cards", "courses"] as const)("keeps %s pagination inside the request offset limit", async name => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope, otherScope } = fixture;
+      if (name === "notes") {
+        await sql`WITH inserted AS (
+            INSERT INTO library_documents(workspace_id,title,lifecycle,updated_at)
+            SELECT ${scope.workspaceId}, 'Note ' || n, 'confirmed', '2026-01-01T00:00:00.123456Z'::timestamptz FROM generate_series(1,1002) n
+            RETURNING id, title
+          )
+          INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,reason,blocks)
+          SELECT ${scope.workspaceId}, id, 1, title, 'confirmed', 'create', '[]'::jsonb FROM inserted`;
+      } else if (name === "cards") {
+        const bgSourceId = await insertSource(sql, otherScope);
+        const foreignPubCard = await createCardRepository(sql).createCard({ ...otherScope, front: "Foreign pub", back: "Answer" });
+        await sql`WITH foreign_docs AS (
+            INSERT INTO library_documents(workspace_id,title,lifecycle)
+            SELECT ${otherScope.workspaceId}, 'Prior suite note ' || n, 'confirmed' FROM generate_series(1,250) n
+            RETURNING id, title
+          )
+          INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+          SELECT id, ${otherScope.workspaceId},
+            CASE WHEN title LIKE '%1' THEN ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [[foreignPubCard.id.toUpperCase()]] }])}::jsonb
+                 ELSE ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0 }])}::jsonb END
+          FROM foreign_docs`;
+        await sql`WITH inserted_cards AS (
+            INSERT INTO cards(workspace_id,owner_user_id,front,back)
+            SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n
+            RETURNING id
+          )
+          INSERT INTO card_review_states(workspace_id,owner_user_id,card_id,ease,interval_days,due_at)
+          SELECT ${scope.workspaceId}, ${scope.ownerUserId}, id, 2.5, 0, '2026-01-01T00:00:00.123456Z'::timestamptz
+          FROM (SELECT id FROM inserted_cards LIMIT 600) due_cards`;
+      } else {
+        await sql`INSERT INTO courses(workspace_id,title,slug)
+          SELECT ${scope.workspaceId}, 'Course ' || n, 'course-' || n FROM generate_series(1,1002) n`;
+      }
+      const read = createScopedOpeningSystemQueryReader(sql, scope);
+      const page = (offset: number) => read({ name, arguments: { offset, limit: 1 } }, new AbortController().signal);
+      const next = await page(999);
+      expect(next).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 1000, data: [expect.any(Object)] });
+      const final = await page(next.nextOffset!);
+      expect(final).toMatchObject({ status: "partial", reason: "truncated", nextOffset: null, data: [expect.any(Object)] });
+      expect(final.data).not.toEqual(next.data);
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM courses WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
+  }, 30_000);
+
+  it.each(["notes", "cards", "historical cards", "automatic cards"] as const)("carries %s memory lineage through the actual ephemeral query producer", async kind => {
+    const name = kind === "notes" ? "notes" : "cards";
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const { id } = await createOpeningMemoryRepository(sql).proposeMemory(scope, { text: "Private preference",
+        sourceTurnIds: [await insertOwnedTurn(sql, scope)], expiresAt: new Date(Date.now() + 60_000).toISOString() });
+      const savedTurnId = await insertOwnedTurn(sql, scope, { role: "assistant",
+        contextSourceRefs: [{ memoryDependencyIds: [id] }] });
+      const { documentId } = await createOpeningNoteRepository(sql).saveSnippet(scope, {
+        title: "Private preference note", text: "Do not deliver the note body", savedTurnId,
+      });
+      const card = await createCardRepository(sql).createCard({ ...scope,
+        ...(kind === "historical cards" || kind === "automatic cards" ? {} : { sourceDocumentId: documentId }), front: "Question", back: "Answer" });
+      if (kind === "historical cards") {
+        await sql`UPDATE opening_note_provenance
+          SET context_source_refs=context_source_refs || ${sql.json([{ publicationCardIds: [card.id] }])}::jsonb
+          WHERE document_id=${documentId}`;
+      }
+      if (kind === "automatic cards") {
+        const rows = backupRows(sql, scope);
+        const session = await rows.learning();
+        const observation = await rows.observation(session);
+        const [stored] = await sql`SELECT activity_id FROM opening_learning_observations WHERE id=${observation}`;
+        await publishSnippet(fixture, documentId, String(stored!.activity_id));
+        await sql`UPDATE cards SET origin_observation_root_id=${observation} WHERE id=${card.id}`;
+      }
+      const provenance = createOpeningEphemeralProvenanceRepository(sql);
+      const systemQuery = createDbSystemQueryService(sql, "web", {
+        planner: async () => ({ text: "", inputTokens: null, outputTokens: null, requestId: null,
+          toolCalls: [{ id: name, name, arguments: JSON.stringify({ limit: 5, offset: 0 }) }] }),
+      });
+      const reply = await replyEphemeralSystemQuery({ systemQuery, provenance }, scope, {
+        text: name === "notes" ? "有哪些笔记？" : "有哪些复习卡片？",
+        purpose: "query", querySystem: true, mode: "listen", sourceIds: [], history: [],
+      });
+      expect(reply.systemQuery?.results).toEqual(expect.arrayContaining([expect.objectContaining({
+        name, sourceRefs: [], data: expect.arrayContaining([expect.any(Object)]),
+      })]));
+      const history = [{ provenanceId: reply.provenanceId! }];
+      const admitted = await provenance.resolveHistory(scope, history, 0);
+      expect(admitted).toEqual([{ memoryDependencyIds: [id] }]);
+      expect(admitted?.originTurnIds).toEqual([savedTurnId]);
+      expect(admitted?.verifiedLineage).toBe(true);
+      if (kind === "notes") {
+        const independent = await replyEphemeralSystemQuery({
+          systemQuery: createDbSystemQueryService(sql, "web", { callModel: async () => { throw new Error("deterministic fixture"); } }), provenance,
+        }, scope, { text: "我有哪些课程？", purpose: "query", querySystem: true, mode: "listen", sourceIds: [],
+          history: [{ role: "user", text: "有哪些笔记？", provenanceId: reply.provenanceId! },
+            { role: "assistant", text: reply.text, provenanceId: reply.provenanceId! }], historyPrivacyEpoch: 0 });
+        await expect(provenance.resolveHistory(scope, [{ provenanceId: independent.provenanceId! }], 0)).resolves.toEqual([]);
+      }
+      await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${id}`;
+      await expect(provenance.resolveHistory(scope, history, 0)).resolves.toBeNull();
+    } finally { await fixture.close(); }
+  }, 30_000);
+
+  it.each(["transitive expiry", "archived course", "excluded backing source"] as const)(
+    "rejects ephemeral credentials with %s", async reason => {
+      const fixture = await createOpeningFixture();
+      try {
+        const { sql, scope } = fixture;
+        const source = await insertSource(sql, scope);
+        const sourceTurnId = await insertOwnedTurn(sql, scope, { sourceIds: [source] });
+        const ancestor = await createOpeningMemoryRepository(sql).proposeMemory(scope, { text: "Temporary",
+          sourceTurnIds: [sourceTurnId], expiresAt: new Date(Date.now() + 60_000).toISOString() });
+        const dependentTurnId = await insertOwnedTurn(sql, scope, { role: "assistant",
+          contextSourceRefs: [{ memoryDependencyIds: [ancestor.id] }] });
+        const memoryId = await insertMemory(sql, scope, "Dependent", [dependentTurnId]);
+        const provenance = createOpeningEphemeralProvenanceRepository(sql);
+        const refs = [{ memoryDependencyIds: [memoryId] }];
+        const recordQuery = () => provenance.recordQuery!(scope, { requestId: randomUUID(), privacyEpoch: 0, contextSourceRefs: refs });
+        const provenanceId = await recordQuery();
+        await expect(provenance.resolveHistory(scope, [{ provenanceId }], 0)).resolves.toEqual(refs);
+        if (reason === "transitive expiry") {
+          await sql`UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=${ancestor.id}`;
+        } else if (reason === "archived course") {
+          const course = await createCourseMembershipRepository(sql).createCourse({ workspaceId: scope.workspaceId, title: "Old course", slug: randomUUID() });
+          await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${memoryId}`;
+          await sql`UPDATE courses SET archived_at=clock_timestamp() WHERE id=${course.id}`;
+        } else {
+          await sql`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,deleted_at)
+            VALUES(${randomUUID()},${scope.workspaceId},${source},clock_timestamp())`;
+        }
+        await expect(provenance.resolveHistory(scope, [{ provenanceId }], 0)).resolves.toBeNull();
+        await expect(recordQuery()).rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+        const requestId = randomUUID();
+        const reservation = await createOpeningBudgetRepository(sql, { envCapCents: 10_000 }).reserve(scope, { purpose: "tutor", amountCents: 1, requestId });
+        await expect(provenance.record(scope, { reservationId: reservation.id, requestId, privacyEpoch: 0, contextSourceRefs: refs }))
+          .rejects.toMatchObject({ code: "PRIVACY_CHANGED" });
+      } finally { await fixture.close(); }
+    }, 30_000,
+  );
+
+  it("admits normal provenance-backed notes and cards while failing closed when revision 1 is missing or snippet_origin is NULL", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope, otherScope } = fixture;
+      const [threeValued] = await sql<{ null_reason: boolean | null; snippet_reason: boolean | null; missing_origin: boolean | null }[]>`
+        SELECT
+          (SELECT CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END
+            FROM (SELECT gen_random_uuid() AS document_id, NULL::text AS reason) origin) AS null_reason,
+          (SELECT CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END
+            FROM (SELECT gen_random_uuid() AS document_id, 'save-opening-snippet'::text AS reason) origin) AS snippet_reason,
+          (SELECT CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END
+            FROM (SELECT NULL::uuid AS document_id, NULL::text AS reason) origin) AS missing_origin`;
+      expect(threeValued).toEqual({ null_reason: false, snippet_reason: true, missing_origin: null });
+
+      const sourceId = await insertSource(sql, scope);
+      await backupRows(sql, scope).chunk(sourceId, 0);
+      const normalNote = await createLibraryRepository(sql).createDocument({
+        workspaceId: scope.workspaceId, title: "Normal provenance note", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "PRIVATE_NORMAL_NOTE" } }],
+      });
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${normalNote.id},${scope.workspaceId},${sql.json([{ sourceId, sourceVersion: 0 }])})`;
+      const studyNote = await createOpeningStudyNoteRepository(sql).create(scope, {
+        clientKey: randomUUID(), title: "Personal study note", text: "PRIVATE_STUDY_NOTE",
+        courseId: null, goalId: null, requirementId: null, purpose: "exploration", origin: null,
+      });
+      const normalCard = await createCardRepository(sql).createCard({
+        ...scope, sourceDocumentId: normalNote.id, front: "Prompt", back: "Answer",
+      });
+
+      const missingRevNoteId = randomUUID();
+      await sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle)
+        VALUES(${missingRevNoteId},${scope.workspaceId},'Missing revision 1','confirmed')`;
+      const missingRevCard = await createCardRepository(sql).createCard({
+        ...scope, sourceDocumentId: missingRevNoteId, front: "Missing rev prompt", back: "Missing rev answer",
+      });
+
+      const read = createScopedOpeningSystemQueryReader(sql, scope);
+      const signal = new AbortController().signal;
+      const notes = await read({ name: "notes", arguments: { limit: 10, offset: 0 } }, signal);
+      expect(notes.data.map(row => row.id).sort()).toEqual([normalNote.id, studyNote.documentId].sort());
+      const cards = await read({ name: "cards", arguments: { limit: 10, offset: 0 } }, signal);
+      expect(cards.data.map(row => row.id)).toEqual([normalCard.id]);
+      expect(cards.data.map(row => row.id)).not.toContain(missingRevCard.id);
+
+      await publishSnippet(fixture, normalNote.id);
+      await publishSnippet(fixture, missingRevNoteId);
+
+      // Foreign-workspace document referenced by a workspace opening_note_provenance row still withholds its publicationCardIds.
+      const foreignDoc = await createLibraryRepository(sql).createDocument({
+        workspaceId: otherScope.workspaceId, title: "Foreign doc", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Foreign" } }],
+      });
+      const foreignLinkedCard = await createCardRepository(sql).createCard({ ...scope, front: "Prompt", back: "Answer" });
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${foreignDoc.id},${scope.workspaceId},${sql.json([{ publicationCardIds: [foreignLinkedCard.id] }])})`;
+      const variantActivity = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: foreignLinkedCard.id })} WHERE id=${variantActivity}`;
+
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const dataset = await datasets.read(scope);
+      expect(dataset.coursePackageQuality).toHaveLength(1);
+      expect(dataset.answerSequences).toHaveLength(1);
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
+  }, 30_000);
+
+  it("fails closed on malformed publicationCardIds shapes in cardLinkedToNotePublication and excludes root-null publication cards in backup", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope } = fixture;
+      const cardRepo = createCardRepository(sql);
+      const targetCard = await cardRepo.createCard({ ...scope, front: "Target", back: "Answer" });
+      const cleanCard = await cardRepo.createCard({ ...scope, front: "Clean", back: "Answer" });
+
+      const nestArray = (value: unknown, depth: number) => {
+        let current = value;
+        for (let i = 0; i < depth; i += 1) current = [current];
+        return current;
+      };
+      const deep33Padded = [{ publicationCardIds: nestArray(`\t\r\n\u00a0${targetCard.id.toUpperCase()}\ufeff\v\f`, 33) }];
+      const deep64NestedObj = [{
+        publicationCardIds: [{
+          other: { publicationCardIds: nestArray(`\t${targetCard.id.toUpperCase()}\n`, 64) },
+        }],
+      }];
+
+      const probeRows = await sql<{ label: string; matched: boolean }[]>`
+        SELECT probe.label, ${cardLinkedToNotePublication(sql)} AS matched
+        FROM cards c
+        CROSS JOIN LATERAL (
+          VALUES
+            ('null', NULL::jsonb),
+            ('json_null', 'null'::jsonb),
+            ('number', '42'::jsonb),
+            ('string', '"scalar"'::jsonb),
+            ('empty_obj', '{}'::jsonb),
+            ('empty_arr', '[]'::jsonb),
+            ('whitespace_only', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(U&'\\0009\\000a\\000d\\00a0\\feff')))),
+            ('top_object_scalar', jsonb_build_object('publicationCardIds', upper(c.id::text))),
+            ('nested_array', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(jsonb_build_array(' ' || upper(c.id::text) || ' '))))),
+            ('deep_33_padded', ${sql.json(deep33Padded as never)}::jsonb),
+            ('deep_64_nested_obj', ${sql.json(deep64NestedObj as never)}::jsonb),
+            ('mixed_array', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(c.id::text, jsonb_build_object('bad', 1))))),
+            ('id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(jsonb_build_object('id', U&'\\0009' || upper(c.id::text) || U&'\\000a'))))),
+            ('card_id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_object('cardId', U&'\\00a0' || c.id::text || U&'\\feff')))),
+            ('nested_outer', jsonb_build_array(jsonb_build_array(jsonb_build_object('publicationCardIds', c.id::text))))
+        ) AS np(label, context_source_refs)
+        JOIN LATERAL (SELECT np.label) probe ON TRUE
+        WHERE c.id=${targetCard.id}`;
+      expect(Object.fromEntries(probeRows.map(r => [r.label, r.matched]))).toEqual({
+        null: false, json_null: false, number: false, string: false, empty_obj: false, empty_arr: false, whitespace_only: false,
+        top_object_scalar: true, nested_array: true, deep_33_padded: true, deep_64_nested_obj: true, mixed_array: true,
+        id_object: true, card_id_object: true, nested_outer: true,
+      });
+
+      const doc = await createLibraryRepository(sql).createDocument({
+        workspaceId: scope.workspaceId, title: "Publication note", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Body" } }],
+      });
+      const noteSourceId = await insertSource(sql, scope);
+      await backupRows(sql, scope).chunk(noteSourceId, 0);
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${doc.id},${scope.workspaceId},${sql.json([{ sourceId: noteSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [targetCard.id] }])})`;
+
+      const read = createScopedOpeningSystemQueryReader(sql, scope);
+      const queryCards = async () => (await read({ name: "cards", arguments: { limit: 10, offset: 0 } }, new AbortController().signal)).data.map(r => r.id);
+      expect((await queryCards()).sort()).toEqual([cleanCard.id, targetCard.id].sort());
+
+      for (const malformed of [
+        [{ publicationCardIds: targetCard.id }],
+        [{ publicationCardIds: [[targetCard.id.toUpperCase()]] }],
+        deep33Padded,
+        deep64NestedObj,
+        [{ publicationCardIds: [targetCard.id, { bad: 1 }] }],
+        [{ publicationCardIds: [{ id: `\t${targetCard.id.toUpperCase()}\r\n` }] }],
+        [[{ publicationCardIds: targetCard.id }]],
+        [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: targetCard.id }],
+        [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: [targetCard.id] }],
+        [{ sourceId: noteSourceId, sourceVersion: 0, nested: [[{ publicationCardIds: [targetCard.id] }]] }],
+      ]) {
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed as never)} WHERE document_id=${doc.id}`;
+        expect(await queryCards()).toEqual([cleanCard.id]);
+        await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: targetCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        expect((await readOpeningBackupRecords(sql, scope)).tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
+      }
+
+      // Restore valid publicationCardIds, then mark doc as a private exam: root-null targetCard must be excluded from Opening backup!
+      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ sourceId: noteSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [targetCard.id] }])} WHERE document_id=${doc.id}`;
+      await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
+        VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},'Private exam',${doc.id},1,'{"extras":{"kind":"course_exam"}}')`;
+      const backup = await readOpeningBackupRecords(sql, scope);
+      expect(backup.tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM opening_teaching_units WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
+  }, 30_000);
+
+  it("rejects note provenance elements containing nested arrays across SQL, application parsers, backup, and dataset export while keeping planner costs below 10,000", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope, otherScope } = fixture;
+      const validSourceId = await insertSource(sql, scope);
+      await backupRows(sql, scope).chunk(validSourceId, 0);
+      const unknownSourceId = randomUUID();
+
+      const library = createLibraryRepository(sql);
+      const cardRepo = createCardRepository(sql);
+      const doc = await library.createDocument({
+        workspaceId: scope.workspaceId, title: "Nested array lineage note", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "PRIVATE_NESTED_LINEAGE" } }],
+      });
+      await publishSnippet(fixture, doc.id);
+      const linkedCard = await cardRepo.createCard({ ...scope, sourceDocumentId: doc.id, front: "Linked", back: "Answer" });
+      const pubLinkedCard = await cardRepo.createCard({ ...scope, front: "PubLinked", back: "Answer" });
+      const cleanCard = await cardRepo.createCard({ ...scope, front: "Clean", back: "Answer" });
+      const pubVariantActivity = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        source_ids=${[validSourceId]}::uuid[],
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: pubLinkedCard.id })} WHERE id=${pubVariantActivity}`;
+
+      // Cross-workspace publication link at depth 40 with tab/newline/NBSP padding must also withhold card from dataset export.
+      const foreignDoc = await library.createDocument({
+        workspaceId: otherScope.workspaceId, title: "Foreign publication", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Foreign" } }],
+      });
+      const crossWsCard = await cardRepo.createCard({ ...scope, front: "CrossWs", back: "Answer" });
+      let deep40CrossWs: unknown = `\t\u00a0${crossWsCard.id.toUpperCase()}\r\n`;
+      for (let i = 0; i < 40; i += 1) deep40CrossWs = [deep40CrossWs];
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${foreignDoc.id},${otherScope.workspaceId},${sql.json([{ publicationCardIds: deep40CrossWs } as never])})`;
+      const crossWsVariant = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: crossWsCard.id })} WHERE id=${crossWsVariant}`;
+
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${doc.id},${scope.workspaceId},${sql.json([
+          { sourceId: validSourceId, sourceVersion: 0, publication: true },
+          { publicationCardIds: [pubLinkedCard.id] },
+        ])})`;
+
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const readQuery = createScopedOpeningSystemQueryReader(sql, scope);
+      const nativeBackups = createBackupRestoreRepository(sql);
+      const signal = new AbortController().signal;
+
+      expect((await datasets.read(scope)).coursePackageQuality).toHaveLength(2);
+
+      for (const malformed of [
+        [{ sourceId: validSourceId, sourceVersion: 0, legacy: [{ sourceId: unknownSourceId, sourceVersion: 0 }] }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, extra: [] }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, deep: { nested: [1] } }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, publication: "legacy" }, { publicationCardIds: [pubLinkedCard.id] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, publication: false }, { publicationCardIds: [pubLinkedCard.id] }],
+      ]) {
+        expect(parseNoteContextProvenanceRefs(malformed)).toBeNull();
+        expect(parseNoteContextSourceRefs(malformed)).toBeNull();
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed as never)} WHERE document_id=${doc.id}`;
+
+        const [sqlState] = await sql<{ included_live: boolean; included_hist: boolean; readable: boolean }[]>`
+          SELECT
+            ${noteContextSourceRefsIncluded(sql, scope.workspaceId, () => sql`np.context_source_refs`, false)} AS included_live,
+            ${noteContextSourceRefsIncluded(sql, scope.workspaceId, () => sql`np.context_source_refs`, true)} AS included_hist,
+            ${openingNoteReadable(sql, scope.workspaceId, sql`np.document_id`)} AS readable
+          FROM opening_note_provenance np
+          WHERE np.document_id=${doc.id}`;
+        expect(sqlState).toEqual({ included_live: false, included_hist: false, readable: false });
+
+        await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: doc.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: linkedCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: pubLinkedCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        expect((await readQuery({ name: "notes", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([]);
+        expect((await readQuery({ name: "cards", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([cleanCard.id]);
+
+        const backup = await readOpeningBackupRecords(sql, scope);
+        expect(backup.tables.library_documents.map(r => r.id)).not.toContain(doc.id);
+        expect(backup.tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
+        const nativePacked = await nativeBackups.exportWorkspace(scope);
+        expect(nativePacked.records.documents.map(r => r.id)).not.toContain(doc.id);
+        expect(nativePacked.records.cards.map(r => r.id)).toEqual([cleanCard.id]);
+        expect((await datasets.read(scope)).coursePackageQuality).toEqual([]);
+      }
+
+      const parseMaxCost = (rows: readonly Record<string, unknown>[]) => {
+        const match = /\(cost=[0-9.]+\.\.([0-9.]+)/.exec(String(rows[0]?.["QUERY PLAN"] ?? ""));
+        return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+      };
+      const cardReadablePlan = await sql`EXPLAIN (COSTS ON)
+        SELECT c.id FROM cards c WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+          AND NOT c.archived AND ${cardReadable(sql, scope.workspaceId)}`;
+      const datasetCardsPlan = await sql`EXPLAIN (COSTS ON)
+        SELECT c.id FROM cards c WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+          AND NOT COALESCE(c.id::text = ANY(ARRAY(
+            SELECT pub.card_id FROM (
+              SELECT np.context_source_refs FROM opening_note_provenance np
+              WHERE np.workspace_id<>${scope.workspaceId} AND np.context_source_refs IS NOT NULL
+                AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+            ) np
+            CROSS JOIN LATERAL ${notePublicationCardIds(sql, () => sql`np.context_source_refs`)} AS pub(card_id)
+          )), false)`;
+      const systemQueryPubPlan = await sql`EXPLAIN (COSTS ON)
+        WITH pub_links AS MATERIALIZED (
+          SELECT np.document_id, pub.card_id FROM (
+            SELECT np.document_id, np.context_source_refs FROM opening_note_provenance np
+            WHERE np.workspace_id=${scope.workspaceId} AND np.context_source_refs IS NOT NULL
+              AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+          ) np
+          CROSS JOIN LATERAL ${notePublicationCardIds(sql, () => sql`np.context_source_refs`)} AS pub(card_id)
+        )
+        SELECT * FROM pub_links`;
+      expect(parseMaxCost(cardReadablePlan)).toBeLessThan(10_000);
+      expect(parseMaxCost(datasetCardsPlan)).toBeLessThan(10_000);
+      expect(parseMaxCost(systemQueryPubPlan)).toBeLessThan(10_000);
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
+  }, 30_000);
 });
 async function grantOther() { await repo.grantConsent(f.otherScope,{policyVersion:OPENING_DATASET_POLICY_VERSION,consented:true,expiresAt:new Date(Date.now() + 3600000).toISOString()}); }
+
+async function publishSnippet({ sql, scope }: OpeningFixture, documentId: string, activityId?: string) {
+  const activity = activityId ?? await insertTestTeachingActivity(sql, scope);
+  const unit = randomUUID(), session = randomUUID();
+  await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+    VALUES(${unit},${scope.workspaceId},${scope.ownerUserId},'Published snippet',${documentId},1)`;
+  await sql`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+    revision_number,source_refs,version) VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${activity},${unit},${documentId},1,'[]',1)`;
+  await sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,activity_id,skill_label)
+    VALUES(${session},${scope.workspaceId},${scope.ownerUserId},${activity},'Published snippet')`;
+  await sql`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,activity_id,skill_label,client_key,create_intent,history_revision)
+    VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${session},${activity},'Published snippet',${randomUUID()},'{}',0)`;
+  const turn = await insertOwnedTurn(sql, scope, { role: "assistant", contextSourceRefs: [] });
+  await sql`UPDATE opening_turns SET learning_session_id=${session} WHERE id=${turn}`;
+}

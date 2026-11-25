@@ -66,10 +66,16 @@ export function fallbackSystemQuery(question: string, focus?: SystemQueryFocus):
 export async function runSystemQuery(input: {
   question: string; previousQuestion?: RecordQuestionContext; resolveObjects?: boolean; localDate?: string; clock?: SystemQueryClock; privacyEpoch: number; authorization: SystemQueryAuthorization; focus?: SystemQueryFocus; read: SystemQueryReader; callModel?: CallModel;
   assertCurrent: () => Promise<void>; signal?: AbortSignal; now?: () => Date;
+  onPreviousQuestionUsed?: () => void;
 }): Promise<SystemQueryReceipt> {
   const asOf = (input.now?.() ?? new Date()).toISOString();
   const clock = input.clock ?? { today: input.localDate ?? asOf.slice(0, 10), timeZone: "UTC" };
-  const selection = selectSystemQuery(input.question, input.previousQuestion, input.localDate ?? clock.today);
+  const today = input.localDate ?? clock.today;
+  const selection = selectSystemQuery(input.question, input.previousQuestion, today);
+  if (input.resolveObjects && input.previousQuestion && input.onPreviousQuestionUsed
+    && JSON.stringify(selection) !== JSON.stringify(selectSystemQuery(input.question, undefined, today))) {
+    input.onPreviousQuestionUsed();
+  }
   const decisionLookup = !selection.topics.length ? decisionIdFromQuestion(input.question) : undefined;
   const tools = input.resolveObjects && selection.topics.length
     ? SYSTEM_QUERY_TOOLS.filter(tool => selection.topics.includes(tool.name as RecordTopic))
@@ -208,9 +214,9 @@ export async function runSystemQuery(input: {
     if (clarification) reason = clarification;
     else if ((!input.resolveObjects || materialRouting) && route.clarification) reason = "clarification_required";
     await check();
-  } catch {
+  } catch (cause) {
     // Privacy/cancellation never returns previously read data to the caller.
-    throw new Error(controller.signal.aborted ? "system query cancelled or timed out" : "system query context changed");
+    throw new Error(controller.signal.aborted ? "system query cancelled or timed out" : "system query context changed", { cause });
   } finally { clearTimeout(timer); input.signal?.removeEventListener("abort", abort); }
   const status = clarification ? "unknown" : results.every(row => row.status === "unknown") ? "unknown"
     : results.some(row => row.status !== "ok") || reason === "limit" || (mode === "native_tools" && reason !== "read") ? "partial" : "ok";

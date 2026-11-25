@@ -2,6 +2,8 @@ import type { Sql, TransactionSql } from "postgres";
 import type { Citation } from "@aistudy/contracts";
 import { notePublicationMetadata } from "@aistudy/domain";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
+
+export { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import type { OpeningScope } from "./opening-sources";
 
 type Db = Sql | TransactionSql;
@@ -11,6 +13,7 @@ type MemoryAlias = "" | "m";
 export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion"> & {
   memoryOnly?: boolean;
 };
+export type ContextProvenanceRef = ContextSourceRef | { memoryDependencyIds: string[] };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isMemoryDependencyMetadata(value: unknown): value is { memoryDependencyIds: string[] } {
@@ -73,20 +76,107 @@ export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][])
   );
 }
 
+export function parseContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
+  if (!Array.isArray(value) || value.some(ref => ref && typeof ref === "object"
+    && "memoryDependencyIds" in ref && !isMemoryDependencyMetadata(ref))) return null;
+  const refs = parseContextSourceRefs(value);
+  const ids = parseContextMemoryDependencyIds(value);
+  return refs && ids ? [...refs, ...(ids.length ? [{ memoryDependencyIds: ids }] : [])] : null;
+}
+
+export function mergeContextProvenanceRefs(...groups: readonly ContextProvenanceRef[][]): ContextProvenanceRef[] {
+  const ids = new Set<string>();
+  const sources = groups.map(group => group.filter((ref): ref is ContextSourceRef => {
+    if (!("memoryDependencyIds" in ref)) return true;
+    for (const id of ref.memoryDependencyIds) ids.add(id.toLowerCase());
+    return false;
+  }));
+  return [...mergeContextSourceRefs(...sources), ...(ids.size ? [{ memoryDependencyIds: [...ids].sort() }] : [])];
+}
+
+export function isVerifiedSnippetLineage(value: unknown): boolean {
+  return notePublicationMetadata(value)?.snippetLineageVersion === 1;
+}
+
+export function noteOriginTurnIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? [...new Set(value.flatMap(ref => notePublicationMetadata(ref)?.originTurnIds ?? []))].sort() : [];
+}
+
+export async function openingSnippetOriginsAvailable(db: Db, scope: OpeningScope, origins: readonly string[]) {
+  if (!origins.length) return true;
+  if (!origins.every(isLineageUuid)) return false;
+  const turns = await db`SELECT t.id,t.role FROM opening_turns t JOIN opening_conversations c
+    ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+    WHERE t.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+      AND t.id=ANY(${[...origins]}::uuid[]) AND t.status='complete' AND NOT t.query_system AND t.system_query IS NULL
+      AND NOT EXISTS (SELECT 1 FROM opening_memories m
+        WHERE m.workspace_id=t.workspace_id AND m.status='deleted'
+          AND EXISTS(SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(m.source_turn_ids)='array'
+            THEN m.source_turn_ids ELSE '[]'::jsonb END) origin(id) WHERE lower(origin.id)=t.id::text))`;
+  return turns.length === origins.length && turns.some(turn => turn.role === "assistant");
+}
+
+const NOTE_METADATA_KEYS = new Set([
+  "publicationCardIds",
+  "answerKeyBlockIds",
+  "originTurnIds",
+  "snippetLineageVersion",
+  "memoryDependencyIds",
+]);
+
+export function containsDisallowedNoteMetadataOrArray(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) return true;
+    if (!node || typeof node !== "object") continue;
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (NOTE_METADATA_KEYS.has(key) || Array.isArray(child)) return true;
+      if (child && typeof child === "object") stack.push(child);
+    }
+  }
+  return false;
+}
+
+export function hasValidNoteMetadataStructure(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.every(ref =>
+    notePublicationMetadata(ref) !== null
+    || isMemoryDependencyMetadata(ref)
+    || (!containsDisallowedNoteMetadataOrArray(ref)
+      && (!ref || typeof ref !== "object" || (
+        (ref as Record<string, unknown>).publication === undefined
+        || (ref as Record<string, unknown>).publication === true
+      ))),
+  );
+}
+
+export function parseNoteContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
+  if (!hasValidNoteMetadataStructure(value)) return null;
+  return parseContextProvenanceRefs(value.filter(ref => !notePublicationMetadata(ref)));
+}
+
 export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
-  return parseContextSourceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
+  if (!hasValidNoteMetadataStructure(value)) return null;
+  return parseContextSourceRefs(value.filter(ref => !notePublicationMetadata(ref)));
 }
 
 /** Strip the exact note-only metadata shapes before applying source admission. */
 export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
   return db`CASE WHEN jsonb_typeof(${refs()})='array' THEN (
-    SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs()}) ref
-    WHERE NOT EXISTS (
-      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds')) AS metadata(key)
-      WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
-        AND jsonb_typeof(ref->metadata.key)='array'
-        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ref->metadata.key)='array'
-          THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
+    SELECT COALESCE(jsonb_agg(ref_item.ref ORDER BY ref_item.ord), '[]'::jsonb)
+    FROM unnest(ARRAY(SELECT jsonb_array_elements(
+      CASE WHEN jsonb_typeof(${refs()})='array' THEN ${refs()} ELSE '[]'::jsonb END
+    ))) WITH ORDINALITY AS ref_item(ref, ord)
+    WHERE ref_item.ref <> '{"snippetLineageVersion":1}'::jsonb AND NOT EXISTS (
+      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
+      WHERE ref_item.ref=jsonb_build_object(metadata.key, ref_item.ref->metadata.key)
+        AND jsonb_typeof(ref_item.ref->metadata.key)='array'
+        AND (metadata.key<>'originTurnIds' OR ref_item.ref->metadata.key<>'[]'::jsonb)
+        AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY(SELECT jsonb_array_elements_text(
+          CASE WHEN jsonb_typeof(ref_item.ref->metadata.key)='array'
+            THEN ref_item.ref->metadata.key ELSE '[]'::jsonb END
+        ))) AS item(value)
           WHERE item.value IS NULL OR item.value !~* ${UUID.source})
     )
   ) ELSE ${refs()} END`;
@@ -98,17 +188,19 @@ export function contextSourceRefsIncluded(
   bareSourceIds?: FragmentFactory, citations?: FragmentFactory,
 ): Fragment {
   const separateInputs = bareSourceIds !== undefined || citations !== undefined;
-  const safeArray = (value: FragmentFactory): Fragment => db`CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END`;
+  const safeElements = (value: FragmentFactory): Fragment => db`unnest(ARRAY(SELECT jsonb_array_elements(
+    CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END
+  )))`;
   return db`
     COALESCE(jsonb_typeof(${refs()}) = 'array', false)
     ${citations ? db`AND COALESCE(jsonb_typeof(${citations()}) = 'array', false)` : db``}
     AND NOT EXISTS (
       SELECT 1 FROM ${separateInputs ? db`(
-        SELECT elem, false, true FROM jsonb_array_elements(${safeArray(refs)}) elem
+        SELECT elem, false, true FROM ${safeElements(refs)} AS elem
         ${bareSourceIds ? db`UNION ALL
           SELECT jsonb_build_object('sourceId', sid.id), true, false FROM unnest(${bareSourceIds()}) sid(id)` : db``}
-        ${citations ? db`UNION ALL SELECT elem, false, false FROM jsonb_array_elements(${safeArray(citations)}) elem` : db``}
-      ) AS input(provenance_ref, unversioned, allow_dependency_metadata)` : db`jsonb_array_elements(${safeArray(refs)}) provenance_ref`}
+        ${citations ? db`UNION ALL SELECT elem, false, false FROM ${safeElements(citations)} AS elem` : db``}
+      ) AS input(provenance_ref, unversioned, allow_dependency_metadata)` : db`${safeElements(refs)} AS provenance_ref`}
       WHERE NOT (
           ${separateInputs ? db`input.allow_dependency_metadata AND` : db``}
           provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
@@ -124,6 +216,11 @@ export function contextSourceRefsIncluded(
         )
         AND (
           jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.publicationCardIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.answerKeyBlockIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.originTurnIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.snippetLineageVersion'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.memoryDependencyIds'), false)
           OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
           OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
@@ -151,6 +248,38 @@ export function contextSourceRefsIncluded(
           )
         )
     )`;
+}
+
+/** Materialize stripped note-only metadata once before running source admission. */
+export function noteContextSourceRefsIncluded(
+  db: Db, workspaceId: string, rawRefs: FragmentFactory,
+  allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
+): Fragment {
+  return db`EXISTS (
+    SELECT 1 FROM (SELECT ${noteContextSourceRefs(db, rawRefs)} AS refs OFFSET 0) AS note_lineage
+    WHERE ${contextSourceRefsIncluded(db, workspaceId, () => db`note_lineage.refs`, allowHistoricalVersions, requireAvailability)}
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(ARRAY(SELECT jsonb_array_elements(
+          CASE WHEN jsonb_typeof(note_lineage.refs) = 'array' THEN note_lineage.refs ELSE '[]'::jsonb END
+        ))) AS provenance_ref
+        WHERE NOT (
+            provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
+            AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+            AND provenance_ref->'memoryDependencyIds' <> '[]'::jsonb
+            AND NOT EXISTS (
+              SELECT 1 FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+                  THEN provenance_ref->'memoryDependencyIds' ELSE '[]'::jsonb END
+              ) AS dep(value)
+              WHERE dep.value IS NULL OR dep.value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
+          )
+          AND (
+            COALESCE(jsonb_path_exists(provenance_ref, 'strict $.** ? (@.type() == "array")'), false)
+            OR (provenance_ref ? 'publication' AND provenance_ref->'publication' IS DISTINCT FROM 'true'::jsonb)
+          )
+      )
+  )`;
 }
 
 /** Version pins can exist independently of the turn's explicit source_ids. */
@@ -692,9 +821,11 @@ export async function readTurnMemoryDependencyDeadlines(
     WHERE a.workspace_id = ${workspaceId} AND a.id = ANY(${turnIds}::uuid[]) AND a.status='complete'
       ${verifyOrigins ? db`AND ${verifyOrigins()}` : db``}
       AND ${assistantDirectSourcesVersioned(db, "a")}
-      AND (a.role <> 'assistant' OR cardinality(a.source_ids) = 0 OR
-        ${contextSourceRefsIncluded(db, workspaceId, () => turnContextSourceRefs(db, "a"), false, true,
-          () => db`a.source_ids`, () => db`a.citations`)})`;
+      AND (a.role <> 'assistant' OR cardinality(a.source_ids) = 0 OR EXISTS (
+        SELECT 1 FROM (SELECT ${turnContextSourceRefs(db, "a")} AS refs OFFSET 0) AS assistant_lineage
+        WHERE ${contextSourceRefsIncluded(db, workspaceId, () => db`assistant_lineage.refs`, false, true,
+          () => db`a.source_ids`, () => db`a.citations`)}
+      ))`;
   const active = new Map<string, number>();
   const evidence = new Map<string, TurnMemoryEvidence>();
   const groups = new Map<string, Array<TurnMemorySide & { consumerId: string; ownerUserId: string; ids: string[]; memoryOnlyCount: number }>>();
