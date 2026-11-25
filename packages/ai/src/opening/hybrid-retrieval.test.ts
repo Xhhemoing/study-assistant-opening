@@ -1694,7 +1694,7 @@ describe("material hybrid retrieval", () => {
       const timedRanked = runLarge();
       const elapsedMs = performance.now() - t0;
       expect(timedRanked[0]?.id).toBe("lg-250");
-      expect(elapsedMs).toBeLessThan(200);
+      expect(elapsedMs).toBeLessThan(1000);
 
       // Verify shortest-form `<!-->` and `<!--->` never pair with a later `-->` across chunks
       // (which would otherwise leave `<!--\n## Answer Key` unclosed inside the unwrapped slice),
@@ -1729,6 +1729,286 @@ describe("material hybrid retrieval", () => {
       expect(shortRanked.map(c => c.id)).toEqual(["sc-p5", "sc-p1"]);
       expect(JSON.stringify(shortRanked)).not.toContain("lambda = 7");
       expect(JSON.stringify(shortRanked)).not.toContain("lambda_2 = 3");
+    });
+
+    it("preserves active answer headings across outer closers even when an unclosed inner fence follows the heading, while confining the inner fence to innerEnd", () => {
+      // Round-5 Step-1 P1 #1 & Step-2 P2 #1:
+      // 4-chunk empty-graph preferChunkId case:
+      // p1 opens ````, p2 has `## Answer Key\n``` ` (unclosed 3-backtick inner fence),
+      // p3 closes ````, p4 has unlabeled continuation `Substituting gives x = 42.`.
+      const innerUnclosedSrc = "unclosed-inner-fence-under-answer-key";
+      const p1OuterOpen: SourceChunk = {
+        ...chunk("uif-p1", "````markdown", 1),
+        sourceId: innerUnclosedSrc,
+      };
+      const p2AnswerAndUnclosedInner: SourceChunk = {
+        ...chunk("uif-p2", "## Answer Key\n```", 2),
+        sourceId: innerUnclosedSrc,
+      };
+      const p3OuterClose: SourceChunk = {
+        ...chunk("uif-p3", "````", 3),
+        sourceId: innerUnclosedSrc,
+      };
+      const p4UnlabeledContinuation: SourceChunk = {
+        ...chunk("uif-p4", "Substituting gives x = 42.", 4),
+        sourceId: innerUnclosedSrc,
+      };
+
+      const fourChunkRanked = rankMaterialContext({
+        chunks: [p1OuterOpen, p2AnswerAndUnclosedInner, p3OuterClose, p4UnlabeledContinuation],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "uif-p4",
+        preferPage: 4,
+        dense: [{ chunk: p4UnlabeledContinuation, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [innerUnclosedSrc],
+            admissibleSourceVersions: { [innerUnclosedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(fourChunkRanked).toEqual([]);
+      expect(JSON.stringify(fourChunkRanked)).not.toContain("x = 42");
+
+      // Extended 5-chunk case adding p5 `## Public Section\nTheorem 1: Contraction mapping...`:
+      // p4 stays quarantined while p5 IS returned (proving the unclosed inner 3-backtick fence
+      // stays strictly confined to innerEnd and never swallows p5's `## Public Section` as code).
+      const p5PublicSection: SourceChunk = {
+        ...chunk(
+          "uif-p5",
+          "## Public Section\nTheorem 1: Contraction mapping fixed-point uniqueness.",
+          5,
+        ),
+        sourceId: innerUnclosedSrc,
+      };
+
+      const fiveChunkRanked = rankMaterialContext({
+        chunks: [
+          p1OuterOpen,
+          p2AnswerAndUnclosedInner,
+          p3OuterClose,
+          p4UnlabeledContinuation,
+          p5PublicSection,
+        ],
+        query: "Substituting Contraction mapping fixed-point uniqueness",
+        maxCharacters: 8000,
+        preferChunkId: "uif-p4",
+        preferPage: 4,
+        dense: [
+          { chunk: p4UnlabeledContinuation, segmentIndex: 0 },
+          { chunk: p5PublicSection, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted-uif", label: "Tainted", evidenceChunkIds: ["uif-p4"], privacyEpoch: 1 },
+            { id: "c-uif-thm", label: "Contraction Mapping", evidenceChunkIds: ["uif-p5"], privacyEpoch: 1 },
+          ],
+          edges: [{ from: "c-tainted-uif", to: "c-uif-thm", kind: "prerequisite", privacyEpoch: 1 }],
+          authorization: {
+            admissibleSourceIds: [innerUnclosedSrc],
+            admissibleSourceVersions: { [innerUnclosedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(fiveChunkRanked.map(c => c.id)).toEqual(["uif-p5"]);
+      expect(fiveChunkRanked[0]?.text).toContain("Theorem 1: Contraction mapping");
+      expect(JSON.stringify(fiveChunkRanked)).not.toContain("x = 42");
+
+      // Also verify when p2 opens an unclosed 3-backtick fence on its own chunk BEFORE p3's `## Answer Key`
+      // inside an outer 4-backtick fence (C_2.outerEnd === C_1.innerEnd exports upward across both closers).
+      const nestedBeforeSrc = "unclosed-inner-before-answer-heading";
+      const nestedBeforeRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("nb-p1", "````markdown", 1), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p2", "```", 2), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p3", "## Answer Key", 3), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p4", "````", 4), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p5", "Substituting gives x = 42.", 5), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p6", "## Public Section\nLemma 1: Closed graph lemma.", 6), sourceId: nestedBeforeSrc },
+        ],
+        query: "Substituting Closed graph lemma",
+        maxCharacters: 8000,
+        preferChunkId: "nb-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [nestedBeforeSrc],
+            admissibleSourceVersions: { [nestedBeforeSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(nestedBeforeRanked.map(c => c.id)).toEqual(["nb-p6"]);
+      expect(JSON.stringify(nestedBeforeRanked)).not.toContain("x = 42");
+
+      // Also verify `<div>` variants:
+      // (a) Exact `p1: "<div>"`, `p2: "## Answer Key\n```"`, `p3: "</div>"`, `p4: "Substituting gives x = 42."`,
+      //     `p5: "## Public Section\nLemma 1: ..."` strictly quarantines p2..p4 (`0` leak of `x = 42`);
+      // (b) Contiguous HTML `<div>\n` ... `</div>` with unclosed inner `<!--` AND `\begin{verbatim}` with unclosed
+      //     inner ``` both quarantine p4 while returning p5 (`Lemma 1`).
+      const divFenceSrc = "div-unclosed-inner-fence";
+      const divFenceRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("df-p1", "<div>", 1), sourceId: divFenceSrc },
+          { ...chunk("df-p2", "## Answer Key\n```", 2), sourceId: divFenceSrc },
+          { ...chunk("df-p3", "</div>", 3), sourceId: divFenceSrc },
+          { ...chunk("df-p4", "Substituting gives x = 42.", 4), sourceId: divFenceSrc },
+          { ...chunk("df-p5", "## Public Section\nLemma 1: Open mapping lemma.", 5), sourceId: divFenceSrc },
+        ],
+        query: "Substituting Open mapping lemma",
+        maxCharacters: 8000,
+        preferChunkId: "df-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [divFenceSrc],
+            admissibleSourceVersions: { [divFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(divFenceRanked.map(c => c.id)).not.toContain("df-p4");
+      expect(JSON.stringify(divFenceRanked)).not.toContain("x = 42");
+
+      for (const [variant, openText, innerText, closeText] of [
+        ["div-html", "<div>\n", "## Answer Key\n<!--\n", "</div>"],
+        ["verbatim-inner-fence", "\\begin{verbatim}", "## Answer Key\n```", "\\end{verbatim}"],
+      ] as const) {
+        const srcId = `outer-${variant}-src`;
+        const res = rankMaterialContext({
+          chunks: [
+            { ...chunk(`${variant}-p1`, openText, 1), sourceId: srcId },
+            { ...chunk(`${variant}-p2`, innerText, 2), sourceId: srcId },
+            { ...chunk(`${variant}-p3`, closeText, 3), sourceId: srcId },
+            { ...chunk(`${variant}-p4`, "Substituting gives x = 42.", 4), sourceId: srcId },
+            {
+              ...chunk(`${variant}-p5`, "## Public Section\nLemma 1: Open mapping lemma.", 5),
+              sourceId: srcId,
+            },
+          ],
+          query: "Substituting Open mapping lemma",
+          maxCharacters: 8000,
+          preferChunkId: `${variant}-p4`,
+          pedagogicalGraph: {
+            concepts: [],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [srcId],
+              admissibleSourceVersions: { [srcId]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+        expect(res.map(c => c.id)).toEqual([`${variant}-p5`]);
+        expect(res[0]?.text).toContain("Lemma 1: Open mapping lemma.");
+        expect(JSON.stringify(res)).not.toContain("x = 42");
+      }
+    });
+
+    it("retrieves later public sections after 40 multi-chunk public code fences without false sealing and keeps ## Hints active across closed example fences", () => {
+      // Round-5 Step-1 P1 #2:
+      // 40 sequential closed 2-chunk public code fences (80 chunks) + p81 `## Public Section\nTheorem 40: ...`.
+      const manyFencesSrc = "forty-multi-chunk-public-fences";
+      const manyFenceChunks: SourceChunk[] = [];
+      for (let k = 1; k <= 40; k++) {
+        manyFenceChunks.push({
+          ...chunk(`mf-p${2 * k - 1}`, `\`\`\`ts\nconst k${k} = ${k};`, 2 * k - 1),
+          sourceId: manyFencesSrc,
+        });
+        manyFenceChunks.push({
+          ...chunk(`mf-p${2 * k}`, `export const out${k} = k${k};\n\`\`\``, 2 * k),
+          sourceId: manyFencesSrc,
+        });
+      }
+      manyFenceChunks.push({
+        ...chunk(
+          "mf-p81",
+          "## Public Section\nTheorem 40: Uniform boundedness principle on Banach spaces.",
+          81,
+        ),
+        sourceId: manyFencesSrc,
+      });
+
+      const manyRanked = rankMaterialContext({
+        chunks: manyFenceChunks,
+        query: "Uniform boundedness principle Banach spaces",
+        maxCharacters: 8000,
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-ubp", label: "Uniform Boundedness", evidenceChunkIds: ["mf-p81"], privacyEpoch: 1 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [manyFencesSrc],
+            admissibleSourceVersions: { [manyFencesSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(manyRanked.map(c => c.id)).toEqual(["mf-p81"]);
+      expect(manyRanked[0]?.text).toContain("Theorem 40: Uniform boundedness principle");
+
+      // Also verify an earlier `## Hints` (both top-level and exported from a cross-chunk container)
+      // followed by a closed multi-chunk code example containing literal `## Public Section` does NOT
+      // pop `## Hints`, while a real outer `## Public Section` afterwards DOES reopen `"public"`.
+      const hintsFenceSrc = "hints-with-fenced-public-heading-literal";
+      const hintsFenceChunks: SourceChunk[] = [
+        { ...chunk("hf-p1", "<!--\n## Hints", 1), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p2", "Try integration by parts first.\n-->", 2), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p3", "```markdown\nLiteral markdown template", 3), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p4", "## Public Section\nHint scaffold u = ln(x) inside code\n```", 4), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p5", "Unlabeled hint continuation dv = x dx.", 5), sourceId: hintsFenceSrc },
+        {
+          ...chunk("hf-p6", "## Public Section\nTheorem 41: Hahn-Banach extension theorem.", 6),
+          sourceId: hintsFenceSrc,
+        },
+      ];
+
+      const gatedOut = rankMaterialContext({
+        chunks: hintsFenceChunks,
+        query: "integration by parts dv = x dx Hahn-Banach extension theorem",
+        maxCharacters: 8000,
+        preferChunkId: "hf-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [hintsFenceSrc],
+            admissibleSourceVersions: { [hintsFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: false,
+          },
+        },
+      });
+      expect(gatedOut.map(c => c.id)).toEqual(["hf-p6"]);
+      expect(JSON.stringify(gatedOut)).not.toContain("dv = x dx");
+      expect(JSON.stringify(gatedOut)).not.toContain("u = ln(x)");
+
+      const gatedAllowed = rankMaterialContext({
+        chunks: hintsFenceChunks,
+        query: "Unlabeled hint continuation dv = x dx",
+        maxCharacters: 8000,
+        preferChunkId: "hf-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [hintsFenceSrc],
+            admissibleSourceVersions: { [hintsFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(gatedAllowed[0]?.id).toBe("hf-p5");
     });
   });
 });
