@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import { budgetRankedMaterial, materialSegmentKey, rankMaterialContext, segmentMaterialChunks } from "./hybrid-retrieval";
+import {
+  budgetRankedMaterial,
+  materialSegmentKey,
+  rankMaterialContext,
+  segmentMaterialChunks,
+  type MaterialPedagogicalGraph,
+} from "./hybrid-retrieval";
 import { renderContext } from "./context";
 
 const chunk = (id: string, text: string, page = 1): SourceChunk => ({ id, text, page, sourceId: id, sourceVersion: 1,
@@ -475,5 +481,1534 @@ describe("material hybrid retrieval", () => {
       padBeforeClosed,
       closedWithComment + " tail",
     ]);
+  });
+
+  describe("sparse PPR pedagogical retrieval wiring", () => {
+    it("recalls zero-lexical/zero-dense prerequisite definitions via Sparse PPR and orders foundations before dependent theorems without promoting unrelated definitions", () => {
+      const defVec = chunk(
+        "def-vec",
+        ":::definition Inner Product\nLet V be a real bilinear symmetric positive-definite space with form <u, v>.\n:::",
+        10,
+      );
+      const lemmaDisc = chunk(
+        "lemma-disc",
+        ":::lemma Quadratic Discriminant\nA non-negative real polynomial a t^2 + 2 b t + c >= 0 satisfies b^2 <= a c.\n:::",
+        11,
+      );
+      const thmCs = chunk(
+        "thm-cs",
+        ":::theorem Cauchy-Schwarz Inequality\nFor vectors in V, the Cauchy-Schwarz bound holds on norms.\n:::",
+        25,
+      );
+      const unrelatedDef = chunk(
+        "def-unrelated",
+        ":::definition Topological Compactness\nEvery open cover admits a finite subcover.\n:::",
+        90,
+      );
+      const weakUnrelatedDef = chunk(
+        "def-weak-unrelated",
+        ":::definition Banach Norm\nCompleteness under a sequence norm bound.\n:::",
+        91,
+      );
+
+      const allChunks = [thmCs, unrelatedDef, weakUnrelatedDef, lemmaDisc, defVec];
+      const pedagogicalGraph: MaterialPedagogicalGraph = {
+        concepts: [
+          { id: "c-inner", label: "Inner Product", supportingSourceIds: ["def-vec"], evidenceChunkIds: ["def-vec"], privacyEpoch: 4 },
+          { id: "c-disc", label: "Discriminant", supportingSourceIds: ["lemma-disc"], evidenceChunkIds: ["lemma-disc"], privacyEpoch: 4 },
+          { id: "c-cs", label: "Cauchy-Schwarz", supportingSourceIds: ["thm-cs"], evidenceChunkIds: ["thm-cs"], privacyEpoch: 4 },
+          { id: "c-compact", label: "Compactness", supportingSourceIds: ["def-unrelated"], evidenceChunkIds: ["def-unrelated"], privacyEpoch: 4 },
+          { id: "c-banach", label: "Banach", supportingSourceIds: ["def-weak-unrelated"], evidenceChunkIds: ["def-weak-unrelated"], privacyEpoch: 4 },
+        ],
+        edges: [
+          { from: "c-inner", to: "c-disc", kind: "prerequisite", supportingSourceIds: ["def-vec", "lemma-disc"], privacyEpoch: 4 },
+          { from: "c-disc", to: "c-cs", kind: "prerequisite", supportingSourceIds: ["lemma-disc", "thm-cs"], privacyEpoch: 4 },
+        ],
+        authorization: {
+          admissibleSourceIds: allChunks.map(c => c.sourceId),
+          admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+          expectedPrivacyEpoch: 4,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: allChunks,
+        query: "Explain the Cauchy-Schwarz inequality bound",
+        maxCharacters: 5000,
+        pedagogicalGraph,
+      });
+
+      const ids = ranked.map(c => c.id);
+      // Unseeded 2-hop prerequisite definition and 1-hop lemma are both recalled and ordered before the theorem.
+      expect(ids).toContain("def-vec");
+      expect(ids).toContain("lemma-disc");
+      expect(ids).toContain("thm-cs");
+      expect(ids.indexOf("def-vec")).toBeLessThan(ids.indexOf("lemma-disc"));
+      expect(ids.indexOf("lemma-disc")).toBeLessThan(ids.indexOf("thm-cs"));
+      // Unseeded unrelated definition receives 0 seed and 0 PPR mass; weak unrelated definition does not hijack rank 1.
+      expect(ids).not.toContain("def-unrelated");
+      expect(ids.indexOf("thm-cs")).toBeLessThan(ids.indexOf("def-weak-unrelated"));
+    });
+
+    it("prevents mixed theorem+definition excerpts from impersonating standalone prerequisite definitions", () => {
+      const pureDef = {
+        ...chunk("pure-def", "Definition 1.1 (Eigenvalue): Scalar lambda where A v = lambda v.", 1),
+        sourceId: "src-shared",
+      };
+      const mixedThmDef = {
+        ...chunk(
+          "mixed-thm-def",
+          "Theorem 2.1 (Spectral Theorem): Every symmetric matrix diagonalizes.\n\nDefinition 2.2: Auxiliary note on spectral radius.",
+          2,
+        ),
+        sourceId: "src-shared",
+      };
+      const graph: MaterialPedagogicalGraph = {
+        concepts: [
+          {
+            id: "c-spec",
+            label: "Spectral Theory",
+            supportingSourceIds: ["src-shared"],
+            evidenceChunkIds: ["pure-def", "mixed-thm-def"],
+            privacyEpoch: 1,
+          },
+        ],
+        edges: [],
+        authorization: {
+          admissibleSourceIds: ["src-shared"],
+          admissibleSourceVersions: { "src-shared": 1 },
+          expectedPrivacyEpoch: 1,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: [mixedThmDef, pureDef],
+        query: "Spectral Theorem diagonalizes symmetric matrix",
+        maxCharacters: 4000,
+        pedagogicalGraph: graph,
+      });
+      expect(ranked.map(c => c.id)).toEqual(["pure-def", "mixed-thm-def"]);
+    });
+
+    it("discards foreign/deleted chunks, withdrawn sources, stale versions, mixed authorized+unauthorized evidence, stale/absent privacyEpoch, and solves edges with zero influence", () => {
+      const cA = chunk("chunk-a", "Theorem: Fundamental theorem of calculus relates differentiation and integration.", 2);
+      const cB = chunk("chunk-b", "Definition: Antiderivative F satisfies F'(x) = f(x).", 1);
+      const staleChunkInInput = { ...chunk("chunk-stale", "Definition: Stale v1 excerpt.", 1), sourceId: "src-stale", sourceVersion: 1 };
+      const withdrawnChunkInInput = { ...chunk("chunk-withdrawn", "Definition: Withdrawn source excerpt.", 1), sourceId: "src-withdrawn" };
+      const staleEpochChunk = Object.assign(
+        chunk("chunk-bad-epoch", "Definition: Old privacy epoch chunk.", 1),
+        { privacyEpoch: 2 },
+      );
+      const absentEpochChunk = Object.assign(
+        chunk("chunk-undef-epoch", "Definition: Missing privacy epoch chunk.", 1),
+        { privacyEpoch: undefined },
+      );
+
+      const baseline = rankMaterialContext({
+        chunks: [cA, cB],
+        query: "Fundamental theorem of calculus",
+        maxCharacters: 3000,
+      });
+
+      const poisonedGraph: MaterialPedagogicalGraph = {
+        concepts: [
+          // Foreign / deleted chunk reference
+          { id: "c-foreign", label: "Foreign", supportingSourceIds: ["chunk-a"], evidenceChunkIds: ["foreign-course-chunk"], privacyEpoch: 3 },
+          // Mixed [authorized, unauthorized] evidence on concept -> ENTIRE concept must be discarded!
+          { id: "c-mixed-foreign", label: "Mixed Foreign", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b", "deleted-chunk"], privacyEpoch: 3 },
+          { id: "c-mixed-withdrawn", label: "Mixed Withdrawn", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b", "chunk-withdrawn"], privacyEpoch: 3 },
+          { id: "c-mixed-stale", label: "Mixed Stale", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b", "chunk-stale"], privacyEpoch: 3 },
+          // Withdrawn supportingSourceIds despite authorized chunk
+          { id: "c-bad-src", label: "Bad Source", supportingSourceIds: ["chunk-b", "src-withdrawn"], evidenceChunkIds: ["chunk-b"], privacyEpoch: 3 },
+          // Stale or absent privacyEpoch on concept
+          { id: "c-old-epoch", label: "Old Epoch", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b"], privacyEpoch: 2 },
+          { id: "c-no-epoch", label: "No Epoch", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b"] },
+        ],
+        edges: [
+          // Direct chunk-level edges with stale/absent epoch, solves kind, or mixed supportingChunkIds
+          { from: "chunk-b", to: "chunk-a", kind: "prerequisite", privacyEpoch: 2 },
+          { from: "chunk-b", to: "chunk-a", kind: "prerequisite" },
+          { from: "chunk-b", to: "chunk-a", kind: "solves", privacyEpoch: 3 },
+          { from: "chunk-b", to: "chunk-a", kind: "prerequisite", sourceId: "src-withdrawn", privacyEpoch: 3 },
+          { from: "chunk-b", to: "chunk-a", kind: "prerequisite", supportingSourceIds: ["chunk-b", "src-withdrawn"], privacyEpoch: 3 },
+          { from: "chunk-b", to: "chunk-a", kind: "prerequisite", supportingChunkIds: ["chunk-b", "deleted-chunk"], privacyEpoch: 3 },
+          { from: "chunk-bad-epoch", to: "chunk-a", kind: "prerequisite", privacyEpoch: 3 },
+          { from: "chunk-undef-epoch", to: "chunk-a", kind: "prerequisite", privacyEpoch: 3 },
+        ],
+        authorization: {
+          admissibleSourceIds: ["chunk-a", "chunk-b", "src-stale", "chunk-bad-epoch", "chunk-undef-epoch"],
+          admissibleSourceVersions: {
+            "chunk-a": 1,
+            "chunk-b": 1,
+            "src-stale": 2, // chunk-stale has sourceVersion: 1 -> rejected!
+            "chunk-bad-epoch": 1,
+            "chunk-undef-epoch": 1,
+          },
+          expectedPrivacyEpoch: 3,
+        },
+      };
+
+      const actual = rankMaterialContext({
+        chunks: [cA, cB, staleChunkInInput, withdrawnChunkInInput, staleEpochChunk, absentEpochChunk],
+        query: "Fundamental theorem of calculus",
+        maxCharacters: 3000,
+        pedagogicalGraph: poisonedGraph,
+      });
+
+      // Zero surviving concepts/edges and quarantined invalid chunks -> bit-for-bit identical to baseline [cA]!
+      expect(actual).toEqual(baseline);
+      expect(actual.map(c => c.id)).toEqual(["chunk-a"]);
+
+      // Also verify mixed supportingChunkIds on a concept-to-concept edge is completely discarded.
+      const validConceptsOnly: MaterialPedagogicalGraph = {
+        concepts: [
+          { id: "c-def", label: "Antiderivative", supportingSourceIds: ["chunk-b"], evidenceChunkIds: ["chunk-b"], privacyEpoch: 3 },
+          { id: "c-thm", label: "FTC", supportingSourceIds: ["chunk-a"], evidenceChunkIds: ["chunk-a"], privacyEpoch: 3 },
+        ],
+        edges: [
+          { from: "c-def", to: "c-thm", kind: "prerequisite", supportingChunkIds: ["chunk-b", "foreign-chunk"], privacyEpoch: 3 },
+          { from: "c-thm", to: "c-def", kind: "solves", supportingChunkIds: ["chunk-a"], privacyEpoch: 3 },
+        ],
+        authorization: {
+          admissibleSourceIds: ["chunk-a", "chunk-b"],
+          admissibleSourceVersions: { "chunk-a": 1, "chunk-b": 1 },
+          expectedPrivacyEpoch: 3,
+        },
+      };
+      const withoutPoisonedEdge = rankMaterialContext({
+        chunks: [cA, cB],
+        query: "Fundamental theorem of calculus",
+        maxCharacters: 3000,
+        pedagogicalGraph: validConceptsOnly,
+      });
+      expect(withoutPoisonedEdge.map(c => c.id)).toEqual(["chunk-a"]);
+    });
+
+    it("quarantines AST sealed blocks unconditionally and gates hint_gated blocks on allowHintGated", () => {
+      const publicDef = chunk("pub-def", ":::definition Continuity\nA function f is continuous at a if lim_{x->a} f(x) = f(a).\n:::", 1);
+      const latexSolution = chunk("latex-sol", "\\begin{solution}\nSecret continuous limit answer is 17.\n\\end{solution}", 2);
+      const inlineAnswer = chunk("inline-ans", "Answer: Secret continuous limit value is 17.", 3);
+      const fencedHint = chunk("fenced-hint", ":::hint\nFactor (x - a) before taking the continuous limit.\n:::", 4);
+      const inlineHint = chunk("inline-hint", "Hint: Rewrite the continuous limit using conjugate multiplication.", 5);
+      const longMixed = chunk(
+        "long-mixed",
+        "Definition 1.1: Public continuous preamble. " + "p".repeat(5960) + "\\begin{solution}Trailing secret 99\\end{solution}",
+        6,
+      );
+
+      const allChunks = [publicDef, latexSolution, inlineAnswer, fencedHint, inlineHint, longMixed];
+      const baseAuth = {
+        admissibleSourceIds: allChunks.map(c => c.sourceId),
+        admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+        expectedPrivacyEpoch: 5,
+      };
+
+      const makeGraph = (allowHintGated?: boolean): MaterialPedagogicalGraph => ({
+        concepts: [
+          { id: "c-cont", label: "Continuity", evidenceChunkIds: ["pub-def"], privacyEpoch: 5 },
+          // Concepts attempting to cite sealed chunks are discarded
+          { id: "c-sol", label: "Solution", evidenceChunkIds: ["latex-sol"], privacyEpoch: 5 },
+          { id: "c-hint", label: "Hint", evidenceChunkIds: ["fenced-hint"], privacyEpoch: 5 },
+        ],
+        edges: [
+          { from: "c-cont", to: "c-sol", kind: "solves", privacyEpoch: 5 },
+          { from: "c-hint", to: "c-cont", kind: "prerequisite", privacyEpoch: 5 },
+        ],
+        authorization: { ...baseAuth, ...(allowHintGated !== undefined ? { allowHintGated } : {}) },
+      });
+
+      const defaultRanked = rankMaterialContext({
+        chunks: allChunks,
+        query: "continuous limit secret answer factor",
+        maxCharacters: 12_000,
+        dense: [
+          { chunk: latexSolution, segmentIndex: 0 },
+          { chunk: inlineAnswer, segmentIndex: 0 },
+          { chunk: fencedHint, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: makeGraph(),
+      });
+      const defaultIds = defaultRanked.map(c => c.id);
+      expect(defaultIds).toContain("pub-def");
+      expect(defaultIds).toContain("long-mixed");
+      expect(defaultIds).not.toContain("latex-sol");
+      expect(defaultIds).not.toContain("inline-ans");
+      expect(defaultIds).not.toContain("fenced-hint");
+      expect(defaultIds).not.toContain("inline-hint");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Secret");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Trailing secret 99");
+
+      const hintAllowedRanked = rankMaterialContext({
+        chunks: allChunks,
+        query: "continuous limit secret answer factor",
+        maxCharacters: 12_000,
+        pedagogicalGraph: makeGraph(true),
+      });
+      const hintAllowedIds = hintAllowedRanked.map(c => c.id);
+      expect(hintAllowedIds).toContain("fenced-hint");
+      expect(hintAllowedIds).toContain("inline-hint");
+      // Sealed blocks STILL never rank even when allowHintGated is true!
+      expect(hintAllowedIds).not.toContain("latex-sol");
+      expect(hintAllowedIds).not.toContain("inline-ans");
+      expect(JSON.stringify(hintAllowedRanked)).not.toContain("Secret");
+    });
+
+    it("retains prerequisite foundations beyond 24 candidates without truncating before the 64-segment material selection", () => {
+      const prereqDef = chunk("prereq-def", ":::definition Bilinear Form\nSymmetric mapping on vector pairs.\n:::", 1);
+      const mainThm = chunk("main-thm", ":::theorem target spectral decomposition\nPrimary target spectral decomposition result.\n:::", 2);
+      const extras = Array.from({ length: 30 }, (_, idx) =>
+        chunk(`extra-${idx}`, `target spectral decomposition corollary example ${idx}`, idx + 3),
+      );
+      const allChunks = [prereqDef, mainThm, ...extras];
+
+      const graph: MaterialPedagogicalGraph = {
+        concepts: [
+          { id: "c-pre", label: "Bilinear Form", evidenceChunkIds: ["prereq-def"], privacyEpoch: 1 },
+          { id: "c-main", label: "Spectral Decomposition", evidenceChunkIds: ["main-thm"], privacyEpoch: 1 },
+          ...extras.map((c, idx) => ({
+            id: `c-extra-${idx}`,
+            label: `Extra ${idx}`,
+            evidenceChunkIds: [c.id],
+            privacyEpoch: 1,
+          })),
+        ],
+        edges: [
+          { from: "c-pre", to: "c-main", kind: "prerequisite", privacyEpoch: 1 },
+        ],
+        authorization: {
+          admissibleSourceIds: allChunks.map(c => c.sourceId),
+          admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+          expectedPrivacyEpoch: 1,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: allChunks,
+        query: "target spectral decomposition",
+        maxCharacters: 20_000,
+        pedagogicalGraph: graph,
+      });
+
+      expect(ranked.length).toBe(32);
+      const ids = ranked.map(c => c.id);
+      expect(ids).toContain("prereq-def");
+      expect(ids.indexOf("prereq-def")).toBeLessThan(ids.indexOf("main-thm"));
+    });
+
+    it("preserves #493 dense validation, legacy blind-cut recovery, physical chunk [\\u2026] merging, and explicit preferChunkId / preferPage priority", () => {
+      const formulaTail = "$$x + y = z$$ Cauchy-Schwarz theorem tail";
+      const shiftedThm = chunk("shifted-thm", "a".repeat(5990) + formulaTail, 5);
+      const prereqDef = chunk("prereq-def", ":::definition Inner Product\nPositive-definite form.\n:::", 1);
+      const preferredPageChunk = chunk("pref-page", "User-selected page note with zero query overlap.", 9);
+      const preferredIdChunk = chunk("pref-id", "Explicitly pinned chunk id.", 8);
+      const allChunks = [shiftedThm, prereqDef, preferredPageChunk, preferredIdChunk];
+
+      const shiftedSegments = segmentMaterialChunks([shiftedThm]);
+      expect(shiftedSegments).toHaveLength(2);
+      const legacySeg1 = { chunk: { ...shiftedThm, text: shiftedThm.text.slice(6000) }, segmentIndex: 1 };
+
+      const graph: MaterialPedagogicalGraph = {
+        concepts: [
+          { id: "c-def", label: "Inner Product", evidenceChunkIds: ["prereq-def"], privacyEpoch: 2 },
+          { id: "c-thm", label: "Cauchy-Schwarz", evidenceChunkIds: ["shifted-thm"], privacyEpoch: 2 },
+        ],
+        edges: [
+          { from: "c-def", to: "c-thm", kind: "prerequisite", privacyEpoch: 2 },
+        ],
+        authorization: {
+          admissibleSourceIds: allChunks.map(c => c.sourceId),
+          admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+          expectedPrivacyEpoch: 2,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: allChunks,
+        query: "orthogonal projection", // 0 lexical overlap; seeded purely via valid legacy dense hit + direct seg0 hit
+        maxCharacters: 15_000,
+        preferChunkId: "pref-id",
+        preferPage: 9,
+        dense: [
+          // Invalid dense hits that MUST be rejected:
+          { ...legacySeg1, chunk: { ...legacySeg1.chunk, sourceVersion: 99 } },
+          { ...legacySeg1, chunk: { ...legacySeg1.chunk, text: "tampered text" } },
+          { ...legacySeg1, chunk: { ...legacySeg1.chunk, id: "foreign-id" } },
+          { chunk: prereqDef, segmentIndex: -1 },
+          { chunk: prereqDef, segmentIndex: 1.5 },
+          // Valid direct + legacy blind-cut hits (plus a duplicate to verify dedupe):
+          shiftedSegments[0]!,
+          legacySeg1,
+          legacySeg1,
+        ],
+        pedagogicalGraph: graph,
+      });
+
+      // Explicit preferChunkId (2) -> preferPage (1) -> foundation prerequisite -> merged dependent theorem!
+      expect(ranked.map(c => c.id)).toEqual(["pref-id", "pref-page", "prereq-def", "shifted-thm"]);
+      expect(ranked[3]?.text).toBe(`${shiftedSegments[0]!.chunk.text}\n[…]\n${shiftedSegments[1]!.chunk.text}`);
+    });
+
+    it("produces bit-for-bit identical output when pedagogicalGraph has empty concepts and edges", () => {
+      const rows = [
+        chunk("c1", "Linear independence and spanning sets in R^n.", 1),
+        chunk("c2", "Basis dimension theorem and rank-nullity.", 2),
+        chunk("c3", "Unrelated syllabus logistics.", 3),
+      ];
+      const withoutGraph = rankMaterialContext({
+        chunks: rows,
+        query: "dimension theorem rank-nullity",
+        maxCharacters: 2000,
+        preferPage: 3,
+      });
+      const withEmptyGraph = rankMaterialContext({
+        chunks: rows,
+        query: "dimension theorem rank-nullity",
+        maxCharacters: 2000,
+        preferPage: 3,
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: rows.map(r => r.sourceId),
+            admissibleSourceVersions: Object.fromEntries(rows.map(r => [r.sourceId, r.sourceVersion])),
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(withEmptyGraph).toEqual(withoutGraph);
+    });
+
+    it("propagates ## Answer Key and ## Hints visibility across multi-chunk Markdown splits and reopens at subsequent public headings", () => {
+      const mdSource = "md-course-notes";
+      const page1AnsHeading: SourceChunk = {
+        ...chunk("md-ans-heading", "# Chapter 1: Eigenvalues\n\nPublic intro.\n\n## Answer Key\n\n", 1),
+        sourceId: mdSource,
+      };
+      const page2AnsBody: SourceChunk = {
+        ...chunk(
+          "md-ans-cont",
+          "Confidential eigenvalue derivation step forty-two for spectral radius. ".repeat(60) + "\n\n",
+          2,
+        ),
+        sourceId: mdSource,
+      };
+      const page3HintHeading: SourceChunk = {
+        ...chunk("md-hint-heading", "## Hints\n\n", 3),
+        sourceId: mdSource,
+      };
+      const page4HintBody: SourceChunk = {
+        ...chunk(
+          "md-hint-cont",
+          "Factor the characteristic polynomial for spectral radius before substituting. ".repeat(54) + "\n\n",
+          4,
+        ),
+        sourceId: mdSource,
+      };
+      const page5PublicReopen: SourceChunk = {
+        ...chunk(
+          "md-reopen-public",
+          "## Public Chapter 2: Cayley-Hamilton\n\nEvery square matrix satisfies its own characteristic polynomial for spectral radius.\n",
+          5,
+        ),
+        sourceId: mdSource,
+      };
+      const unseededPrereq = chunk(
+        "prereq-det",
+        ":::definition Determinant\nAlternating multilinear form on columns.\n:::",
+        1,
+      );
+
+      expect(page2AnsBody.text.length).toBeGreaterThan(4100);
+      expect(page4HintBody.text.length).toBeGreaterThan(4100);
+
+      // Pass chunks intentionally out of page order so document reconstruction must sort by reading order.
+      const docChunks = [page4HintBody, page2AnsBody, page5PublicReopen, unseededPrereq, page1AnsHeading, page3HintHeading];
+
+      const makeGraph = (allowHintGated?: boolean): MaterialPedagogicalGraph => ({
+        concepts: [
+          { id: "c-det", label: "Determinant", evidenceChunkIds: ["prereq-det"], privacyEpoch: 7 },
+          { id: "c-ch", label: "Cayley-Hamilton", evidenceChunkIds: ["md-reopen-public"], privacyEpoch: 7 },
+          // Attempting to cite the cross-chunk answer continuation must be rejected!
+          { id: "c-ans-leak", label: "Leaked Answer", evidenceChunkIds: ["md-ans-cont"], privacyEpoch: 7 },
+        ],
+        edges: [
+          { from: "c-det", to: "c-ch", kind: "prerequisite", privacyEpoch: 7 },
+          { from: "c-ans-leak", to: "c-ch", kind: "prerequisite", privacyEpoch: 7 },
+        ],
+        authorization: {
+          admissibleSourceIds: [mdSource, unseededPrereq.sourceId],
+          admissibleSourceVersions: { [mdSource]: 1, [unseededPrereq.sourceId]: 1 },
+          expectedPrivacyEpoch: 7,
+          ...(allowHintGated !== undefined ? { allowHintGated } : {}),
+        },
+      });
+
+      const defaultRanked = rankMaterialContext({
+        chunks: docChunks,
+        query: "spectral radius characteristic polynomial",
+        maxCharacters: 20_000,
+        dense: [
+          { chunk: page2AnsBody, segmentIndex: 0 },
+          { chunk: page4HintBody, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: makeGraph(false),
+      });
+
+      const defaultIds = defaultRanked.map(c => c.id);
+      expect(defaultIds).toContain("prereq-det");
+      expect(defaultIds).toContain("md-reopen-public");
+      expect(defaultIds).not.toContain("md-ans-cont");
+      expect(defaultIds).not.toContain("md-hint-heading");
+      expect(defaultIds).not.toContain("md-hint-cont");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Confidential eigenvalue derivation");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Factor the characteristic polynomial");
+
+      // Granting allowHintGated admits the cross-chunk ## Hints continuation while keeping ## Answer Key sealed.
+      const withHintsRanked = rankMaterialContext({
+        chunks: docChunks,
+        query: "spectral radius characteristic polynomial",
+        maxCharacters: 20_000,
+        dense: [{ chunk: page2AnsBody, segmentIndex: 0 }],
+        pedagogicalGraph: makeGraph(true),
+      });
+      const withHintsIds = withHintsRanked.map(c => c.id);
+      expect(withHintsIds).toContain("md-hint-cont");
+      expect(withHintsIds).toContain("md-reopen-public");
+      expect(withHintsIds).not.toContain("md-ans-cont");
+      expect(JSON.stringify(withHintsRanked)).not.toContain("Confidential eigenvalue derivation");
+
+      // Fallback path (empty concepts/edges + preferChunkId/preferPage pointing at the sealed continuation) must ALSO stay sealed!
+      const fallbackRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("syn-ans-h", "## Answer Key", 1), sourceId: "syn-doc" },
+          { ...chunk("syn-ans-b", "Synthetic continuation secret 888 for spectral radius.", 2), sourceId: "syn-doc" },
+          { ...chunk("syn-pub", "## Next Topic\nPublic spectral radius theorem.", 3), sourceId: "syn-doc" },
+        ],
+        query: "spectral radius",
+        maxCharacters: 8000,
+        preferChunkId: "syn-ans-b",
+        preferPage: 2,
+        dense: [{ chunk: { ...chunk("syn-ans-b", "Synthetic continuation secret 888 for spectral radius.", 2), sourceId: "syn-doc" }, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: ["syn-doc"],
+            admissibleSourceVersions: { "syn-doc": 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(fallbackRanked.map(c => c.id)).toEqual(["syn-pub"]);
+      expect(JSON.stringify(fallbackRanked)).not.toContain("Synthetic continuation secret 888");
+    });
+
+    it("rejects concepts and edges citing a mixed physical chunk when any segment of that chunk is quarantined", () => {
+      const publicDefLead =
+        ":::definition Inner Product\nPositive-definite symmetric bilinear form on V.\n:::\n" + "p".repeat(4400) + "\n";
+      const sealedSolTail =
+        "\\begin{solution}\n" + "Secret inner product solution step 77. ".repeat(65) + "\n\\end{solution}";
+      const mixedChunk = chunk("mixed-def-sol", publicDefLead + sealedSolTail, 2);
+
+      const mixedSegments = segmentMaterialChunks([mixedChunk]);
+      expect(mixedSegments).toHaveLength(2);
+      expect(Buffer.byteLength(mixedSegments[1]!.chunk.text, "utf8")).toBeGreaterThan(2048);
+      expect(mixedSegments[0]!.chunk.text).toContain("Positive-definite symmetric bilinear form");
+      expect(mixedSegments[1]!.chunk.text).toContain("\\begin{solution}");
+
+      const unseededByConcept = chunk(
+        "unseeded-by-mixed-concept",
+        ":::definition Gram Matrix\nDeterminant criterion for linear independence.\n:::",
+        1,
+      );
+      const unseededByEdge = chunk(
+        "unseeded-by-mixed-edge",
+        ":::definition Bessel Parseval Identity\nOrthonormal coefficient sum bound.\n:::",
+        1,
+      );
+      const seededThm = chunk(
+        "seeded-thm",
+        ":::theorem Cauchy-Schwarz Bound\nNorm bound for Cauchy-Schwarz inequality.\n:::",
+        5,
+      );
+
+      const allChunks = [mixedChunk, unseededByConcept, unseededByEdge, seededThm];
+      const graph: MaterialPedagogicalGraph = {
+        concepts: [
+          {
+            id: "c-tainted-concept",
+            label: "Tainted Concept",
+            evidenceChunkIds: ["unseeded-by-mixed-concept", "mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-only-mixed",
+            label: "Only Mixed",
+            evidenceChunkIds: ["mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-bessel",
+            label: "Bessel",
+            evidenceChunkIds: ["unseeded-by-mixed-edge"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-cs",
+            label: "Cauchy-Schwarz",
+            evidenceChunkIds: ["seeded-thm"],
+            privacyEpoch: 3,
+          },
+        ],
+        edges: [
+          { from: "c-tainted-concept", to: "c-cs", kind: "prerequisite", privacyEpoch: 3 },
+          { from: "c-only-mixed", to: "c-cs", kind: "prerequisite", privacyEpoch: 3 },
+          {
+            from: "c-bessel",
+            to: "c-cs",
+            kind: "prerequisite",
+            supportingChunkIds: ["mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          { from: "mixed-def-sol", to: "seeded-thm", kind: "prerequisite", privacyEpoch: 3 },
+        ],
+        authorization: {
+          admissibleSourceIds: allChunks.map(c => c.sourceId),
+          admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+          expectedPrivacyEpoch: 3,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: allChunks,
+        query: "Cauchy-Schwarz inequality",
+        maxCharacters: 12_000,
+        pedagogicalGraph: graph,
+      });
+
+      // Tainted concept/edges referencing mixed-def-sol cannot promote unseeded chunks or leak the sealed segment!
+      expect(ranked.map(c => c.id)).toEqual(["seeded-thm"]);
+      expect(JSON.stringify(ranked)).not.toContain("Secret inner product solution");
+
+      // Public segment 0 of mixed-def-sol remains directly retrievable on its own lexical merit without leaking segment 1.
+      const directPublicMerit = rankMaterialContext({
+        chunks: allChunks,
+        query: "Positive-definite symmetric bilinear form",
+        maxCharacters: 12_000,
+        pedagogicalGraph: graph,
+      });
+      expect(directPublicMerit.map(c => c.id)).toContain("mixed-def-sol");
+      expect(JSON.stringify(directPublicMerit)).not.toContain("Secret inner product solution");
+    });
+
+    it("preserves exact ascending segmentIndex order when budgeting skips an oversized segment", () => {
+      const seg0Lead = "SEG0_FIRST: Preliminary vector space notation for spectral operators.\n";
+      const seg1OversizedMath = "\\[" + "z_1 + ".repeat(1080) + "w_1\\]"; // ~6,487 bytes (> 6,000B, <= 8,192B)
+      const seg2Hit =
+        "\n:::definition Spectral Operator\nSEG2_SECOND: Self-adjoint spectral operator diagonalization.\n:::\n";
+      const seg3OversizedFormula = "$$" + "x_1 + ".repeat(1240) + "y_1$$"; // ~7,447 bytes (> 6,000B, <= 8,192B)
+      const multiChunk = chunk("multi-seg-budget", seg0Lead + seg1OversizedMath + seg2Hit + seg3OversizedFormula, 1);
+
+      const segs = segmentMaterialChunks([multiChunk]);
+      expect(segs).toHaveLength(4);
+      const seg0 = segs[0]!;
+      const seg2 = segs[2]!;
+      const segOversized = segs[3]!;
+      expect(seg0.chunk.text).toContain("SEG0_FIRST");
+      expect(seg2.chunk.text).toContain("SEG2_SECOND");
+      expect(segOversized.chunk.text).toContain("x_1 + ");
+      expect(seg0.segmentIndex).toBeLessThan(seg2.segmentIndex);
+      expect(seg2.segmentIndex).toBeLessThan(segOversized.segmentIndex);
+      expect(segOversized.chunk.text.length).toBeGreaterThan(7000);
+
+      // Also verify the 3-segment [seg0, oversized middle formula, seg2] shape directly:
+      const middleOversizedChunk = chunk(
+        "mid-oversized",
+        ":::definition Invariant Subspace\nMID_SEG0: spectral operator invariant subspace intro.\n:::\n"
+          + seg3OversizedFormula
+          + "\nMID_SEG2: spectral operator diagonalization corollary.",
+        2,
+      );
+      const midSegs = segmentMaterialChunks([middleOversizedChunk]);
+      expect(midSegs).toHaveLength(3);
+
+      const ranked = rankMaterialContext({
+        chunks: [multiChunk, middleOversizedChunk],
+        query: "spectral operator diagonalization",
+        maxCharacters: 1800,
+        // Definition segments fit first; >7KB display_math segments rank ahead of prose seg0 and get skipped by budget!
+        dense: [segOversized, midSegs[1]!],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-multi", label: "Spectral", evidenceChunkIds: ["multi-seg-budget", "mid-oversized"], privacyEpoch: 1 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: ["multi-seg-budget", "mid-oversized"],
+            admissibleSourceVersions: { "multi-seg-budget": 1, "mid-oversized": 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+
+      const mergedMulti = ranked.find(c => c.id === "multi-seg-budget");
+      expect(mergedMulti).toBeDefined();
+      expect(mergedMulti!.text).not.toContain("x_1 + ");
+      expect(mergedMulti!.text).toBe(`${seg0.chunk.text}\n[…]\n${seg2.chunk.text}`);
+
+      const mergedMid = ranked.find(c => c.id === "mid-oversized");
+      expect(mergedMid).toBeDefined();
+      expect(mergedMid!.text).toBe(
+        `${midSegs[0]!.chunk.text}\n[…]\n${midSegs[2]!.chunk.text}`,
+      );
+    });
+
+    it("preserves per-chunk AST sealing as a monotonic floor when cross-chunk code fences close around ## Answer Key", () => {
+      const fencedSrc = "fenced-exam-source";
+      // Exact Round-2 Step-1 P1 scenario: opening fence on page 1, ## Answer Key + answer on page 2, closing fence on page 3.
+      const p1FenceOpen: SourceChunk = {
+        ...chunk("fence-p1", "```markdown\nStarter scaffold", 1),
+        sourceId: fencedSrc,
+      };
+      const p2AnswerKey: SourceChunk = {
+        ...chunk("fence-p2", "## Answer Key\nSecret answer x = 42", 2),
+        sourceId: fencedSrc,
+      };
+      const p3FenceClose: SourceChunk = {
+        ...chunk("fence-p3", "```", 3),
+        sourceId: fencedSrc,
+      };
+
+      const emptyGraphRanked = rankMaterialContext({
+        chunks: [p1FenceOpen, p2AnswerKey, p3FenceClose],
+        query: "Secret answer x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "fence-p2",
+        preferPage: 2,
+        dense: [{ chunk: p2AnswerKey, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [fencedSrc],
+            admissibleSourceVersions: { [fencedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(emptyGraphRanked).toEqual([]);
+      expect(JSON.stringify(emptyGraphRanked)).not.toContain("Secret answer x = 42");
+
+      // Multi-page continuation variant: page 3 has >6,000B answer continuation before closing ```,
+      // followed by page 4 reopening ## Public Section (plus nested subheading stack pop check).
+      const extSrc = "fenced-continuation-source";
+      const extP1: SourceChunk = {
+        ...chunk("ext-p1", "```\nTemplate header", 1),
+        sourceId: extSrc,
+      };
+      const extP2: SourceChunk = {
+        ...chunk("ext-p2", "# Chapter 1\n\n## Answer Key\nSecret answer x = 42", 2),
+        sourceId: extSrc,
+      };
+      const extP3: SourceChunk = {
+        ...chunk(
+          "ext-p3",
+          "Secret continuation y = 99 for spectral convergence. ".repeat(130) + "\n```",
+          3,
+        ),
+        sourceId: extSrc,
+      };
+      const extP4Public: SourceChunk = {
+        ...chunk(
+          "ext-p4",
+          "## Public Section\nPublic theorem on spectral convergence.",
+          4,
+        ),
+        sourceId: extSrc,
+      };
+      expect(segmentMaterialChunks([extP3]).length).toBeGreaterThan(1);
+
+      const extFallbackP2 = rankMaterialContext({
+        chunks: [extP3, extP4Public, extP1, extP2],
+        query: "spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "ext-p2",
+        preferPage: 2,
+        dense: [
+          { chunk: extP2, segmentIndex: 0 },
+          ...segmentMaterialChunks([extP3]),
+        ],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [extSrc],
+            admissibleSourceVersions: { [extSrc]: 1 },
+            expectedPrivacyEpoch: 2,
+          },
+        },
+      });
+      expect(extFallbackP2.map(c => c.id)).toEqual(["ext-p4"]);
+      expect(JSON.stringify(extFallbackP2)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(extFallbackP2)).not.toContain("Secret continuation y = 99");
+
+      const extFallbackP3 = rankMaterialContext({
+        chunks: [extP1, extP2, extP3, extP4Public],
+        query: "Secret continuation y = 99 spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "ext-p3",
+        preferPage: 3,
+        pedagogicalGraph: {
+          concepts: [
+            // Tainted concept citing fenced-sealed chunks must be discarded while public page 4 survives.
+            { id: "c-leak", label: "Leak", evidenceChunkIds: ["ext-p2"], privacyEpoch: 2 },
+            { id: "c-leak-cont", label: "Leak Cont", evidenceChunkIds: ["ext-p3"], privacyEpoch: 2 },
+            { id: "c-pub", label: "Spectral Convergence", evidenceChunkIds: ["ext-p4"], privacyEpoch: 2 },
+          ],
+          edges: [
+            { from: "c-leak", to: "c-pub", kind: "prerequisite", privacyEpoch: 2 },
+            { from: "c-leak-cont", to: "c-pub", kind: "prerequisite", privacyEpoch: 2 },
+          ],
+          authorization: {
+            admissibleSourceIds: [extSrc],
+            admissibleSourceVersions: { [extSrc]: 1 },
+            expectedPrivacyEpoch: 2,
+          },
+        },
+      });
+      expect(extFallbackP3.map(c => c.id)).toEqual(["ext-p4"]);
+      expect(JSON.stringify(extFallbackP3)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(extFallbackP3)).not.toContain("Secret continuation y = 99");
+
+      // Nested subheading check: `# Chapter` -> `### Sub-Answer` (page 2) -> `### Public Section` (page 4)
+      // after fence closes on page 3 cleanly reopens `"public"`.
+      const subSrc = "fenced-subheading-source";
+      const subChunks: SourceChunk[] = [
+        { ...chunk("sub-p1", "```\nCode lead", 1), sourceId: subSrc },
+        { ...chunk("sub-p2", "# Chapter 1\n\n### Sub-Answer\nHidden sub-answer z = 7", 2), sourceId: subSrc },
+        { ...chunk("sub-p3", "Hidden sub-answer continuation\n```", 3), sourceId: subSrc },
+        { ...chunk("sub-p4", "### Public Section\nAccessible corollary for subheading check.", 4), sourceId: subSrc },
+      ];
+      const subRanked = rankMaterialContext({
+        chunks: subChunks,
+        query: "Accessible corollary subheading",
+        maxCharacters: 8000,
+        preferChunkId: "sub-p2",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [subSrc],
+            admissibleSourceVersions: { [subSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(subRanked.map(c => c.id)).toEqual(["sub-p4"]);
+      expect(JSON.stringify(subRanked)).not.toContain("Hidden sub-answer");
+    });
+
+    it("keeps a heading inside a nested fenced answer example strictly sealed even on empty-graph preferChunkId fallback", () => {
+      // Exact Round-3 Step-1 P1 #1:
+      // Page 1 opens a 4-backtick Markdown fence.
+      // Page 2 contains `## Answer Key` and opens a 3-backtick example fence.
+      // Page 3 contains `## Public Section` and answer text as literal example content.
+      // Page 4 closes both fences.
+      const nestedExampleSrc = "nested-fenced-answer-example";
+      const page1OuterOpen: SourceChunk = {
+        ...chunk("nfae-p1", "````markdown\nTemplate preamble", 1),
+        sourceId: nestedExampleSrc,
+      };
+      const page2AnswerExampleOpen: SourceChunk = {
+        ...chunk("nfae-p2", "## Answer Key\n```markdown\nExample answer block", 2),
+        sourceId: nestedExampleSrc,
+      };
+      const page3FakePublicHeadingInExample: SourceChunk = {
+        ...chunk("nfae-p3", "## Public Section\nsecret answer text omega = 314", 3),
+        sourceId: nestedExampleSrc,
+      };
+      const page4CloseBothFences: SourceChunk = {
+        ...chunk("nfae-p4", "```\n````", 4),
+        sourceId: nestedExampleSrc,
+      };
+
+      const emptyGraphPreferredPage3 = rankMaterialContext({
+        chunks: [page1OuterOpen, page2AnswerExampleOpen, page3FakePublicHeadingInExample, page4CloseBothFences],
+        query: "secret answer text omega = 314",
+        maxCharacters: 8000,
+        preferChunkId: "nfae-p3",
+        preferPage: 3,
+        dense: [{ chunk: page3FakePublicHeadingInExample, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [nestedExampleSrc],
+            admissibleSourceVersions: { [nestedExampleSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(emptyGraphPreferredPage3).toEqual([]);
+      expect(JSON.stringify(emptyGraphPreferredPage3)).not.toContain("secret answer text omega = 314");
+
+      // Also verify multi-level nested public fences (`page 1` ````, `page 2` ```, `page 3` ## Answer Key,
+      // `page 4` secret continuation, `page 5` closes both, `page 6` unlabeled continuation stays sealed,
+      // `page 7` ## Public Section + Theorem 1 reopens public).
+      const deepSrc = "deep-nested-fences";
+      const deepChunks: SourceChunk[] = [
+        { ...chunk("deep-p1", "````markdown\nOuter showcase", 1), sourceId: deepSrc },
+        { ...chunk("deep-p2", "```text\nInner showcase", 2), sourceId: deepSrc },
+        { ...chunk("deep-p3", "## Answer Key\nDeep secret alpha = 19", 3), sourceId: deepSrc },
+        { ...chunk("deep-p4", "Deep secret continuation beta = 23", 4), sourceId: deepSrc },
+        { ...chunk("deep-p5", "```\n````", 5), sourceId: deepSrc },
+        { ...chunk("deep-p6", "Deep secret post-closer gamma = 29", 6), sourceId: deepSrc },
+        { ...chunk("deep-p7", "## Public Section\nTheorem 1: Public orthogonal decomposition theorem.", 7), sourceId: deepSrc },
+      ];
+      const deepRanked = rankMaterialContext({
+        chunks: deepChunks,
+        query: "Deep secret continuation orthogonal decomposition",
+        maxCharacters: 8000,
+        preferChunkId: "deep-p6",
+        preferPage: 6,
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted", label: "Tainted", evidenceChunkIds: ["deep-p4"], privacyEpoch: 1 },
+            { id: "c-tainted-post", label: "Tainted Post", evidenceChunkIds: ["deep-p6"], privacyEpoch: 1 },
+            { id: "c-thm", label: "Orthogonal Decomposition", evidenceChunkIds: ["deep-p7"], privacyEpoch: 1 },
+          ],
+          edges: [
+            { from: "c-tainted", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 },
+            { from: "c-tainted-post", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 },
+          ],
+          authorization: {
+            admissibleSourceIds: [deepSrc],
+            admissibleSourceVersions: { [deepSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(deepRanked.map(c => c.id)).toEqual(["deep-p7"]);
+      expect(JSON.stringify(deepRanked)).not.toContain("Deep secret");
+    });
+
+    it("returns later public chunks when a real public heading immediately follows the closing fence on the fence-closing page", () => {
+      // Exact Round-3 Step-1 P1 #2:
+      // Page 1 opens ```, Page 2 has `## Answer Key\nsecret answer`, Page 3 closes ``` followed immediately
+      // on Page 3 by `## Public Section`, and Page 4 has `Theorem 1: public theorem`.
+      const closePageSrc = "heading-on-fence-closing-page";
+      const p1Open: SourceChunk = {
+        ...chunk("hcp-p1", "```\nStarter code", 1),
+        sourceId: closePageSrc,
+      };
+      const p2Sealed: SourceChunk = {
+        ...chunk("hcp-p2", "## Answer Key\nsecret answer kappa = 88", 2),
+        sourceId: closePageSrc,
+      };
+      const p3CloseAndPublicHeading: SourceChunk = {
+        ...chunk("hcp-p3", "```\n## Public Section", 3),
+        sourceId: closePageSrc,
+      };
+      const p4PublicTheorem: SourceChunk = {
+        ...chunk("hcp-p4", "Theorem 1: public theorem on spectral convergence.", 4),
+        sourceId: closePageSrc,
+      };
+
+      const emptyGraphRanked = rankMaterialContext({
+        chunks: [p1Open, p2Sealed, p3CloseAndPublicHeading, p4PublicTheorem],
+        query: "secret answer spectral convergence theorem",
+        maxCharacters: 8000,
+        preferChunkId: "hcp-p2",
+        preferPage: 2,
+        dense: [
+          { chunk: p2Sealed, segmentIndex: 0 },
+          { chunk: p4PublicTheorem, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [closePageSrc],
+            admissibleSourceVersions: { [closePageSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(emptyGraphRanked.map(c => c.id)).toEqual(["hcp-p4"]);
+      expect(emptyGraphRanked[0]?.text).toContain("Theorem 1: public theorem");
+      expect(JSON.stringify(emptyGraphRanked)).not.toContain("secret answer kappa = 88");
+
+      // Exact variant moving `## Public Section` from page 4 of the multi-segment continuation fixture
+      // onto page 3 immediately after the closing fence, leaving only the public theorem on page 4.
+      const movedSrc = "moved-heading-continuation-source";
+      const movedChunks: SourceChunk[] = [
+        { ...chunk("mv-p1", "```\nTemplate header", 1), sourceId: movedSrc },
+        { ...chunk("mv-p2", "# Chapter 1\n\n## Answer Key\nSecret answer x = 42", 2), sourceId: movedSrc },
+        {
+          ...chunk(
+            "mv-p3",
+            "Secret continuation y = 99 for spectral convergence. ".repeat(130) + "\n```\n## Public Section",
+            3,
+          ),
+          sourceId: movedSrc,
+        },
+        { ...chunk("mv-p4", "Theorem 1: Public theorem on spectral convergence.", 4), sourceId: movedSrc },
+      ];
+      const movedGraphRanked = rankMaterialContext({
+        chunks: movedChunks,
+        query: "spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "mv-p2",
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-pub-thm", label: "Spectral Convergence", evidenceChunkIds: ["mv-p4"], privacyEpoch: 3 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [movedSrc],
+            admissibleSourceVersions: { [movedSrc]: 1 },
+            expectedPrivacyEpoch: 3,
+          },
+        },
+      });
+      expect(movedGraphRanked.map(c => c.id)).toEqual(["mv-p4"]);
+      expect(JSON.stringify(movedGraphRanked)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(movedGraphRanked)).not.toContain("Secret continuation y = 99");
+
+      // Also verify cross-chunk LaTeX literal (`\begin{verbatim}...\end{verbatim}`) and HTML comment
+      // (`<!-- ... -->`) containers seal `## Answer Key` on opener/middle pages without sealing post-closer pages.
+      for (const [tag, openText, closeText] of [
+        ["verbatim", "\\begin{verbatim}\n## Answer Key\nSecret v = 1", "\\end{verbatim}\n## Public Section"],
+        ["comment", "<!--\n## Answer Key\nSecret v = 1", "-->\n## Public Section"],
+      ] as const) {
+        const srcId = `literal-${tag}-src`;
+        const rows: SourceChunk[] = [
+          { ...chunk(`${tag}-p1`, openText, 1), sourceId: srcId },
+          { ...chunk(`${tag}-p2`, "Secret continuation v = 2", 2), sourceId: srcId },
+          { ...chunk(`${tag}-p3`, closeText, 3), sourceId: srcId },
+          { ...chunk(`${tag}-p4`, "Theorem 2: Public invariant subspace theorem.", 4), sourceId: srcId },
+        ];
+        const res = rankMaterialContext({
+          chunks: rows,
+          query: "Secret continuation invariant subspace theorem",
+          maxCharacters: 8000,
+          preferChunkId: `${tag}-p2`,
+          pedagogicalGraph: {
+            concepts: [],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [srcId],
+              admissibleSourceVersions: { [srcId]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+        expect(res.map(c => c.id)).toEqual([`${tag}-p4`]);
+        expect(JSON.stringify(res)).not.toContain("Secret");
+      }
+    });
+
+    it("carries unwrapped heading seals past container closing delimiters onto unlabeled continuations while honoring real post-closer public headings", () => {
+      // Exact Round-4 Step-1 P1 #1:
+      // 4 chunks in one source: page 1 opens a fence, page 2 contains `## Answer Key`,
+      // page 3 closes the fence, and page 4 continues with `Substituting gives x = 42.` without a new heading.
+      const carrySrc = "fenced-unlabeled-post-closer-source";
+      const page1Open: SourceChunk = {
+        ...chunk("carry-p1", "```\nStarter template", 1),
+        sourceId: carrySrc,
+      };
+      const page2SealedHeading: SourceChunk = {
+        ...chunk("carry-p2", "## Answer Key\nLet u = x - 1.", 2),
+        sourceId: carrySrc,
+      };
+      const page3CloseFence: SourceChunk = {
+        ...chunk("carry-p3", "```", 3),
+        sourceId: carrySrc,
+      };
+      const page4UnlabeledAnswer: SourceChunk = {
+        ...chunk("carry-p4", "Substituting gives x = 42.", 4),
+        sourceId: carrySrc,
+      };
+
+      const fourChunkEmptyGraph = rankMaterialContext({
+        chunks: [page1Open, page2SealedHeading, page3CloseFence, page4UnlabeledAnswer],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "carry-p4",
+        preferPage: 4,
+        dense: [{ chunk: page4UnlabeledAnswer, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [carrySrc],
+            admissibleSourceVersions: { [carrySrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(fourChunkEmptyGraph).toEqual([]);
+      expect(JSON.stringify(fourChunkEmptyGraph)).not.toContain("Substituting gives x = 42.");
+
+      // Add deeper subheading `### Part (b)` (stays sealed under `## Answer Key`) and
+      // same-level `## Public Section` + `Theorem 1: public theorem` (reopens public!).
+      const page5DeeperSubheading: SourceChunk = {
+        ...chunk("carry-p5", "### Part (b)\nBack-substituting gives y = 84.", 5),
+        sourceId: carrySrc,
+      };
+      const page6PublicSection: SourceChunk = {
+        ...chunk(
+          "carry-p6",
+          "## Public Section\nTheorem 1: public theorem on Banach fixed-point convergence.",
+          6,
+        ),
+        sourceId: carrySrc,
+      };
+
+      const withPublicSection = rankMaterialContext({
+        chunks: [
+          page1Open,
+          page2SealedHeading,
+          page3CloseFence,
+          page4UnlabeledAnswer,
+          page5DeeperSubheading,
+          page6PublicSection,
+        ],
+        query: "Substituting Banach fixed-point convergence theorem",
+        maxCharacters: 8000,
+        preferChunkId: "carry-p4",
+        preferPage: 4,
+        dense: [
+          { chunk: page4UnlabeledAnswer, segmentIndex: 0 },
+          { chunk: page5DeeperSubheading, segmentIndex: 0 },
+          { chunk: page6PublicSection, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted-p4", label: "Tainted P4", evidenceChunkIds: ["carry-p4"], privacyEpoch: 1 },
+            { id: "c-banach", label: "Banach Fixed-Point", evidenceChunkIds: ["carry-p6"], privacyEpoch: 1 },
+          ],
+          edges: [{ from: "c-tainted-p4", to: "c-banach", kind: "prerequisite", privacyEpoch: 1 }],
+          authorization: {
+            admissibleSourceIds: [carrySrc],
+            admissibleSourceVersions: { [carrySrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(withPublicSection.map(c => c.id)).toEqual(["carry-p6"]);
+      expect(withPublicSection[0]?.text).toContain("Theorem 1: public theorem");
+      expect(JSON.stringify(withPublicSection)).not.toContain("x = 42");
+      expect(JSON.stringify(withPublicSection)).not.toContain("y = 84");
+
+      // Verify mid-line `--> ## Fake Public` on the same line as HTML comment closer cannot spoof a line-start heading,
+      // while an unclosed `<details>` without a sealed heading stops cleanly at `innerEnd`.
+      const sameLineCommentSrc = "comment-same-line-fake-heading";
+      const commentSameLine = rankMaterialContext({
+        chunks: [
+          { ...chunk("csl-p1", "<!--", 1), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p2", "## Answer Key\nHidden step", 2), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p3", "--> ## Not A Line-Start Heading", 3), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p4", "Substituting gives x = 42.", 4), sourceId: sameLineCommentSrc },
+        ],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "csl-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [sameLineCommentSrc],
+            admissibleSourceVersions: { [sameLineCommentSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(commentSameLine.map(c => c.id)).toEqual(["csl-p1"]);
+      expect(JSON.stringify(commentSameLine)).not.toContain("Hidden step");
+      expect(JSON.stringify(commentSameLine)).not.toContain("Substituting gives x = 42.");
+
+      const unclosedDetailsInFenceSrc = "unclosed-details-inside-fence";
+      const unclosedDetailsRes = rankMaterialContext({
+        chunks: [
+          { ...chunk("udf-p1", "```\n<details><summary>Reveal answer</summary>", 1), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p2", "Hidden answer inside unclosed details", 2), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p3", "```", 3), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p4", "Theorem 3: Public theorem after closed fence without heading.", 4), sourceId: unclosedDetailsInFenceSrc },
+        ],
+        query: "Public theorem after closed fence",
+        maxCharacters: 8000,
+        preferChunkId: "udf-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [unclosedDetailsInFenceSrc],
+            admissibleSourceVersions: { [unclosedDetailsInFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(unclosedDetailsRes.map(c => c.id)).toEqual(["udf-p4"]);
+      expect(JSON.stringify(unclosedDetailsRes)).not.toContain("Hidden answer");
+    });
+
+    it("binary-searches chunk boundaries in O(N log N) on 500-chunk sources and handles shortest-form CommonMark <!--> / <!---> comments", () => {
+      // Round-4 Step-1 P1 #2 + Step-2 P2:
+      const largeSrc = "large-500-chunk-source";
+      const largeChunks: SourceChunk[] = Array.from({ length: 500 }, (_, i) => ({
+        ...chunk(
+          `lg-${i + 1}`,
+          i === 249
+            ? "<!--> <!---> Definition 250: Contraction mapping on complete metric spaces."
+            : `<!--> Paragraph ${i + 1}: Preliminary background note ${i + 1} with bound a < b.`,
+          i + 1,
+        ),
+        sourceId: largeSrc,
+      }));
+
+      const runLarge = () =>
+        rankMaterialContext({
+          chunks: largeChunks,
+          query: "Contraction mapping complete metric spaces",
+          maxCharacters: 4000,
+          pedagogicalGraph: {
+            concepts: [
+              { id: "c-contraction", label: "Contraction Mapping", evidenceChunkIds: ["lg-250"], privacyEpoch: 1 },
+            ],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [largeSrc],
+              admissibleSourceVersions: { [largeSrc]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+
+      // Warmup JIT once before timing.
+      expect(runLarge()[0]?.id).toBe("lg-250");
+      const t0 = performance.now();
+      const timedRanked = runLarge();
+      const elapsedMs = performance.now() - t0;
+      expect(timedRanked[0]?.id).toBe("lg-250");
+      expect(elapsedMs).toBeLessThan(1000);
+
+      // Verify shortest-form `<!-->` and `<!--->` never pair with a later `-->` across chunks
+      // (which would otherwise leave `<!--\n## Answer Key` unclosed inside the unwrapped slice),
+      // while keeping `sc-p1` and `sc-p5` public and sealing `sc-p2`, `sc-p3`, and unlabeled `sc-p4`.
+      const shortCommentSrc = "short-empty-html-comments";
+      const shortCommentChunks: SourceChunk[] = [
+        {
+          ...chunk("sc-p1", "<!--> Public Theorem 1: Spectral radius formula. <!--->", 1),
+          sourceId: shortCommentSrc,
+        },
+        { ...chunk("sc-p2", "<!--\n## Answer Key", 2), sourceId: shortCommentSrc },
+        { ...chunk("sc-p3", "Secret eigenvalue answer lambda = 7\n-->", 3), sourceId: shortCommentSrc },
+        { ...chunk("sc-p4", "Unlabeled secret continuation lambda_2 = 3", 4), sourceId: shortCommentSrc },
+        { ...chunk("sc-p5", "## Public Section\nCorollary 1: Gelfand spectral limit.", 5), sourceId: shortCommentSrc },
+      ];
+      const shortRanked = rankMaterialContext({
+        chunks: shortCommentChunks,
+        query: "Spectral radius Gelfand spectral limit eigenvalue",
+        maxCharacters: 8000,
+        preferChunkId: "sc-p4",
+        preferPage: 3,
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [shortCommentSrc],
+            admissibleSourceVersions: { [shortCommentSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(shortRanked.map(c => c.id)).toEqual(["sc-p5", "sc-p1"]);
+      expect(JSON.stringify(shortRanked)).not.toContain("lambda = 7");
+      expect(JSON.stringify(shortRanked)).not.toContain("lambda_2 = 3");
+    });
+
+    it("preserves active answer headings across outer closers even when an unclosed inner fence follows the heading, while confining the inner fence to innerEnd", () => {
+      // Round-5 Step-1 P1 #1 & Step-2 P2 #1:
+      // 4-chunk empty-graph preferChunkId case:
+      // p1 opens ````, p2 has `## Answer Key\n``` ` (unclosed 3-backtick inner fence),
+      // p3 closes ````, p4 has unlabeled continuation `Substituting gives x = 42.`.
+      const innerUnclosedSrc = "unclosed-inner-fence-under-answer-key";
+      const p1OuterOpen: SourceChunk = {
+        ...chunk("uif-p1", "````markdown", 1),
+        sourceId: innerUnclosedSrc,
+      };
+      const p2AnswerAndUnclosedInner: SourceChunk = {
+        ...chunk("uif-p2", "## Answer Key\n```", 2),
+        sourceId: innerUnclosedSrc,
+      };
+      const p3OuterClose: SourceChunk = {
+        ...chunk("uif-p3", "````", 3),
+        sourceId: innerUnclosedSrc,
+      };
+      const p4UnlabeledContinuation: SourceChunk = {
+        ...chunk("uif-p4", "Substituting gives x = 42.", 4),
+        sourceId: innerUnclosedSrc,
+      };
+
+      const fourChunkRanked = rankMaterialContext({
+        chunks: [p1OuterOpen, p2AnswerAndUnclosedInner, p3OuterClose, p4UnlabeledContinuation],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "uif-p4",
+        preferPage: 4,
+        dense: [{ chunk: p4UnlabeledContinuation, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [innerUnclosedSrc],
+            admissibleSourceVersions: { [innerUnclosedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(fourChunkRanked).toEqual([]);
+      expect(JSON.stringify(fourChunkRanked)).not.toContain("x = 42");
+
+      // Extended 5-chunk case adding p5 `## Public Section\nTheorem 1: Contraction mapping...`:
+      // p4 stays quarantined while p5 IS returned (proving the unclosed inner 3-backtick fence
+      // stays strictly confined to innerEnd and never swallows p5's `## Public Section` as code).
+      const p5PublicSection: SourceChunk = {
+        ...chunk(
+          "uif-p5",
+          "## Public Section\nTheorem 1: Contraction mapping fixed-point uniqueness.",
+          5,
+        ),
+        sourceId: innerUnclosedSrc,
+      };
+
+      const fiveChunkRanked = rankMaterialContext({
+        chunks: [
+          p1OuterOpen,
+          p2AnswerAndUnclosedInner,
+          p3OuterClose,
+          p4UnlabeledContinuation,
+          p5PublicSection,
+        ],
+        query: "Substituting Contraction mapping fixed-point uniqueness",
+        maxCharacters: 8000,
+        preferChunkId: "uif-p4",
+        preferPage: 4,
+        dense: [
+          { chunk: p4UnlabeledContinuation, segmentIndex: 0 },
+          { chunk: p5PublicSection, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted-uif", label: "Tainted", evidenceChunkIds: ["uif-p4"], privacyEpoch: 1 },
+            { id: "c-uif-thm", label: "Contraction Mapping", evidenceChunkIds: ["uif-p5"], privacyEpoch: 1 },
+          ],
+          edges: [{ from: "c-tainted-uif", to: "c-uif-thm", kind: "prerequisite", privacyEpoch: 1 }],
+          authorization: {
+            admissibleSourceIds: [innerUnclosedSrc],
+            admissibleSourceVersions: { [innerUnclosedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(fiveChunkRanked.map(c => c.id)).toEqual(["uif-p5"]);
+      expect(fiveChunkRanked[0]?.text).toContain("Theorem 1: Contraction mapping");
+      expect(JSON.stringify(fiveChunkRanked)).not.toContain("x = 42");
+
+      // Also verify when p2 opens an unclosed 3-backtick fence on its own chunk BEFORE p3's `## Answer Key`
+      // inside an outer 4-backtick fence (C_2.outerEnd === C_1.innerEnd exports upward across both closers).
+      const nestedBeforeSrc = "unclosed-inner-before-answer-heading";
+      const nestedBeforeRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("nb-p1", "````markdown", 1), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p2", "```", 2), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p3", "## Answer Key", 3), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p4", "````", 4), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p5", "Substituting gives x = 42.", 5), sourceId: nestedBeforeSrc },
+          { ...chunk("nb-p6", "## Public Section\nLemma 1: Closed graph lemma.", 6), sourceId: nestedBeforeSrc },
+        ],
+        query: "Substituting Closed graph lemma",
+        maxCharacters: 8000,
+        preferChunkId: "nb-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [nestedBeforeSrc],
+            admissibleSourceVersions: { [nestedBeforeSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(nestedBeforeRanked.map(c => c.id)).toEqual(["nb-p6"]);
+      expect(JSON.stringify(nestedBeforeRanked)).not.toContain("x = 42");
+
+      // Also verify `<div>` variants:
+      // (a) Exact `p1: "<div>"`, `p2: "## Answer Key\n```"`, `p3: "</div>"`, `p4: "Substituting gives x = 42."`,
+      //     `p5: "## Public Section\nLemma 1: ..."` strictly quarantines p2..p4 (`0` leak of `x = 42`);
+      // (b) Contiguous HTML `<div>\n` ... `</div>` with unclosed inner `<!--` AND `\begin{verbatim}` with unclosed
+      //     inner ``` both quarantine p4 while returning p5 (`Lemma 1`).
+      const divFenceSrc = "div-unclosed-inner-fence";
+      const divFenceRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("df-p1", "<div>", 1), sourceId: divFenceSrc },
+          { ...chunk("df-p2", "## Answer Key\n```", 2), sourceId: divFenceSrc },
+          { ...chunk("df-p3", "</div>", 3), sourceId: divFenceSrc },
+          { ...chunk("df-p4", "Substituting gives x = 42.", 4), sourceId: divFenceSrc },
+          { ...chunk("df-p5", "## Public Section\nLemma 1: Open mapping lemma.", 5), sourceId: divFenceSrc },
+        ],
+        query: "Substituting Open mapping lemma",
+        maxCharacters: 8000,
+        preferChunkId: "df-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [divFenceSrc],
+            admissibleSourceVersions: { [divFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(divFenceRanked.map(c => c.id)).not.toContain("df-p4");
+      expect(JSON.stringify(divFenceRanked)).not.toContain("x = 42");
+
+      for (const [variant, openText, innerText, closeText] of [
+        ["div-html", "<div>\n", "## Answer Key\n<!--\n", "</div>"],
+        ["verbatim-inner-fence", "\\begin{verbatim}", "## Answer Key\n```", "\\end{verbatim}"],
+      ] as const) {
+        const srcId = `outer-${variant}-src`;
+        const res = rankMaterialContext({
+          chunks: [
+            { ...chunk(`${variant}-p1`, openText, 1), sourceId: srcId },
+            { ...chunk(`${variant}-p2`, innerText, 2), sourceId: srcId },
+            { ...chunk(`${variant}-p3`, closeText, 3), sourceId: srcId },
+            { ...chunk(`${variant}-p4`, "Substituting gives x = 42.", 4), sourceId: srcId },
+            {
+              ...chunk(`${variant}-p5`, "## Public Section\nLemma 1: Open mapping lemma.", 5),
+              sourceId: srcId,
+            },
+          ],
+          query: "Substituting Open mapping lemma",
+          maxCharacters: 8000,
+          preferChunkId: `${variant}-p4`,
+          pedagogicalGraph: {
+            concepts: [],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [srcId],
+              admissibleSourceVersions: { [srcId]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+        expect(res.map(c => c.id)).toEqual([`${variant}-p5`]);
+        expect(res[0]?.text).toContain("Lemma 1: Open mapping lemma.");
+        expect(JSON.stringify(res)).not.toContain("x = 42");
+      }
+    });
+
+    it("retrieves later public sections after 40 multi-chunk public code fences without false sealing and keeps ## Hints active across closed example fences", () => {
+      // Round-5 Step-1 P1 #2:
+      // 40 sequential closed 2-chunk public code fences (80 chunks) + p81 `## Public Section\nTheorem 40: ...`.
+      const manyFencesSrc = "forty-multi-chunk-public-fences";
+      const manyFenceChunks: SourceChunk[] = [];
+      for (let k = 1; k <= 40; k++) {
+        manyFenceChunks.push({
+          ...chunk(`mf-p${2 * k - 1}`, `\`\`\`ts\nconst k${k} = ${k};`, 2 * k - 1),
+          sourceId: manyFencesSrc,
+        });
+        manyFenceChunks.push({
+          ...chunk(`mf-p${2 * k}`, `export const out${k} = k${k};\n\`\`\``, 2 * k),
+          sourceId: manyFencesSrc,
+        });
+      }
+      manyFenceChunks.push({
+        ...chunk(
+          "mf-p81",
+          "## Public Section\nTheorem 40: Uniform boundedness principle on Banach spaces.",
+          81,
+        ),
+        sourceId: manyFencesSrc,
+      });
+
+      const manyRanked = rankMaterialContext({
+        chunks: manyFenceChunks,
+        query: "Uniform boundedness principle Banach spaces",
+        maxCharacters: 8000,
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-ubp", label: "Uniform Boundedness", evidenceChunkIds: ["mf-p81"], privacyEpoch: 1 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [manyFencesSrc],
+            admissibleSourceVersions: { [manyFencesSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(manyRanked.map(c => c.id)).toEqual(["mf-p81"]);
+      expect(manyRanked[0]?.text).toContain("Theorem 40: Uniform boundedness principle");
+
+      // Also verify an earlier `## Hints` (both top-level and exported from a cross-chunk container)
+      // followed by a closed multi-chunk code example containing literal `## Public Section` does NOT
+      // pop `## Hints`, while a real outer `## Public Section` afterwards DOES reopen `"public"`.
+      const hintsFenceSrc = "hints-with-fenced-public-heading-literal";
+      const hintsFenceChunks: SourceChunk[] = [
+        { ...chunk("hf-p1", "<!--\n## Hints", 1), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p2", "Try integration by parts first.\n-->", 2), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p3", "```markdown\nLiteral markdown template", 3), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p4", "## Public Section\nHint scaffold u = ln(x) inside code\n```", 4), sourceId: hintsFenceSrc },
+        { ...chunk("hf-p5", "Unlabeled hint continuation dv = x dx.", 5), sourceId: hintsFenceSrc },
+        {
+          ...chunk("hf-p6", "## Public Section\nTheorem 41: Hahn-Banach extension theorem.", 6),
+          sourceId: hintsFenceSrc,
+        },
+      ];
+
+      const gatedOut = rankMaterialContext({
+        chunks: hintsFenceChunks,
+        query: "integration by parts dv = x dx Hahn-Banach extension theorem",
+        maxCharacters: 8000,
+        preferChunkId: "hf-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [hintsFenceSrc],
+            admissibleSourceVersions: { [hintsFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: false,
+          },
+        },
+      });
+      expect(gatedOut.map(c => c.id)).toEqual(["hf-p6"]);
+      expect(JSON.stringify(gatedOut)).not.toContain("dv = x dx");
+      expect(JSON.stringify(gatedOut)).not.toContain("u = ln(x)");
+
+      const gatedAllowed = rankMaterialContext({
+        chunks: hintsFenceChunks,
+        query: "Unlabeled hint continuation dv = x dx",
+        maxCharacters: 8000,
+        preferChunkId: "hf-p5",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [hintsFenceSrc],
+            admissibleSourceVersions: { [hintsFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(gatedAllowed[0]?.id).toBe("hf-p5");
+    });
   });
 });
