@@ -497,14 +497,18 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
   it.each([
     "[原生提取]\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An independent derivation.",
     "[原生提取]\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\n\n[图片描述]\nProof. An independent derivation.",
+    "[原生提取]\nTheorem 1.\nAnswer: No.\n\n[视觉转写与描述]\n[转写]\nAnswer:\n\n[图片描述]\nProof. An unfinished derivation.",
+    "[原生提取]\nTheorem 1.\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\n\n[图片描述]\nAnswer:\n\n[不确定处]\nProof. An unfinished derivation.",
+    "[视觉转写与描述]\n[图片描述]\nAnswer: x = 1\n\n[不确定处]\nAnswer:\n\n[图片描述]\nProof. An unfinished derivation.",
   ])(
-    "seals the next archived page when native or transcription has an inline answer body (%j)",
+    "seals the next archived page when native, transcription, or earlier auxiliary has an inline answer body (%j)",
     async pageOne => {
       await expectArchivedPdfPages([
         pageOne,
-        "Still private proof continuation.",
+        "Therefore the claim holds.",
+        "Final step. Q.E.D.",
         "Chapter 2: Geometry\nPublic prose.",
-      ], [3], 2);
+      ], [4], 3);
     },
   );
 
@@ -527,6 +531,11 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
     "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
     "*Proof.* Calculation continues. *Q.E.D.*",
+    "Proof. Starts.\n\\(\\Box \\)",
+    "Proof. Starts.\n\\[\\blacksquare \\]",
+    "Proof. Starts.\n$\\Box $",
+    "Proof. Starts.\n(\\Box )",
+    "*Proof. Done. \\(\\Box \\)*",
   ])(
     "publishes the next archived page after the Markdown proof %j",
     async proof => {

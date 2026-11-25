@@ -363,29 +363,29 @@ _NEXT_CONTINUATION_RE = re.compile(
     r"(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|（\s*(?:下接下页|转下页|未完待续)\s*）|\(\s*(?:下接下页|转下页|未完待续)\s*\)|接下页|转下页)\s*$",
     re.IGNORECASE,
 )
-_PROOF_END_CORE = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|Q\.?E\.?D\.?|证毕|证完)"
-_PROOF_END = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]))?|\bQ\.?E\.?D\.?|证毕|证完)"
+_PROOF_END_CORE = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]|[)）\]】]))?|Q\.?E\.?D\.?|证毕|证完)"
+_PROOF_END = r"(?:[□■∎]|\\(?:Box|square|blacksquare)(?:\s*(?:\$+|\\[)\]]|[)）\]】]))?|\bQ\.?E\.?D\.?|证毕|证完)"
 _SECTION_END_CORE = r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)"
 _SECTION_END_AFTER_PUNCT = r"[.。!?！？;；—–](?:\s+End\s+of\s+(?:Answers?|Solutions?)|\s*(?:答案完|解答完))"
 _SECTION_END_BRACKETED = (
-    rf"(?:\[\s*{_SECTION_END_CORE}\s*[.。]?\s*\]|【\s*{_SECTION_END_CORE}\s*[.。]?\s*】"
-    rf"|\(\s*{_SECTION_END_CORE}\s*[.。]?\s*\)|（\s*{_SECTION_END_CORE}\s*[.。]?\s*）)"
+    rf"(?:\[\s*{_SECTION_END_CORE}\s*(?:[.。]\s*)?\]|【\s*{_SECTION_END_CORE}\s*(?:[.。]\s*)?】"
+    rf"|\(\s*{_SECTION_END_CORE}\s*(?:[.。]\s*)?\)|（\s*{_SECTION_END_CORE}\s*(?:[.。]\s*)?）)"
 )
 _PROOF_TERMINATOR_PATTERN = (
-    rf"(?:(?:^|[^*_]){_PROOF_END}\s*[.。]?\s*$"
-    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$"
-    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$"
-    rf"|(?:^|[\s(\[【（:：—–-])\*{_PROOF_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$"
-    rf"|(?:^|[\s(\[【（:：—–-])_{_PROOF_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$)"
+    rf"(?:(?:^|[^*_]){_PROOF_END}\s*(?:[.。]\s*)?$"
+    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?\*(?!\*)\s*(?:[.。]\s*)?$"
+    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*[^*_]{_PROOF_END}|{_PROOF_END_CORE})[.。]?_(?!_)\s*(?:[.。]\s*)?$"
+    rf"|(?:^|[\s(\[【（:：—–-])\*{_PROOF_END_CORE}[.。]?\*(?!\*)\s*(?:[.。]\s*)?$"
+    rf"|(?:^|[\s(\[【（:：—–-])_{_PROOF_END_CORE}[.。]?_(?!_)\s*(?:[.。]\s*)?$)"
 )
 _SECTION_SEALED_TERMINATOR_PATTERN = (
-    rf"(?:^\s*{_SECTION_END_CORE}\s*[.。]?\s*$"
-    rf"|{_SECTION_END_AFTER_PUNCT}\s*[.。]?\s*$"
-    rf"|(?:^\s*|[.。!?！？;；—–]\s*){_SECTION_END_BRACKETED}\s*[.。]?\s*$"
-    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?\*(?!\*)\s*[.。]?\s*$"
-    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?_(?!_)\s*[.。]?\s*$"
-    rf"|(?:^\s*|[.。!?！？;；—–]\s*)\*{_SECTION_END_CORE}[.。]?\*(?!\*)\s*[.。]?\s*$"
-    rf"|(?:^\s*|[.。!?！？;；—–]\s*)_{_SECTION_END_CORE}[.。]?_(?!_)\s*[.。]?\s*$)"
+    rf"(?:^\s*{_SECTION_END_CORE}\s*(?:[.。]\s*)?$"
+    rf"|{_SECTION_END_AFTER_PUNCT}\s*(?:[.。]\s*)?$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*){_SECTION_END_BRACKETED}\s*(?:[.。]\s*)?$"
+    rf"|^\s*\*(?=[^\s*])(?:(?:{_STAR_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?\*(?!\*)\s*(?:[.。]\s*)?$"
+    rf"|^\s*_(?=[^\s_])(?:(?:{_UNDER_EMPHASIS_INTERIOR})*{_SECTION_END_AFTER_PUNCT}|{_SECTION_END_CORE})[.。]?_(?!_)\s*(?:[.。]\s*)?$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*)\*{_SECTION_END_CORE}[.。]?\*(?!\*)\s*(?:[.。]\s*)?$"
+    rf"|(?:^\s*|[.。!?！？;；—–]\s*)_{_SECTION_END_CORE}[.。]?_(?!_)\s*(?:[.。]\s*)?$)"
 )
 _PROOF_TERMINATOR_RE = re.compile(_PROOF_TERMINATOR_PATTERN, re.IGNORECASE)
 _SECTION_SEALED_TERMINATOR_RE = re.compile(_SECTION_SEALED_TERMINATOR_PATTERN, re.IGNORECASE)

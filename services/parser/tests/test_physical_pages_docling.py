@@ -1427,6 +1427,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
             "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
             "*Proof.* Calculation continues. *Q.E.D.*",
+            "Proof. Starts.\n\\(\\Box \\)",
+            "Proof. Starts.\n\\[\\blacksquare \\]",
+            "Proof. Starts.\n$\\Box $",
+            "Proof. Starts.\n(\\Box )",
+            "*Proof. Done. \\(\\Box \\)*",
         ):
             with self.subTest(proof=proof):
                 ext = physical_pages.extract_physical_pages(result_for(
@@ -1533,6 +1538,21 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             elapsed = perf_counter() - started
             self.assertEqual(stripped, pathological)
             self.assertLess(elapsed, 0.05)
+
+        for opener, trailing in (
+            ("Answer: No.\nProof. Starts.", "*Q.E.D.*" + " " * 20000 + "continuing prose"),
+            ("Answer Key", "*End of Answers.*" + " " * 20000 + "continuing prose"),
+        ):
+            started = perf_counter()
+            matched = physical_pages._INLINE_SEALED_TERMINATOR_RE.search(trailing)
+            elapsed = perf_counter() - started
+            self.assertIsNone(matched)
+            self.assertLess(elapsed, 0.05)
+            ext = physical_pages.extract_physical_pages(result_for(
+                [text_element(11, f"{opener}\n{trailing}")],
+                [text_element(12, "Still private continuation.")],
+            ))
+            self.assertEqual(ext.texts_by_page[12], [])
 
     def test_closes_markdown_wrapped_section_and_public_proof(self):
         ext = physical_pages.extract_physical_pages(result_for(

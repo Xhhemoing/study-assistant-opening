@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v52-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v53-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -3189,6 +3189,40 @@ describe("bounded resumable PDF parser", () => {
       expect(failedSegmentRecovery.publishedChunks.map(({ page, text }) => [page, text]))
         .toEqual([[2, "Chapter 2: Vectors\nPublic prose after the answer."]]);
     }
+
+    for (const [nativePageOne, visionPageOne] of [
+      ["Theorem 1.\nAnswer: No.", "[转写]\nAnswer:\n[图片描述]\nProof. An unfinished derivation."],
+      ["Theorem 1.\nAnswer:\n", "[转写]\nAnswer: x = 1\n[图片描述]\nAnswer:\n[不确定处]\nProof. An unfinished derivation."],
+    ] as const) {
+      for (const origin of ["live", "saved"] as const) {
+        const scenario = await runPdfScenario({
+          segmentPages: 1,
+          pages: [
+            { page: 1, text: nativePageOne, visualKinds: ["picture"] },
+            { page: 2, text: "Therefore the claim holds." },
+            { page: 3, text: "Final step. Q.E.D." },
+            { page: 4, text: "Chapter 2: Vectors\nPublic prose." },
+          ],
+          ...(origin === "live" ? {
+            recognizePage: async () => ({ text: visionPageOne, imageObjectKey: "vision/p1-proof" }),
+          } : {
+            savedChunks: [{
+              page: 1,
+              text: `[原生提取]\n${nativePageOne.trimEnd()}\n\n[视觉转写与描述]\n${visionPageOne}`,
+              imageObjectKey: "vision/p1-proof",
+              slideLabel: null,
+              startMs: null,
+              endMs: null,
+            }],
+          }),
+        });
+        expect(scenario.requests[1]).toEqual({ start: 2, seed: "inline_proof_sealed" });
+        expect(scenario.requests[2]).toEqual({ start: 3, seed: "inline_proof_sealed" });
+        expect(scenario.requests[3]).toEqual({ start: 4 });
+        expect(scenario.publishedChunks.map(({ page, text }) => [page, text]))
+          .toEqual([[1, "Theorem 1."], [4, "Chapter 2: Vectors\nPublic prose."]]);
+      }
+    }
   });
 
   it.each([
@@ -3210,6 +3244,11 @@ describe("bounded resumable PDF parser", () => {
     "*Proof. Since 2 * 3 = 6, continue. Q.E.D.*",
     "_Proof. Since a_1 + a_2 = 3, continue. Q.E.D._",
     "*Proof.* Calculation continues. *Q.E.D.*",
+    "Proof. Starts.\n\\(\\Box \\)",
+    "Proof. Starts.\n\\[\\blacksquare \\]",
+    "Proof. Starts.\n$\\Box $",
+    "Proof. Starts.\n(\\Box )",
+    "*Proof. Done. \\(\\Box \\)*",
   ])(
     "publishes later Worker text after the Markdown proof %j",
     async proof => {
@@ -3269,6 +3308,19 @@ describe("bounded resumable PDF parser", () => {
       ] });
       expect(result.requests[1]).toEqual({ start: 2, seed: "inline_sealed" });
       expect(result.publishedChunks.map(({ page }) => page)).toEqual([3]);
+    }
+
+    for (const [opener, expectedMode, line] of [
+      ["Answer: No.\nProof. Starts.", "inline_proof_sealed", `*Q.E.D.*${" ".repeat(20_000)}continuing prose`],
+      ["Answer Key", "section_sealed", `*End of Answers.*${" ".repeat(20_000)}continuing prose`],
+    ] as const) {
+      const state = { mode: "none" as const, inWorkedExample: false, afterAllSealedPage: false };
+      const started = performance.now();
+      const output = sealTextWithState(`${opener}\n${line}`, state);
+      const elapsedMs = performance.now() - started;
+      expect(output).toBe("");
+      expect(state.mode).toBe(expectedMode);
+      expect(elapsedMs).toBeLessThan(50);
     }
   });
 

@@ -279,24 +279,24 @@ const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
 const inlineContinues = String.raw`(?:\( *(?:to +be +continued|continued(?: +on +next +page)?) *\)|[（(] *(?:下接下页|转下页|未完待续) *[）)]|接下页|转下页) *$`;
 const sectionEndCore = String.raw`(?:end +of +(?:answers?|solutions?)|答案完|解答完)`;
 const sectionEndAfterPunct = String.raw`[.。!?！？;；—–](?: +end +of +(?:answers?|solutions?)| *(?:答案完|解答完))`;
-const sectionEndBracketed = String.raw`(?:\[ *${sectionEndCore} *[.。]? *\]|【 *${sectionEndCore} *[.。]? *】|\( *${sectionEndCore} *[.。]? *\)|（ *${sectionEndCore} *[.。]? *）)`;
-const proofEndCore = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|Q\.?E\.?D\.?|证毕|证完)`;
-const boundProofEnd = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *\$+|\\\)|\\\]|[)）\]】])?|\mQ\.?E\.?D\.?|证毕|证完)`;
+const sectionEndBracketed = String.raw`(?:\[ *${sectionEndCore} *(?:[.。] *)?\]|【 *${sectionEndCore} *(?:[.。] *)?】|\( *${sectionEndCore} *(?:[.。] *)?\)|（ *${sectionEndCore} *(?:[.。] *)?）)`;
+const proofEndCore = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\\)|\\\]|[)）\]】]))?|Q\.?E\.?D\.?|证毕|证完)`;
+const boundProofEnd = String.raw`(?:[□■∎]|\\(?:Box|square|blacksquare)(?: *(?:\$+|\\\)|\\\]|[)）\]】]))?|\mQ\.?E\.?D\.?|证毕|证完)`;
 const proofTerminatorPattern = [
-  String.raw`(?:^|[^*_])${boundProofEnd} *[.。]? *$`,
-  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?\*(?!\*) *[.。]? *$`,
-  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?_(?!_) *[.。]? *$`,
-  String.raw`(?:^|[ (\[【（:：—–-])\*${proofEndCore}[.。]?\*(?!\*) *[.。]? *$`,
-  String.raw`(?:^|[ (\[【（:：—–-])_${proofEndCore}[.。]?_(?!_) *[.。]? *$`,
+  String.raw`(?:^|[^*_])${boundProofEnd} *(?:[.。] *)?$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*[^*_]${boundProofEnd}|${proofEndCore})[.。]?_(?!_) *(?:[.。] *)?$`,
+  String.raw`(?:^|[ (\[【（:：—–-])\*${proofEndCore}[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`(?:^|[ (\[【（:：—–-])_${proofEndCore}[.。]?_(?!_) *(?:[.。] *)?$`,
 ].join("|");
 const answerSectionEnd = [
-  String.raw`${lineStart}${sectionEndCore} *[.。]? *$`,
-  String.raw`${sectionEndAfterPunct} *[.。]? *$`,
-  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)${sectionEndBracketed} *[.。]? *$`,
-  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?\*(?!\*) *[.。]? *$`,
-  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?_(?!_) *[.。]? *$`,
-  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)\*${sectionEndCore}[.。]?\*(?!\*) *[.。]? *$`,
-  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)_${sectionEndCore}[.。]?_(?!_) *[.。]? *$`,
+  String.raw`${lineStart}${sectionEndCore} *(?:[.。] *)?$`,
+  String.raw`${sectionEndAfterPunct} *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)${sectionEndBracketed} *(?:[.。] *)?$`,
+  String.raw`${lineStart}\*(?=[^ *\r\n])(?:(?:${starEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`${lineStart}_(?=[^ _\r\n])(?:(?:${underEmphasisInterior})*${sectionEndAfterPunct}|${sectionEndCore})[.。]?_(?!_) *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)\*${sectionEndCore}[.。]?\*(?!\*) *(?:[.。] *)?$`,
+  String.raw`(?:${lineStart}|[.。!?！？;；—–] *)_${sectionEndCore}[.。]?_(?!_) *(?:[.。] *)?$`,
 ].join("|");
 const inlineTerminator = String.raw`(?:${proofTerminatorPattern}|${answerSectionEnd})`;
 const terminatorTokenCore = String.raw`(?:${proofEndCore}|${sectionEndCore})`;
@@ -500,7 +500,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     WINDOW content_order AS (PARTITION BY source_id,source_version,content_line,auxiliary ORDER BY position),
       preceding_lines AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_inline_starts AS (
-    SELECT *, inline_opener AND NOT auxiliary_complete AS starts_inline,
+    SELECT *, inline_opener AND NOT auxiliary_complete
+        AND NOT (auxiliary AND last_answer_body=''
+          AND COALESCE(bool_or(unclosed_answer_body) OVER earlier_on_page,false)) AS starts_inline,
       COALESCE(auxiliary_proof_head AND max(position) FILTER (WHERE auxiliary_answer_boundary) OVER earlier_on_page
         = max(position) FILTER (WHERE auxiliary AND content_line) OVER earlier_on_page
         OR (NOT auxiliary AND position=first_primary_position AND candidate_body ~* ${answerProofHeading}
@@ -520,6 +522,18 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
           IS TRUE AS transcription_reopens_answer,
         auxiliary AND (last_answer_body ~* ${inlineTerminator}
           OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends)) AS auxiliary_complete,
+        inline_opener AND last_answer_body<>'' AND (
+          auxiliary AND NOT (last_answer_body ~* ${inlineTerminator}
+            OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends))
+          OR transcription AND position=last_transcription_answer
+            AND lane_boundary_position IS NULL AND blank_exit_position IS NULL AND answer_terminator IS NULL
+            AND NOT (NOT answer_has_proof AND last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineFallbackBlocked})
+          OR native_line AND position=native_answer_position
+            AND native_answer_position>COALESCE(native_reopening,0)
+            AND native_answer_position>COALESCE(native_blank_exit,0)
+            AND NOT (native_answer_position>COALESCE(native_proof,0)
+              AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineFallbackBlocked}))
+        ) AS unclosed_answer_body,
         auxiliary AND content_line AND position=last_auxiliary_position AND auxiliary_opener>0 AND NOT open_auxiliary_proof
           AND CASE WHEN first_auxiliary_close IS NULL THEN auxiliary_sentence_ends
             ELSE first_auxiliary_close=position END AS auxiliary_answer_boundary
