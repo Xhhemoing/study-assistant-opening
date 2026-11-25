@@ -13,8 +13,10 @@ function criteriaAgree(proposal: AiGradingProposal): boolean {
 
 /** Store uncertain or contradictory feedback without turning it into a binary grade. */
 export function acceptedAiGradingOutcome(proposal: AiGradingProposal): AiGradingProposal["outcome"] {
+  const { outcome, proofFeedback, feedback, criteria, transcription } = proposal;
   return proposal.questionMatch && proposal.confidence >= AI_GRADING_MIN_CONFIDENCE
-    && proposal.confidence <= 1 && criteriaAgree(proposal)&&proofFeedbackAllowsOutcome(proposal.outcome,proposal.proofFeedback) ? proposal.outcome : "unverified";
+    && proposal.confidence <= 1 && criteriaAgree(proposal)
+    && proofFeedbackAllowsOutcome(outcome, proofFeedback, { feedback, criteria, transcription }) ? outcome : "unverified";
 }
 
 export function isAiGradedEvidence(eligibility: Pick<LearningEvidenceEligibility, "reasonCodes">): boolean {
@@ -38,7 +40,10 @@ export function evaluateAiCorrectness(observation: EvidenceObservation,
     reasons.add("ai_evaluation_low_confidence"); return "unknown";
   }
   if (evaluation.outcome === "unverified") { reasons.add("ai_evaluation_abstained"); return "unknown"; }
-  if (!criteriaAgree(evaluation)||!proofFeedbackAllowsOutcome(evaluation.outcome,evaluation.proofFeedback)) { reasons.add("ai_evaluation_criteria_inconsistent"); return "unknown"; }
+  const { outcome, proofFeedback, feedback, criteria, transcription } = evaluation;
+  if (!criteriaAgree(evaluation) || !proofFeedbackAllowsOutcome(outcome, proofFeedback, { feedback, criteria, transcription })) {
+    reasons.add("ai_evaluation_criteria_inconsistent"); return "unknown";
+  }
   if (evaluation.outcome !== observation.outcome) { reasons.add("ai_evaluation_outcome_conflict"); return "unknown"; }
   reasons.add(evaluation.outcome === "correct" ? "ai_graded_correct" : "ai_graded_incorrect");
   reasons.add("ai_evaluation_uncalibrated");

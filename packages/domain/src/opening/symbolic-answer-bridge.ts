@@ -46,12 +46,12 @@ type ParsedExpression = {
   radicands: ScalarExpr[];
   absoluteValues: ScalarExpr[];
 };
-type Target = {
+type TargetSource = {
   kind: SymbolicKind;
   source: ParsedExpression;
-  expected: ScalarExpr;
   domain: DomainSpec & { variable: string };
 };
+type Target = TargetSource & { expected: ScalarExpr };
 
 function bounded<T, F>(fallback: F, verify: () => T): T | F {
   try {
@@ -332,14 +332,18 @@ function hasDerivativeInterior(source: ParsedExpression, domain: Target["domain"
   return true;
 }
 
-function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: DomainSpec): Target | null {
+function targetSource(kind: SymbolicKind, source: ParsedExpression, domain?: DomainSpec): TargetSource | null {
   const variable = domain?.variable ?? source.variables.values().next().value ?? "x";
   if ((kind === "indefinite-integral" && variable === "C") || [...source.variables].some(name => name !== variable)) return null;
-  const targetDomain = { ...domain, variable };
-  if (kind !== "scalar" && !hasDerivativeInterior(source, targetDomain)) return null;
+  return { kind, source, domain: { ...domain, variable } };
+}
+
+function makeTarget(input: TargetSource): Target | null {
+  const { kind, source, domain } = input;
+  if (kind !== "scalar" && !hasDerivativeInterior(source, domain)) return null;
   let expected = source.expr;
   if (kind === "derivative") {
-    const derivative = differentiate(source.expr, variable);
+    const derivative = differentiate(source.expr, domain.variable);
     if (!derivative) return null;
     // Differentiation can erase a restriction, such as ln(x) requiring x > 0.
     expected = source.mayRestrictDomain
@@ -350,13 +354,13 @@ function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: Domai
     // A quotient from the chain rule can omit points where the actual derivative exists.
     // Establish that its zero-denominator exclusions are already outside the source domain.
     if (formal.hasDenominator && verifyScalarEquivalence(
-      withZeroValue(expected), withZeroValue(source.expr), targetDomain,
+      withZeroValue(expected), withZeroValue(source.expr), domain,
     ).status !== "equivalent") return null;
   }
-  return { kind, source, expected, domain: targetDomain };
+  return { ...input, expected };
 }
 
-function parseTargetExpression(text: string, promptKind: SymbolicKind, domain?: DomainSpec): Target | null {
+function parseTargetExpression(text: string, promptKind: SymbolicKind, domain?: DomainSpec): TargetSource | null {
   const body = unwrapMath(text);
   if (!body) return null;
   const wrapped = text.trim().startsWith("$");
@@ -370,7 +374,7 @@ function parseTargetExpression(text: string, promptKind: SymbolicKind, domain?: 
   if (domain?.variable && variable && domain.variable !== variable) return null;
   const expression = derivative ? derivative[2]! : integral ? integral[1]! : text;
   const source = parseExpression(expression, Boolean(derivative), wrapped);
-  return source && makeTarget(kind, source, variable ? { ...domain, variable } : domain);
+  return source && targetSource(kind, source, variable ? { ...domain, variable } : domain);
 }
 
 function parseQuestion(question: string): Target | null {
@@ -401,7 +405,8 @@ function parseQuestion(question: string): Target | null {
   const expression = suffix ? fullExpression.slice(0, suffix.index).trim() : body;
   // Keep an original math wrapper when an exclusion was inside that wrapper.
   const outerFence = suffix && fullExpression !== body ? /^\${1,2}/.exec(body)?.[0] : undefined;
-  const target = parseTargetExpression(outerFence ? outerFence + expression + outerFence : expression, kind, domain);
+  const parsed = parseTargetExpression(outerFence ? outerFence + expression + outerFence : expression, kind, domain);
+  const target = parsed && makeTarget(parsed);
   if (!target) return null;
   // A parenthesized or signed literal is still a single literal after parsing.
   let original = target.source.expr;
@@ -453,7 +458,8 @@ export function verifySymbolicStepEquivalence(check: {
     if (check.variable !== undefined && !/^[A-Za-z]$/.test(check.variable)) return "unverified";
     const source = parseExpression(check.reference);
     const candidate = parseExpression(check.student);
-    const target = source && makeTarget(check.kind, source, { variable: check.variable });
+    const parsed = source && targetSource(check.kind, source, { variable: check.variable });
+    const target = parsed && makeTarget(parsed);
     return target && candidate ? compareToTarget(candidate, target).status : "unverified";
   });
 }
@@ -828,13 +834,21 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
       return parsed ? [parsed] : [];
     });
     if (candidates.length !== rest.length) return unverified;
-    const variable = candidates.find(candidate => candidate.variables.size)?.variables.values().next().value;
-    const target = parseTargetExpression(first!, "scalar");
+    const parsed = parseTargetExpression(first!, "scalar");
+    if (!parsed) return unverified;
+    // The RHS must agree with itself even when we cannot establish the calculus target's domain.
+    if (candidates.length > 1) {
+      const contradiction = (parsed.kind === "derivative" && scalarChainContradiction(candidates)) ||
+        (parsed.kind === "indefinite-integral" && (integralChainContradiction(candidates, parsed.domain.variable) ||
+          scalarChainContradiction(candidates.filter(candidate => !candidate.variables.has("C")))));
+      if (contradiction) return { status: "inequivalent", unconditional: false };
+    }
+    const target = makeTarget(parsed);
     if (!target) return unverified;
+    const variable = candidates.find(candidate => candidate.variables.size)?.variables.values().next().value;
     if (target.kind === "scalar" && target.source.variables.size === 0 && variable) target.domain.variable = variable;
     const results = candidates.map(candidate => compareToTarget(candidate, target));
     if (target.kind === "indefinite-integral" && candidates.length > 1) {
-      if (integralChainContradiction(candidates, target.domain.variable)) return { status: "inequivalent", unconditional: false };
       if (candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent")) {
         // Candidate equality can depend on x or C even when one side fails as an antiderivative.
         return results.some(result => result.reason === "missing_additive_constant")
@@ -847,8 +861,7 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
           candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent"))) {
       const contradiction = target.kind === "scalar"
         ? scalarChainContradiction([target.source, ...candidates])
-        : (target.kind === "derivative" && scalarChainContradiction(candidates)) ||
-          candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
+        : candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
       return contradiction ? { status: "inequivalent", unconditional: false } : unverified;
     }
     const unconditional = [target.source, ...candidates].every(expression => !expression.hasDenominator &&
@@ -861,26 +874,47 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
 
 type ProofStep = ProofFeedback["steps"][number];
 
-const NON_REAL_SCALAR_CONTEXT = /\b(?:fields?|rings?|modulo|mod|characteristic|char\s*[0-9p]|boolean|semiring|tropical|matrix|matrices|vectors?|linear\s+operators?|operator\s+algebra|complex\s+numbers?)\b|\bgf\s*\(|\\mathbb\{\s*[FZ]\s*\}|\b[FZ](?:_?\{?[0-9]+\b|_\{?p\b|[₀-₉]+)|\\(?:pmod|bmod)\b|有限域|特征\s*[0-9p]|模\s*[0-9p]|同余|布尔|矩阵|向量|算子/iu;
-const PROOF_SUPPOSITION = /\b(?:assume\w*|assuming|suppose\w*|supposing|hypothesi[sz]\w*|(?:for|by)\s+contradiction|towards?\s+(?:a\s+)?contradiction|contrary|if\s+possible)\b|^\s*(?:assumption|hypothesis)\s*[:：]|假设|不妨设|反证|归谬|若.*成立/iu;
-const PROOF_REFUTATION = /\b(?:contradict\w*|absurd\w*|impossib\w*|false|reject\w*|refut\w*|invalid|fails|cannot|can't|no\s+(?:(?:real\s+)?solutions?|such)|does\s+not\s+exist|disprov\w*)\b|\\(?:neq|ne)\b|!=|≠|矛盾|反证|归谬|不成立|荒谬|否定|舍去|无解|不存在/iu;
-const EXPLICIT_COUNTERFACTUAL = /\b(?:(?:for|by)\s+contradiction|towards?\s+(?:a\s+)?contradiction|(?:derived|resulting)\s+contradiction|(?:derives?|yields?|gives?|shows?|is)\s+(?:a|the)\s+contradiction)\b|^\s*contradiction\b|反证|归谬|(?:推出|得到|得出|导出)矛盾/iu;
+const NON_REAL_SCALAR_CONTEXT = [
+  /(?:ℤ|\\mathbb\{\s*Z\s*\}|\\mathbf\{\s*Z\s*\}|\bZ)\s*\/\s*(?:\(\s*)?(?:[0-9]+|[A-Za-z])(?:\s*(?:ℤ|\\mathbb\{\s*Z\s*\}|\\mathbf\{\s*Z\s*\}|Z))?(?:\s*\))?(?![A-Za-z0-9])/u,
+  /(?:𝔽|ℤ|\\mathbb\{\s*[FZ]\s*\}|\\mathbf\{\s*[FZ]\s*\}|\b[FZ])\s*(?:(?:_\s*)?(?:\{\s*)?(?:[0-9]+(?:\^[0-9a-z]+)?|[pqn])(?![A-Za-z0-9])(?:\s*\})?|[₀-₉]+)/u,
+  /\bgf\s*\([0-9a-z^+\s]+\)|\b(?:modulo|mod)\b|\\(?:pmod|bmod)\b|同余|模\s*[0-9p]/iu,
+  /\b(?:characteristic|char)\s*(?:=\s*)?(?:[1-9][0-9]*|[pq])\b|特征\s*(?:为\s*)?(?:[1-9][0-9]*|[pq])/iu,
+  /\b(?:finite|galois|residue|quotient|splitting|cyclotomic|p-adic|padic|complex|algebraically\s+closed|arbitrary|general|abstract)\s+fields?\b|\bfields?\s+of\s+(?:fractions|complex)\b/iu,
+  /ℂ|ℍ|\\mathbb\{\s*[CH]\s*\}|\b(?:complex\s+numbers?|quaternions?|rings?|semirings?|boolean|tropical|matrix|matrices|vectors?|linear\s+operators?|operator\s+algebra)\b|有限域|伽罗瓦域|复数域|复数|四元数|布尔|半环|热带|矩阵|向量|算子/iu,
+];
 
-function stepMentions(step: ProofStep, pattern: RegExp): boolean {
-  return pattern.test(step.claim) || pattern.test(step.feedback);
+const PROOF_SUPPOSITION = /\b(?:assume|assuming|suppose|supposing|hypothesi[sz]e)\b|(?:^|[.!?;:。！？；：])\s*(?:if\s+|(?:assumption|hypothesis)\s*[:：]|(?:先|现|暂且)?假设(?!\s*不成立)|不妨设|若)/iu;
+const CONTRADICTION_INTENT = /\b(?:(?:for|by)\s+contradiction|(?:towards?|to\s+(?:derive|reach|find|obtain))\s+(?:a\s+)?contradiction)\b|反证/giu;
+const EXPLICIT_COUNTERFACTUAL = /\b(?:(?:derived|resulting)\s+contradiction|(?:derive[sd]?|yield[sd]?|give[sn]?|show[sn]?|is)\s+(?:a|the)\s+contradiction)\b|^\s*contradiction\b|归谬|(?:推出|得到|得出|导出)矛盾/iu;
+const CONTRADICTION_DISCHARGE = /\b(?:contradict\w*|absurd\w*|reductio|(?:reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*)\s+(?:the\s+)?(?:assumption|supposition|hypothesis)|(?:assumption|supposition|hypothesis)\s+(?:is\s+|must\s+be\s+)?(?:false|impossible|contradicted|rejected|refuted|discharged)|contrary\s+to\s+(?:the\s+)?(?:assumption|supposition|hypothesis)|which\s+is\s+impossible)\b|矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该)?假设|(?:原|上述|该)?假设不成立/iu;
+const NEGATED_PROOF_ROLE = [
+  /\b(?:not|no|without|never|[a-z]+n['’]t|avoid)\s+(?:(?:a|an|the|actual|derived|resulting|logical|really|necessarily|for|by|(?:derive|find|reach|yield)\w*|lead\s+to)\s+)*(?:assum\w*|suppos\w*|hypothesi[sz]\w*|contradict\w*|absurd\w*|reductio|(?:reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*)\s+(?:the\s+)?(?:assumption|supposition|hypothesis))\b/giu,
+  /\bcontradiction\s+(?:(?:is|was|has|had)\s+)?(?:not|never)\s+(?:been\s+)?(?:derived|found|reached|established|shown)\b/giu,
+  /(?:无|没有|不会|并非|不|未)(?:\s|推出|得到|得出|导出)*(?:矛盾|归谬|荒谬|反证)/gu,
+];
+
+export function proofContextSupportsRealScalarCheck(texts: readonly string[]): boolean {
+  return !texts.some(text => NON_REAL_SCALAR_CONTEXT.some(pattern => pattern.test(text)));
 }
 
-/** A real-scalar proof check requires the equation to be asserted in that context. */
-export function proofContextSupportsRealScalarCheck(
-  steps: readonly ProofStep[], step: ProofStep, outcome: "correct" | "incorrect",
-): boolean {
-  if (steps.some(candidate => stepMentions(candidate, NON_REAL_SCALAR_CONTEXT))) return false;
-  if (outcome === "incorrect") return true;
-  if (stepMentions(step, EXPLICIT_COUNTERFACTUAL)) return false;
-  const supposition = steps.some(candidate =>
-    candidate.stepIndex <= step.stepIndex && stepMentions(candidate, PROOF_SUPPOSITION));
-  const refutation = supposition && steps.some(candidate =>
-    PROOF_REFUTATION.test(candidate.feedback) ||
-    (candidate.stepIndex >= step.stepIndex && PROOF_REFUTATION.test(candidate.claim)));
-  return !refutation;
+/** Only a discharged supposition scopes other steps. An explicitly counterfactual step can stand on its own. */
+export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlySet<ProofStep> {
+  const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
+  const exempt = new Set<ProofStep>();
+  let openPos: number | undefined;
+  for (const [pos, step] of ordered.entries()) {
+    const texts = [step.claim, step.feedback].map(text => NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), text));
+    const withoutIntent = texts.map(text => text.replace(CONTRADICTION_INTENT, " "));
+    const hasIntent = texts.some((text, index) => text !== withoutIntent[index]);
+    if (openPos === undefined && (hasIntent || texts.some(text => PROOF_SUPPOSITION.test(text)))) openPos = pos;
+
+    if (hasIntent || (ordered.length === 1 && withoutIntent.some(text => EXPLICIT_COUNTERFACTUAL.test(text)))) {
+      exempt.add(step);
+    }
+    if (openPos !== undefined && withoutIntent.some(text => CONTRADICTION_DISCHARGE.test(text))) {
+      for (let index = openPos; index <= pos; index++) exempt.add(ordered[index]!);
+      openPos = undefined;
+    }
+  }
+  return exempt;
 }

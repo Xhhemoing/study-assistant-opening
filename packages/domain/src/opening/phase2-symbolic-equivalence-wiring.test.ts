@@ -1,6 +1,8 @@
-import type { AiGradingProposal, ProofFeedback } from "@aistudy/contracts";
+import type { AiEvaluation, AiGradingProposal, ProofFeedback } from "@aistudy/contracts";
 import { describe, expect, it } from "vitest";
-import { acceptedAiGradingOutcome } from "./ai-evaluation";
+import { acceptedAiGradingOutcome, evaluateAiCorrectness } from "./ai-evaluation";
+import { observation } from "./evidence-eligibility-fixtures";
+import type { EvidenceEligibilityReasonCode } from "./evidence-eligibility-types";
 import { proofFeedbackAllowsOutcome } from "./proof-feedback";
 import { verifyStandaloneProofEquationClaim, verifySymbolicStepEquivalence } from "./symbolic-answer-bridge";
 import { evaluateTeachingAnswer as check } from "./teaching-answer-check";
@@ -399,15 +401,48 @@ function proof(claim: string, verdict: "correct" | "incorrect", required = true)
   };
 }
 
-function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedback) {
-  const proposal: AiGradingProposal = {
+type ProposalContext = Partial<Pick<AiGradingProposal, "feedback" | "criteria" | "transcription">>;
+
+function gradingProposal(outcome: "correct" | "incorrect", proofFeedback: ProofFeedback, context?: ProposalContext): AiGradingProposal {
+  return {
     outcome, proofFeedback, confidence: 1, questionMatch: true, feedback: "Check the proof.",
     criteria: [{ label: "Step", verdict: outcome, feedback: "Check the equality." }],
+    ...context,
   };
-  return acceptedAiGradingOutcome(proposal);
+}
+
+function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedback, context?: ProposalContext) {
+  return acceptedAiGradingOutcome(gradingProposal(outcome, proofFeedback, context));
+}
+
+function incorrectEquality(claim: string, feedback = "The equality is incorrect."): ProofFeedback {
+  const result = proof(claim, "incorrect");
+  result.steps[0]!.feedback = feedback;
+  return result;
 }
 
 describe("symbolic proof feedback", () => {
+  it.each([
+    String.raw`$\frac{d}{dx}(\sqrt{x})=2=3$`,
+    String.raw`$\int \sqrt{x}\,dx=2=3$`,
+    String.raw`$\int \sqrt{x}\,dx=x+C=x+C+1$`,
+    String.raw`$\int \sqrt{x}\,dx=2=2+C=3$`,
+  ])("vetoes an impossible RHS chain even when the calculus target abstains: %s", claim => {
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "inequivalent", unconditional: false });
+    expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+  });
+
+  it.each([
+    String.raw`$\frac{d}{dx}(\sqrt{x})=2=x+1$`,
+    String.raw`$\frac{d}{dx}(\sqrt{y})=2=3$`,
+    String.raw`$\frac{d}{dx}(\sqrt{x+y})=2=3$`,
+    String.raw`$\frac{d}{dx}(\sqrt x)=2=3$`,
+    String.raw`$\int \sqrt{C}\,dC=2=3$`,
+    String.raw`$\int \sqrt{x}\,dx=x+C=x+2C$`,
+  ])("abstains on a potentially consistent RHS or invalid calculus header: %s", claim => {
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "unverified", unconditional: false });
+  });
+
   it.each(["2=3", "2=2x=3", "2x=2x+1", "2x+1=2x+2"])(
     "vetoes an impossible derivative equality chain %s", chain => {
       const claim = "$\\frac{d}{dx}(x^2)=" + chain + "$";
@@ -451,6 +486,70 @@ describe("symbolic proof feedback", () => {
     expect(adjudicate("correct", feedback)).toBe("unverified");
   });
 
+  it.each([
+    "x cannot be zero.", "x can't be zero.", String.raw`x \neq 0`, String.raw`x \ne 0`, "x != 0", "x ≠ 0",
+    "The alternative is false.", "That calculation is invalid.", "The condition fails.", "No solutions.",
+    "That value does not exist.", "This is not a contradiction.", "There is no contradiction.",
+    "Proceed without contradiction.", "这里无矛盾。", "这并不矛盾。", "This does not contradict the assumption.",
+  ])("does not let incidental feedback exempt a false calculation: %s", comment => {
+    const feedback = proof("Assume x is positive.", "correct");
+    feedback.steps[0]!.feedback = comment;
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "1=0" });
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it.each(["not a contradiction", "no contradiction", "without contradiction", "无矛盾", "不矛盾",
+    "We have not reached a contradiction.", "A contradiction has not been derived."])(
+    "does not treat a negated counterfactual role as discharge: %s", comment => {
+      const feedback = proof("Assume x is positive.", "correct");
+      feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "1=0", feedback: comment });
+      expect(adjudicate("correct", feedback)).toBe("unverified");
+    },
+  );
+
+  it.each([false, true])("ends the contradiction scope at the first discharge (reversed input: %s)", reverse => {
+    const feedback = proof("Assume x+1=x.", "correct");
+    const step = feedback.steps[0]!;
+    feedback.steps.push({ ...step, stepIndex: 2, claim: "1=0" },
+      { ...step, stepIndex: 3, claim: "Reject the assumption." },
+      { ...step, stepIndex: 4, claim: "2=3" },
+      { ...step, stepIndex: 5, claim: "The assumption is false." });
+    if (reverse) feedback.steps.reverse();
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+    feedback.steps = feedback.steps.filter(({ stepIndex }) => stepIndex !== 4);
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
+  it("does not discharge a supposition when a contradiction is the goal", () => {
+    const feedback = proof("To derive a contradiction, assume x+1=x.", "correct");
+    const step = feedback.steps[0]!;
+    feedback.steps.push({ ...step, stepIndex: 2, claim: "1=0", feedback: "Subtract x." },
+      { ...step, stepIndex: 3, claim: "Reject the assumption." });
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
+  it("does not open a supposition when the feedback says to avoid assuming the conclusion", () => {
+    const feedback = proof("1=0", "correct");
+    const step = feedback.steps[0]!;
+    step.feedback = "Do not assume the conclusion.";
+    feedback.steps.push({ ...step, stepIndex: 2, claim: "This is the derived contradiction." });
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it("permits a new contradiction argument after an earlier discharge", () => {
+    const feedback = proof("If x+1=x, subtract x.", "correct");
+    const step = feedback.steps[0]!;
+    feedback.steps = [
+      { ...step, stepIndex: 6, claim: "The hypothesis is impossible." },
+      { ...step, stepIndex: 3, claim: "1=0", feedback: "This is the derived contradiction." },
+      step,
+      { ...step, stepIndex: 5, claim: "2=3" },
+      { ...step, stepIndex: 4, claim: "Suppose y+2=y+3." },
+      { ...step, stepIndex: 2, claim: "x+1=x", feedback: "Use the supposition." },
+    ];
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
   it("requires a supposition before the refuted step", () => {
     const feedback = proof("1=0", "correct");
     feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "Assume x=2 for contradiction." },
@@ -464,8 +563,10 @@ describe("symbolic proof feedback", () => {
     expect(adjudicate("correct", feedback)).toBe("unverified");
   });
 
-  it.each(["Work in the field F₂", "\\mathbb{F}_{2}", "GF(2)", "\\mathbb{Z}/2\\mathbb{Z}",
-    "modulo 2", "\\pmod{2}", "char 2", "boolean algebra", "有限域", "模 2", "matrix algebra", "linear operators"])(
+  it.each(["Work in the field F₂", "𝔽₂", "F_2", "\\mathbb{F}_{2}", "GF(2)", "GF(p^n)",
+    "ℤ/2ℤ", "Z/2Z", "\\mathbb{Z}/2\\mathbb{Z}", "ℤ/pℤ", "Z/(2)", "ℤ₂", "Z_2", "F_p",
+    "modulo 2", "\\pmod{2}", "char 2", "characteristic = p", "特征为 2", "finite field", "p-adic field",
+    "fields of fractions", "ℂ", "\\mathbb{H}", "boolean algebra", "有限域", "复数域", "模 2", "matrix algebra", "linear operators"])(
     "does not apply real-scalar verification in context %s", context => {
       const feedback = proof(context, "correct", false);
       feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: true, claim: "1+1=0" });
@@ -473,10 +574,41 @@ describe("symbolic proof feedback", () => {
     },
   );
 
+  it.each(["field", "fields", "characteristic 0", "char 0", "特征为 0", "field of real numbers",
+    "real field", "real number field", "ordered field", "over ℝ", "over \\mathbb{R}", "实数域"])(
+    "still checks a false real-scalar calculation in %s", domain => {
+      const feedback = proof(`Work in the ${domain}.`, "correct", false);
+      feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: true, claim: "1=0" });
+      expect(adjudicate("correct", feedback)).toBe("unverified");
+      expect(adjudicate("correct", proof("1=0", "correct"), { feedback: domain })).toBe("unverified");
+    },
+  );
+
+  it.each<ProposalContext>([
+    { feedback: "The calculation is in F₂." },
+    { feedback: "The calculation is in ℤ/2ℤ." },
+    { criteria: [{ label: "Result", verdict: "correct", feedback: "Work in ℤ/2ℤ." }] },
+    { criteria: [{ label: "Arithmetic in F₂", verdict: "correct", feedback: "The result follows." }] },
+    { transcription: "Work in ℤ/2ℤ." },
+  ])("uses the proposal-level domain in both grading entry points: %o", context => {
+    const proposal = gradingProposal("correct", proof("1+1=0", "correct"), context);
+    expect(acceptedAiGradingOutcome(proposal)).toBe("correct");
+    const observed = { ...observation, observationId: "observation-1", outcome: "correct" as const };
+    const evaluation: AiEvaluation = {
+      ...proposal, observationId: observed.observationId, attemptId: observed.attemptId!,
+      problemId: observed.problemId!, itemVersionId: observed.itemVersionId!,
+      requirementKey: observed.requirementKey!, evaluatorVersion: "ai-rubric-v1", modelLabel: null,
+      evaluatedAt: "2026-10-21T08:00:00Z",
+    };
+    const reasons = new Set<EvidenceEligibilityReasonCode>();
+    expect(evaluateAiCorrectness(observed, evaluation, reasons)).toBe("unknown");
+    expect(reasons.has("ai_graded_correct")).toBe(true);
+  });
+
   it("retains a negative proof verdict when feedback establishes modular arithmetic", () => {
     const claim = "sqrt(4) = 2";
     expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "equivalent", unconditional: true });
-    const feedback = proof(claim, "incorrect");
+    const feedback = incorrectEquality(claim);
     feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: false, claim: "Check the choice of root.",
       feedback: "No principal square root was specified in F₅." });
     expect(proofFeedbackAllowsOutcome("incorrect", feedback)).toBe(true);
@@ -506,7 +638,7 @@ describe("symbolic proof feedback", () => {
   it("corroborates an integral equality chain whose candidates agree for the same C", () => {
     const claim = "\\int 2x\\,dx = (x+1)^2 + C - 2x - 1 = x^2 + C";
     expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "equivalent", unconditional: true });
-    expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("unverified");
+    expect(adjudicate("incorrect", incorrectEquality(claim))).toBe("unverified");
   });
 
   it.each([
@@ -567,23 +699,55 @@ describe("symbolic proof feedback", () => {
   ])("checks equality boundaries in %s", (claim, status) => {
     expect(verifyStandaloneProofEquationClaim(claim).status).toBe(status);
     if (status === "inequivalent") expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
-    if (status === "equivalent") expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("unverified");
+    if (status === "equivalent") expect(adjudicate("incorrect", incorrectEquality(claim))).toBe("unverified");
   });
 
   it.each([
     "(x+1)^2 = x^2 + 2x + 1",
     String.raw`\frac{d}{dx}(x^3) = 3x^2`,
     String.raw`\int 2x\,dx = x^2 + C`,
-  ])("vetoes a negative verdict justified only by an unconditional identity %s", claim => {
-    expect(proofFeedbackAllowsOutcome("incorrect", proof(claim, "incorrect"))).toBe(false);
-    expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("unverified");
+  ])("vetoes a negative verdict that disputes an unconditional identity %s", claim => {
+    expect(proofFeedbackAllowsOutcome("incorrect", incorrectEquality(claim))).toBe(false);
+    expect(adjudicate("incorrect", incorrectEquality(claim))).toBe("unverified");
+  });
+
+  it.each([
+    "You assumed the identity you were asked to prove.", "Circular reasoning.", "Begs the question.",
+    "Restates the conclusion.", "Missing justification.", "Skipped steps.", "The equality does not follow.",
+    "Although the equality holds, your reasoning is incorrect.", "The equality is not incorrect.",
+    "Although the identity is true, the calculation is wrong as a justification.",
+    "You miscalculated nothing, but skipped the proof.", "循环论证。", "未证先用。", "缺少推导。", "跳步。", "等式成立，但缺少推导。",
+    "Check the step.",
+  ])("retains an incorrect proof verdict when feedback does not dispute the identity: %s", comment => {
+    const feedback = incorrectEquality("(x+1)^2=x^2+2x+1", comment);
+    expect(adjudicate("incorrect", feedback, { feedback: comment })).toBe("incorrect");
+  });
+
+  it.each([
+    "The identity is false.", "Your expansion is wrong.", "The derivative does not match.", "The sides are not equal.",
+    "Algebraic error.", "Missing constant.", "You miscalculated the result.", "The left side ≠ the right side.",
+    "等式不成立。", "展开错误。", "漏项。",
+  ])("vetoes a mathematical dispute in the repair prompt: %s", repairPrompt => {
+    const feedback = proof("(x+1)^2=x^2+2x+1", "incorrect");
+    feedback.steps[0]!.repairPrompt = repairPrompt;
+    expect(adjudicate("incorrect", feedback)).toBe("unverified");
+  });
+
+  it("uses proposal feedback and incorrect criteria to identify a mathematical dispute", () => {
+    const feedback = proof("(x+1)^2=x^2+2x+1", "incorrect");
+    const dispute = "The calculation is incorrect.";
+    const method = { label: "Method", verdict: "incorrect" as const, feedback: "Missing justification." };
+    expect(adjudicate("incorrect", feedback, { feedback: dispute })).toBe("unverified");
+    expect(adjudicate("incorrect", feedback, { criteria: [{ ...method, feedback: dispute }] })).toBe("unverified");
+    expect(adjudicate("incorrect", feedback, { criteria: [method, { ...method, verdict: "correct", feedback: dispute }] }))
+      .toBe("incorrect");
   });
 
   it.each(["x/x = 1", "1/(x^2+1) = 1/(1+x^2)", "sqrt(x)^2 = x", "假设 x=1，得 0=1，矛盾",
     "设 Av=λv", "两边同乘非零常数", "If x=1 then x^2=1", "x!=1", "(x+1)^2=x^2+1"])(
     "retains a negative verdict when %s is not an unconditional verified identity", claim => {
-      expect(proofFeedbackAllowsOutcome("incorrect", proof(claim, "incorrect"))).toBe(true);
-      expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("incorrect");
+      expect(proofFeedbackAllowsOutcome("incorrect", incorrectEquality(claim))).toBe(true);
+      expect(adjudicate("incorrect", incorrectEquality(claim))).toBe("incorrect");
     },
   );
 
