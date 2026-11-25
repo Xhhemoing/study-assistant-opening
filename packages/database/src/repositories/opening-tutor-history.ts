@@ -6,15 +6,15 @@ import { createOpeningPrivacyRepository } from "./opening-privacy";
 import {
   contextSourceRefsIncluded, isLineageUuid, lineageUuid, memoryOnlyRefSourceIds, mergeContextSourceRefs, resolveMemoryDependencyStatus,
   parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnDirectSourcesVersioned,
-  turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse, turnMemoryOnlyBackingIds, turnSessionMaterialIds,
+  turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse, turnSessionMaterialIds,
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
 import {
-  hasSavedMemoryReferences, mergeTutorMisconceptionLineages, readActiveTutorMisconceptionLineages,
+  hasSavedMemoryReferences, mergeTutorMisconceptionLineages, originMemoryOnlyBackingIds, readActiveTutorMisconceptionLineages,
   readMemoryMisconceptionAuthorities, readSavedTutorMisconceptionLineage, readTurnMisconceptionMemoryOriginBatches,
   savedTurnUsesInactiveMisconception, upperBoundMemoryOriginPosition,
-  type MemoryMisconceptionAuthority, type TurnMisconceptionMemoryOriginBatches, type TutorMisconceptionLineage,
+  type MemoryMisconceptionAuthority, type TurnMemoryOrigin, type TurnMisconceptionMemoryOriginBatches, type TutorMisconceptionLineage,
 } from "./v3-bitemporal-misconception-memory";
 
 type HistoryTurn = { role: "user" | "assistant"; text: string };
@@ -103,11 +103,11 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
           || ${sessionIds("a")} AS assistant_direct_ids,`}
         ${requireDestinationSessionMaterials ? sql`${sessionIds("u")} || ${sessionIds("a")} AS session_material_ids,` : sql``}
         CASE WHEN a.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-          THEN ${turnMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, assistantCourse, standaloneSessions, scope)}
+          THEN ${originMemoryOnlyBackingIds(sql, () => sql`a.context_source_refs`, assistantCourse, standaloneSessions, () => sql`a.created_at`, scope, false)}
           ELSE '[]'::jsonb END AS memory_backing_ids,
         CASE WHEN u.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-          THEN ${turnMemoryOnlyBackingIds(sql, () => sql`u.context_source_refs`, priorCourse,
-            () => turnHasStandaloneSession(sql, () => sql`u`, () => sql`c.owner_user_id`), scope)}
+          THEN ${originMemoryOnlyBackingIds(sql, () => sql`u.context_source_refs`, priorCourse,
+            () => turnHasStandaloneSession(sql, () => sql`u`, () => sql`c.owner_user_id`), () => sql`u.created_at`, scope, false)}
           ELSE '[]'::jsonb END AS user_memory_backing_ids,
         NOT (${recordReferents ? sql`true` : sql`${turnHasOwnedSession(sql, () => sql`u`, () => sql`c.owner_user_id`)}
           AND ${turnHasOwnedSession(sql, () => sql`a`, () => sql`c.owner_user_id`)}`}
@@ -133,6 +133,26 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         AND (${recordReferents} OR (NOT u.query_system AND NOT a.query_system AND a.system_query IS NULL)
           ${includeCurrentLineage ? sql`OR u.id=current.id` : sql``})
         ${ancestors ? sql`` : sql`AND NOT (current.source_ids && ${excludedSourceIds}::uuid[])`}
+    ), current_turns AS MATERIALIZED (
+      ${recordReferents ? sql`SELECT NULL::uuid AS current_id, NULL::uuid AS conversation_id,
+        NULL::timestamptz AS current_created_at, NULL::text AS current_pos_us,
+        false AS current_query_system, NULL::uuid AS current_course_id,
+        NULL::text AS material_use, NULL::int AS current_privacy_epoch WHERE false` : sql`
+      SELECT current.id AS current_id,
+        c.id AS conversation_id,
+        current.created_at AS current_created_at,
+        (extract(epoch FROM current.created_at) * 1000000)::bigint::text AS current_pos_us,
+        current.query_system AS current_query_system,
+        ${currentCourse()} AS current_course_id,
+        ${currentUse()} AS material_use,
+        w.privacy_epoch AS current_privacy_epoch
+      FROM opening_turns current
+      JOIN opening_conversations c ON c.id = current.conversation_id
+      JOIN workspaces w ON w.id = c.workspace_id
+      WHERE current.id = ANY(${currentTurnIds}::uuid[]) AND current.role = 'user'
+        AND current.workspace_id = ${scope.workspaceId} AND c.workspace_id = ${scope.workspaceId}
+        AND c.owner_user_id = ${scope.ownerUserId}
+        ${ancestors ? sql`` : sql`AND NOT (current.source_ids && ${excludedSourceIds}::uuid[])`}`}
     ), conv_scan AS MATERIALIZED (
       ${recordReferents ? sql`SELECT NULL::uuid AS conversation_id, NULL::uuid AS assistant_id,
         false AS non_query, NULL::timestamptz AS pos_at, NULL::uuid AS pos_id,
@@ -157,7 +177,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         ) END AS hashless_course_id,
         (${hasSavedMemoryReferences(sql, () => sql`dt.context_source_refs`)}
           OR (du.id IS NOT NULL AND ${hasSavedMemoryReferences(sql, () => sql`du.context_source_refs`)})) AS has_mem
-      FROM (SELECT DISTINCT conversation_id FROM prior) conv
+      FROM (SELECT DISTINCT conversation_id FROM current_turns) conv
       JOIN opening_conversations conv_c ON conv_c.id = conv.conversation_id AND conv_c.workspace_id = ${scope.workspaceId}
       JOIN opening_turns dt ON dt.workspace_id = ${scope.workspaceId} AND dt.conversation_id = conv.conversation_id
       LEFT JOIN opening_tutor_jobs dj ON dj.assistant_turn_id = dt.id
@@ -234,7 +254,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         first_hm.pos_at AS first_hashless_mismatch_at, first_hm.pos_id AS first_hashless_mismatch_id,
         first_mem.pos_at AS first_memory_at, first_mem.pos_id AS first_memory_id,
         COALESCE(hashes.conv_hashes, '[]'::jsonb) AS conv_hashes
-      FROM (SELECT DISTINCT conversation_id FROM prior) conv
+      FROM (SELECT DISTINCT conversation_id FROM current_turns) conv
       LEFT JOIN first_inv ON first_inv.conversation_id = conv.conversation_id
       LEFT JOIN first_sc ON first_sc.conversation_id = conv.conversation_id
       LEFT JOIN second_sc ON second_sc.conversation_id = conv.conversation_id
@@ -252,13 +272,6 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
             OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (prior.created_at, prior.id)
               AND prior.assistant_course_id IS DISTINCT FROM ch.first_scoped_course_id)
           ELSE false END`} AS assistant_misconception_invalid,
-        ${ancestors ? sql`CASE WHEN NOT prior.current_query_system THEN
-          (ch.first_invalid_id IS NOT NULL AND (ch.first_invalid_at, ch.first_invalid_id) < (prior.current_created_at, prior.current_id))
-          OR (ch.second_scoped_id IS NOT NULL AND (ch.second_scoped_at, ch.second_scoped_id) < (prior.current_created_at, prior.current_id))
-          OR (ch.first_hashless_mismatch_id IS NOT NULL AND (ch.first_hashless_mismatch_at, ch.first_hashless_mismatch_id) <= (prior.current_created_at, prior.current_id))
-          OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (prior.current_created_at, prior.current_id)
-            AND prior.current_course_id IS DISTINCT FROM ch.first_scoped_course_id)
-          ELSE false END` : sql`false`} AS current_misconception_invalid,
         ${recordReferents ? sql`false` : sql`(prior.assistant_intent_hash IS NULL AND (
           prior.own_has_memory
           OR (prior.query_system IS FALSE AND prior.system_query IS NULL
@@ -279,14 +292,67 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         AND cs_inv.assistant_id = prior.assistant_id
         AND cs_inv.is_invalid`}
     )
-    ${ancestors ? sql`SELECT evaluated.*,
+    ${ancestors ? sql`SELECT
+      ct.conversation_id,
+      ct.current_id,
+      evaluated.id,
+      evaluated.assistant_id,
+      evaluated.created_at,
+      ct.current_created_at,
+      ct.current_query_system,
+      evaluated.pos_us,
+      ct.current_pos_us,
+      evaluated.query_system,
+      evaluated.system_query,
+      ct.current_privacy_epoch,
+      evaluated.assistant_intent_hash,
+      evaluated.own_has_memory,
+      evaluated.user_source_refs,
+      evaluated.assistant_source_refs,
+      evaluated.assistant_citations,
+      evaluated.prior_course_id,
+      ct.current_course_id,
+      ct.material_use,
+      evaluated.prior_material_use,
+      evaluated.assistant_course_id,
+      evaluated.assistant_material_use,
+      evaluated.assistant_direct_versioned,
+      evaluated.user_direct_ids,
+      evaluated.assistant_direct_ids,
+      ${requireDestinationSessionMaterials ? sql`evaluated.session_material_ids,` : sql``}
+      evaluated.memory_backing_ids,
+      evaluated.user_memory_backing_ids,
+      evaluated.invalid,
+      evaluated.assistant_misconception_invalid,
+      CASE WHEN NOT ct.current_query_system THEN
+        (ch.first_invalid_id IS NOT NULL AND (ch.first_invalid_at, ch.first_invalid_id) < (ct.current_created_at, ct.current_id))
+        OR (ch.second_scoped_id IS NOT NULL AND (ch.second_scoped_at, ch.second_scoped_id) < (ct.current_created_at, ct.current_id))
+        OR (ch.first_hashless_mismatch_id IS NOT NULL AND (ch.first_hashless_mismatch_at, ch.first_hashless_mismatch_id) <= (ct.current_created_at, ct.current_id))
+        OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (ct.current_created_at, ct.current_id)
+          AND ct.current_course_id IS DISTINCT FROM ch.first_scoped_course_id)
+        ELSE false END AS current_misconception_invalid,
+      (NOT ct.current_query_system
+        AND ch.first_memory_id IS NOT NULL
+        AND (ch.first_memory_at, ch.first_memory_id) < (ct.current_created_at, ct.current_id)) AS current_inherits_memory,
+      CASE WHEN ch.first_scoped_id IS NOT NULL
+        AND (ch.first_scoped_at, ch.first_scoped_id) < (ct.current_created_at, ct.current_id)
+        THEN ch.first_scoped_course_id END AS first_scoped_course_id,
+      evaluated.inherits_memory,
+      evaluated.origin_allowed,
+      evaluated.current_allowed,
       CASE WHEN row_number() OVER (
-        PARTITION BY evaluated.conversation_id, (evaluated.id = evaluated.current_id)
-        ORDER BY evaluated.created_at DESC, evaluated.id DESC
+        PARTITION BY ct.conversation_id, (evaluated.id IS NOT DISTINCT FROM ct.current_id)
+        ORDER BY evaluated.created_at DESC NULLS LAST, evaluated.id DESC NULLS LAST
       ) = 1 THEN ch.conv_hashes END AS conv_misconception_hashes
-      FROM evaluated
-      LEFT JOIN conv_hist ch ON ch.conversation_id = evaluated.conversation_id
-      ORDER BY evaluated.created_at DESC, evaluated.id DESC` : sql`,
+      FROM current_turns ct
+      LEFT JOIN evaluated ON evaluated.current_id = ct.current_id
+      LEFT JOIN conv_hist ch ON ch.conversation_id = ct.conversation_id
+      WHERE evaluated.id IS NOT NULL
+        OR ch.first_invalid_id IS NOT NULL
+        OR ch.first_scoped_id IS NOT NULL
+        OR ch.first_memory_id IS NOT NULL
+        OR ch.conv_hashes <> '[]'::jsonb
+      ORDER BY evaluated.created_at DESC NULLS LAST, evaluated.id DESC NULLS LAST` : sql`,
     cutoff AS (
       SELECT p.created_at, p.id FROM evaluated p
       WHERE p.invalid IS TRUE OR p.assistant_direct_versioned IS NOT TRUE OR p.origin_allowed IS NOT TRUE
@@ -501,9 +567,33 @@ async function resolveExchangeMisconceptions(
 
 async function readInheritedExchangeMemories(
   sql: Db, scope: OpeningScope, rows: HistoryRows, exchangeAssistantIds: ReadonlySet<string>,
+  extraTurnIds: readonly string[] = [],
 ): Promise<TurnMisconceptionMemoryOriginBatches> {
-  const ids = [...new Set<string>(rows.filter(row => row.inherits_memory === true).map(row => String(row.assistant_id)))];
+  const ids = [...new Set<string>([
+    ...rows.filter(row => row.inherits_memory === true).map(row => String(row.assistant_id)),
+    ...extraTurnIds,
+  ])];
   return readTurnMisconceptionMemoryOriginBatches(sql, scope, ids, { excludeAssistantIds: exchangeAssistantIds });
+}
+
+function mergeDirectOriginBackings(
+  rowBackings: string[][] | undefined,
+  refs: unknown,
+  directOrigin: TurnMemoryOrigin | undefined,
+): string[][] | null {
+  const expectedSlots = memoryOnlyRefSourceIds(refs).length;
+  if (expectedSlots === 0) return rowBackings ?? [];
+  if (directOrigin) {
+    if (directOrigin.backings.length !== expectedSlots) return null;
+    if (!rowBackings || rowBackings.length === 0) return directOrigin.backings;
+    if (rowBackings.length !== expectedSlots) return null;
+    return rowBackings.map((slot, idx) => {
+      const allowed = new Set(directOrigin.backings[idx]!.map(id => id.toLowerCase()));
+      return slot.filter(id => allowed.has(id.toLowerCase()));
+    });
+  }
+  if (rowBackings === undefined) return [];
+  return rowBackings.length === expectedSlots ? rowBackings : null;
 }
 
 function directExchangeMemoryAuthority(
@@ -518,6 +608,19 @@ function directExchangeMemoryAuthority(
   const userIds = row.user_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.user_source_refs);
   const assistantIds = row.assistant_source_refs === undefined ? [] : parseContextMemoryDependencyIds(row.assistant_source_refs);
   if (!userIds || !assistantIds) return null;
+  const directUserOrigin = target?.direct.find(
+    (origin): origin is TurnMemoryOrigin => Boolean(origin && !origin.historical && origin.isPairedUser),
+  );
+  const directAssistantOrigin = target?.direct.find(
+    (origin): origin is TurnMemoryOrigin => Boolean(origin && !origin.historical && !origin.isPairedUser),
+  );
+  const userBackings = mergeDirectOriginBackings(row.user_memory_backing_ids, row.user_source_refs, directUserOrigin);
+  const assistantBackings = recordReferents
+    ? []
+    : mergeDirectOriginBackings(row.memory_backing_ids, row.assistant_source_refs, directAssistantOrigin);
+  if (!userBackings || !assistantBackings) return null;
+  const hasUserBackingEvidence = row.user_memory_backing_ids !== undefined || directUserOrigin !== undefined;
+  const hasAssistantBackingEvidence = !recordReferents && (row.memory_backing_ids !== undefined || directAssistantOrigin !== undefined);
   const mockHistorical = target && batches && batches.byConversation.size === 0
     ? target.direct.flatMap(origin => origin && origin.historical
       && !exchangeAssistantIds.has(String(origin.assistantTurnId ?? origin.id)) ? [{
@@ -535,14 +638,14 @@ function directExchangeMemoryAuthority(
     { courseId: row.prior_course_id ?? null,
       ...(row.assistant_course_id === undefined ? {} : { extraMisconceptionCourses: [normalizeHistoryCourse(row.assistant_course_id)] }),
       materialUse: row.prior_material_use ?? "citation",
-      memoryIds: row.user_memory_backing_ids === undefined ? [] : userIds, backings: row.user_memory_backing_ids ?? [],
-      backingSourceIds: userIds.length && row.user_memory_backing_ids !== undefined
+      memoryIds: hasUserBackingEvidence ? userIds : [], backings: userBackings,
+      backingSourceIds: userIds.length && hasUserBackingEvidence
         ? memoryOnlyRefSourceIds(row.user_source_refs) : undefined,
       sourceIds: [], expiresAt: Infinity },
     { courseId: row.assistant_course_id ?? null, materialUse: row.assistant_material_use ?? "citation",
-      memoryIds: recordReferents || row.memory_backing_ids === undefined ? [] : assistantIds,
-      backings: recordReferents ? [] : (row.memory_backing_ids ?? []),
-      backingSourceIds: !recordReferents && assistantIds.length && row.memory_backing_ids !== undefined
+      memoryIds: hasAssistantBackingEvidence ? assistantIds : [],
+      backings: assistantBackings,
+      backingSourceIds: assistantIds.length && hasAssistantBackingEvidence
         ? memoryOnlyRefSourceIds(row.assistant_source_refs) : undefined,
       sourceIds: [],
       expiresAt: recordReferents || row.memory_temporary_expires_at == null ? Infinity : new Date(row.memory_temporary_expires_at).getTime() },
@@ -1105,9 +1208,22 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       if (current.courseId) rules?.collectCourseIds?.add(current.courseId);
     }
   }
-  const priors = rows.filter(row => row.id !== row.current_id);
+  const priors = rows.filter(row => row.id !== null && row.id !== row.current_id);
+  const currentOnlyRows = rows.filter(row => row.id === null);
   const exchangeAssistantIds = new Set(priors.flatMap(row => row.assistant_id ? [String(row.assistant_id)] : []));
-  const batches = await readInheritedExchangeMemories(sql, scope, priors, exchangeAssistantIds);
+  const coveredInheritedConvs = new Set(
+    priors.flatMap(row => row.inherits_memory === true && typeof row.conversation_id === "string" ? [row.conversation_id] : []),
+  );
+  const extraCurrentMemTurnIds = [...new Set(
+    rows.flatMap(row =>
+      !explicitCurrentIds.has(row.current_id)
+      && row.current_inherits_memory === true
+      && (typeof row.conversation_id !== "string" || !coveredInheritedConvs.has(row.conversation_id))
+        ? [String(row.current_id)]
+        : [],
+    ),
+  )];
+  const batches = await readInheritedExchangeMemories(sql, scope, priors, exchangeAssistantIds, extraCurrentMemTurnIds);
   const checkedRows = rules?.skipPriorMisconceptions ? [] : priors.filter(row =>
     authority.get(row.current_id) !== null && !explicitCurrentIds.has(row.current_id));
   const checkedLineages = await resolveExchangeMisconceptions(sql, scope, checkedRows, preloadedConvHashes);
@@ -1168,6 +1284,62 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     coursesByLimit: Map<number, (string | null)[]>;
   };
   const pendingConvSweeps = new Map<string, Map<string, ConvSweepState>>();
+  const ensureConvSweepState = (
+    currentId: string,
+    convId: string,
+    checkPriorScope: boolean,
+    currentCourseId: string | null,
+    currentPosUs: bigint | undefined,
+    currentPosId: string,
+  ): ConvSweepState => {
+    let convMap = pendingConvSweeps.get(currentId);
+    if (!convMap) {
+      convMap = new Map();
+      pendingConvSweeps.set(currentId, convMap);
+    }
+    let state = convMap.get(convId);
+    if (!state) {
+      state = {
+        convId,
+        checkPriorScope,
+        currentCourseId,
+        currentPosUs,
+        currentPosId,
+        maxLimit: 0,
+        coursesByLimit: new Map(),
+      };
+      convMap.set(convId, state);
+    }
+    return state;
+  };
+
+  for (const row of currentOnlyRows) {
+    if (authority.get(row.current_id) === null) continue;
+    const checkPriorScope = !explicitCurrentIds.has(row.current_id) && !rules?.skipPriorMisconceptions;
+    if (checkPriorScope && row.current_misconception_invalid === true) {
+      authority.set(row.current_id, null);
+      continue;
+    }
+    if (checkPriorScope && typeof row.first_scoped_course_id === "string") {
+      rules?.collectCourseIds?.add(row.first_scoped_course_id);
+    }
+    if (typeof row.conversation_id === "string") {
+      const hasConvItems = (batches.byConversation.get(row.conversation_id)?.length ?? 0) > 0;
+      if (
+        (!explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true)
+        || (checkPriorScope && (jcByConv.has(row.conversation_id) || hasConvItems))
+      ) {
+        ensureConvSweepState(
+          row.current_id,
+          row.conversation_id,
+          checkPriorScope,
+          row.current_course_id ?? null,
+          row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
+          String(row.current_id).toLowerCase(),
+        );
+      }
+    }
+  }
 
   for (const row of priors) {
     const entries = authority.get(row.current_id);
@@ -1190,40 +1362,40 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       authority.set(row.current_id, null);
       continue;
     }
-    if (row.inherits_memory === true && row.conversation_id && row.pos_us !== undefined && row.id !== undefined) {
+    if (checkPriorScope && typeof row.first_scoped_course_id === "string") {
+      rules?.collectCourseIds?.add(row.first_scoped_course_id);
+    }
+    if (typeof row.conversation_id === "string") {
       const convItems = batches.byConversation.get(row.conversation_id) ?? [];
-      const limit = upperBoundMemoryOriginPosition(convItems, BigInt(row.pos_us), String(row.id).toLowerCase());
-      if ((firstUnresolvedByConv.get(row.conversation_id) ?? Infinity) < limit) {
-        authority.set(row.current_id, null);
-        continue;
-      }
-      if (limit > 0) {
-        const assistantCourse = normalizeHistoryCourse(row.assistant_course_id ?? null);
-        let convMap = pendingConvSweeps.get(row.current_id);
-        if (!convMap) {
-          convMap = new Map();
-          pendingConvSweeps.set(row.current_id, convMap);
-        }
-        let state = convMap.get(row.conversation_id);
-        if (!state) {
-          state = {
-            convId: row.conversation_id,
-            checkPriorScope,
-            currentCourseId: row.current_course_id ?? null,
-            currentPosUs: row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
-            currentPosId: String(row.current_id).toLowerCase(),
-            maxLimit: 0,
-            coursesByLimit: new Map(),
-          };
-          convMap.set(row.conversation_id, state);
-        }
-        if (limit > state.maxLimit) state.maxLimit = limit;
-        const mergedAtLimit = mergeMisconceptionCourses(
-          state.coursesByLimit.get(limit),
-          assistantCourse,
-          ...(checkPriorScope ? [row.current_course_id ?? null, ...requiredCourses] : []),
+      const shouldSweep = row.inherits_memory === true
+        || (!explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true)
+        || (checkPriorScope && (jcByConv.has(row.conversation_id) || convItems.length > 0));
+      if (shouldSweep) {
+        const state = ensureConvSweepState(
+          row.current_id,
+          row.conversation_id,
+          checkPriorScope,
+          row.current_course_id ?? null,
+          row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
+          String(row.current_id).toLowerCase(),
         );
-        if (mergedAtLimit) state.coursesByLimit.set(limit, mergedAtLimit);
+        if (row.inherits_memory === true && row.pos_us !== undefined && row.id !== undefined) {
+          const limit = upperBoundMemoryOriginPosition(convItems, BigInt(row.pos_us), String(row.id).toLowerCase());
+          if ((firstUnresolvedByConv.get(row.conversation_id) ?? Infinity) < limit) {
+            authority.set(row.current_id, null);
+            continue;
+          }
+          if (limit > 0) {
+            if (limit > state.maxLimit) state.maxLimit = limit;
+            const assistantCourse = normalizeHistoryCourse(row.assistant_course_id ?? null);
+            const mergedAtLimit = mergeMisconceptionCourses(
+              state.coursesByLimit.get(limit),
+              assistantCourse,
+              ...(checkPriorScope ? [row.current_course_id ?? null, ...requiredCourses] : []),
+            );
+            if (mergedAtLimit) state.coursesByLimit.set(limit, mergedAtLimit);
+          }
+        }
       }
     }
     const [userAuthority, assistantAuthority] = memoryAuthority;
@@ -1283,7 +1455,16 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const emitted = new Map<string, HistoryAncestorAuthority>();
     let invalidated = false;
     for (const state of convMap.values()) {
+      const convItems = batches.byConversation.get(state.convId) ?? [];
       if (state.checkPriorScope) {
+        if (state.currentPosUs !== undefined && convItems.length > 0) {
+          const cOrigLimit = upperBoundMemoryOriginPosition(convItems, state.currentPosUs, state.currentPosId);
+          if (cOrigLimit > 0) {
+            if (cOrigLimit > state.maxLimit) state.maxLimit = cOrigLimit;
+            const mergedCurrent = mergeMisconceptionCourses(state.coursesByLimit.get(cOrigLimit), state.currentCourseId);
+            if (mergedCurrent) state.coursesByLimit.set(cOrigLimit, mergedCurrent);
+          }
+        }
         const jcInfo = jcByConv.get(state.convId);
         if (jcInfo) {
           const cEnd = state.currentPosUs !== undefined
@@ -1304,7 +1485,6 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
         invalidated = true;
         break;
       }
-      const convItems = batches.byConversation.get(state.convId) ?? [];
       let runningCourses: (string | null)[] | undefined;
       for (let j = state.maxLimit - 1; j >= 0; j--) {
         const atLimit = state.coursesByLimit.get(j + 1);

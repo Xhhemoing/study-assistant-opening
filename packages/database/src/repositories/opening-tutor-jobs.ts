@@ -1732,6 +1732,18 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             OFFSET 0
           ) prior ON true
           WHERE prior_job.workspace_id=j.workspace_id AND prior_job.conversation_id=j.conversation_id
+          UNION ALL
+          SELECT 1 FROM opening_turns prior_a
+          LEFT JOIN opening_tutor_jobs prior_j ON prior_j.assistant_turn_id=prior_a.id
+            AND prior_j.workspace_id=prior_a.workspace_id AND prior_j.conversation_id=prior_a.conversation_id
+          LEFT JOIN opening_turns prior_u ON prior_u.id=prior_j.user_turn_id
+            AND prior_u.workspace_id=prior_a.workspace_id AND prior_u.conversation_id=prior_a.conversation_id
+            AND prior_u.role='user' AND prior_u.status='complete'
+          WHERE prior_a.workspace_id=j.workspace_id AND prior_a.conversation_id=j.conversation_id
+            AND prior_a.role='assistant' AND prior_a.status='complete'
+            AND NOT prior_a.query_system AND prior_a.system_query IS NULL
+            AND prior_u.id IS NULL
+            AND (prior_a.created_at, prior_a.id) < (t.created_at, t.id)
         )`;
         const [row] = lockMode === "FOR UPDATE"
           ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,t.learning_session_id,c.course_id,

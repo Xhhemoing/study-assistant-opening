@@ -379,7 +379,7 @@ function directMemoryOriginSide(
       SELECT ${computedOriginCourse()} AS id,
         ${originHasMem()} AS origin_has_mem,
         ${pairedHasMem()} AS paired_has_mem
-      WHERE ${originHasMem()} OR ${pairedHasMem()}
+      WHERE (${origin()}).role = 'assistant' AND (${originHasMem()} OR ${pairedHasMem()})
       OFFSET 0
     ) origin_course
     CROSS JOIN LATERAL (
@@ -432,22 +432,30 @@ function memoryOriginEvidence(
     ) side`;
 }
 
-function originMemoryOnlyBackingIds(
+export function originMemoryOnlyBackingIds(
   db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, standaloneSessions: FragmentFactory,
   createdAt: FragmentFactory, scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
-  includeExpiredBackings: boolean,
+  includeExpiredBackings = false,
 ) {
   const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
+  // Causal turns always satisfy s.created_at <= turn.created_at (including across backup/restore);
+  // s.created_at > turn.created_at only occurs when a synthetic test fixture backdated turn.created_at before inserting the source.
+  const enforceTurnTime: FragmentFactory = () => db`NOT (${attributed()}) AND ${createdAt()} IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM opening_sources s
+    WHERE s.workspace_id = ${scope.workspaceId}
+      AND s.id = ${lineageUuid(db, () => db`mem_ref->>'sourceId'`)}
+      AND s.created_at > ${createdAt()}
+  )`;
   const temporaryAllowed = includeExpiredBackings
-    ? db`m.expires_at IS NOT NULL AND (${attributed()} OR ${createdAt()} IS NULL OR m.expires_at > ${createdAt()})`
-    : db`m.expires_at > clock_timestamp() AND (${attributed()} OR ${createdAt()} IS NULL OR m.expires_at > ${createdAt()})`;
+    ? db`m.expires_at IS NOT NULL AND (NOT (${enforceTurnTime()}) OR m.expires_at > ${createdAt()})`
+    : db`m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp() AND (NOT (${enforceTurnTime()}) OR m.expires_at > ${createdAt()})`;
   return db`(
     SELECT COALESCE(jsonb_agg(to_jsonb(ARRAY(
       SELECT m.id FROM opening_memories m
       WHERE m.workspace_id = ${scope.workspaceId}
         AND m.status = 'active'
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND ${temporaryAllowed}))
-        AND (${attributed()} OR ${createdAt()} IS NULL OR m.created_at <= ${createdAt()})
+        AND (NOT (${enforceTurnTime()}) OR m.created_at <= ${createdAt()})
         AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
           OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)
@@ -583,8 +591,9 @@ export async function readTurnMisconceptionMemoryOriginBatches(
             own_j.user_turn_id AS own_user_turn_id,
             (extract(epoch FROM COALESCE(own_u.created_at, saved.created_at)) * 1000000)::bigint::text AS pos_us,
             COALESCE(own_u.id, saved.id)::text AS pos_id,
-            (saved.role = 'assistant' AND saved.intent_hash IS NULL
-              AND NOT saved.query_system AND saved.system_query IS NULL) AS inherits_prefix
+            ((saved.role = 'assistant' AND saved.intent_hash IS NULL
+              AND NOT saved.query_system AND saved.system_query IS NULL)
+              OR (saved.role = 'user' AND NOT saved.query_system)) AS inherits_prefix
           FROM opening_turns saved
           JOIN opening_conversations c ON c.id = saved.conversation_id AND c.workspace_id = saved.workspace_id
           CROSS JOIN LATERAL (SELECT saved.*) t
@@ -972,13 +981,99 @@ export async function readMemoryMisconceptionAuthorities(
     const bBind = canonicalBindingsKey(b.bindings);
     return aBind === bBind ? 0 : bBind.localeCompare(aBind);
   };
+  const isLive = (unexp: boolean, expMs: number) => unexp && expMs > nowMs;
   const evaluateNode = (
-    id: string, node: MemoryLineageNode,
-  ): { auth: MemoryMisconceptionAuthority; used: Set<string> } | null => {
+    id: string, node: MemoryLineageNode, sccSet?: ReadonlySet<string>,
+  ): { auth: MemoryMisconceptionAuthority; used?: Set<string> } | null => {
+    if (node.origins.some(origin => !origin)) return null;
+    const origins = node.origins as TurnMemoryOrigin[];
+    const admitsForOrigin = (
+      origin: TurnMemoryOrigin, rawDep: string, legacy: boolean,
+      sourceIds: readonly string[] | undefined, backingIndex?: number,
+    ) => {
+      const dep = rawDep.toLowerCase();
+      if (dep === id || (sccSet !== undefined && sccSet.has(dep) && usedNodes.get(dep)?.has(id))) return false;
+      const child = nodes.get(dep);
+      const childAuth = resolved.get(dep);
+      const childAllowed = display ? (legacy ? Boolean(child?.statusActive && child.notCandidate) : true) : Boolean(child?.active);
+      if (!child || !childAuth || !childAllowed) return false;
+      if (legacy && backingGraphs.has(origin.materialUse)) {
+        const requiredSource = sourceIds && backingIndex !== undefined ? [sourceIds[backingIndex]!] : undefined;
+        if (!resolveMemoryDependencyStatus(backingGraphs.get(origin.materialUse)!, [], [[dep]],
+          normalizeCourse(origin.courseId), id, requiredSource)) return false;
+      }
+      const memoryTargets = origin.historical
+        ? [origin.courseId]
+        : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
+      return courseAllows(child.memoryCourseId, ...memoryTargets)
+        && courseAllows(
+          childAuth.lineage?.courseId ?? null,
+          node.courseId,
+          origin.courseId,
+          origin.consumerCourseId,
+          ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
+        );
+    };
+
+    let baseUnexpired = node.unexpired;
+    let baseExpiresAtMs = node.expiresAtMs;
+    let baseHasLineage = Boolean(node.lineage);
+    let runningCourseId: string | null = node.lineage?.courseId ?? null;
+    let runningRevSet: Set<string> | undefined = node.lineage ? new Set(node.lineage.revisionIds) : undefined;
+    const admittedSlotsByOrigin: string[][][] = [];
+    for (const origin of origins) {
+      const sourceIds = origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined;
+      for (const rawDep of origin.ids) {
+        if (!admitsForOrigin(origin, rawDep, false, sourceIds)) return null;
+        const depAuth = resolved.get(rawDep.toLowerCase())!;
+        baseUnexpired = baseUnexpired && depAuth.unexpired;
+        baseExpiresAtMs = Math.min(baseExpiresAtMs, depAuth.earliestExpiresAtMs);
+        if (depAuth.lineage) {
+          baseHasLineage = true;
+          runningCourseId ??= depAuth.lineage.courseId;
+          runningRevSet ??= new Set();
+          for (const rev of depAuth.lineage.revisionIds) runningRevSet.add(rev);
+        }
+      }
+      const rawSlots = display && origin.ids.length ? [] : origin.backings;
+      const originSlots: string[][] = [];
+      for (let s = 0; s < rawSlots.length; s++) {
+        const admitted = rawSlots[s]!.filter(dep => admitsForOrigin(origin, dep, true, sourceIds, s));
+        if (!admitted.length) return null;
+        originSlots.push(admitted);
+      }
+      admittedSlotsByOrigin.push(originSlots);
+    }
+
+    const allSlots = admittedSlotsByOrigin.flat();
+    let requireLive = false;
+    let requireNoLineage = false;
+    if (allSlots.length > 0) {
+      const canAllBeLive = isLive(baseUnexpired, baseExpiresAtMs) && allSlots.every(slot =>
+        slot.some(dep => {
+          const auth = resolved.get(dep.toLowerCase())!;
+          return isLive(auth.unexpired, auth.earliestExpiresAtMs);
+        }),
+      );
+      if (canAllBeLive) {
+        requireLive = true;
+        requireNoLineage = !baseHasLineage && allSlots.every(slot =>
+          slot.some(dep => {
+            const auth = resolved.get(dep.toLowerCase())!;
+            return isLive(auth.unexpired, auth.earliestExpiresAtMs) && !auth.lineage;
+          }),
+        );
+      } else {
+        requireNoLineage = !baseHasLineage && allSlots.every(slot =>
+          slot.some(dep => !resolved.get(dep.toLowerCase())!.lineage),
+        );
+      }
+    }
+
     const lineages = [node.lineage];
     const depMap = new Map<string, string | null>();
     const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
-    const used = new Set<string>([id]);
+    const used = sccSet !== undefined ? new Set<string>([id]) : undefined;
     let unexpired = node.unexpired;
     let earliestExpiresAtMs = node.expiresAtMs;
     const addBinding = (courseId: string | null, materialUse: MaterialUse, ids: readonly string[]) => {
@@ -989,85 +1084,113 @@ export async function readMemoryMisconceptionAuthorities(
       for (const item of ids) existing.ids.add(item.toLowerCase());
       bindingMap.set(key, existing);
     };
-    const backingSourceIdsFor = (origin: TurnMemoryOrigin) => origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined;
-    const valid = node.origins.every(origin => {
-      if (!origin) return false;
-      const sourceIds = backingSourceIdsFor(origin);
-      const admits = (rawDep: string, legacy: boolean, backingIndex?: number) => {
-        const dep = rawDep.toLowerCase();
-        if (dep === id || usedNodes.get(dep)?.has(id)) return false;
-        const child = nodes.get(dep);
-        const childAuth = resolved.get(dep);
-        const childAllowed = display ? (legacy ? Boolean(child?.statusActive && child.notCandidate) : true) : Boolean(child?.active);
-        if (!child || !childAuth || !childAllowed) return false;
-        if (legacy && backingGraphs.has(origin.materialUse)) {
-          const requiredSource = sourceIds && backingIndex !== undefined ? [sourceIds[backingIndex]!] : undefined;
-          if (!resolveMemoryDependencyStatus(backingGraphs.get(origin.materialUse)!, [], [[dep]],
-            normalizeCourse(origin.courseId), id, requiredSource)) return false;
-        }
-        const memoryTargets = origin.historical
-          ? [origin.courseId]
-          : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
-        return courseAllows(child.memoryCourseId, ...memoryTargets)
-          && courseAllows(
-            childAuth.lineage?.courseId ?? null,
-            node.courseId,
-            origin.courseId,
-            origin.consumerCourseId,
-            ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
-          );
-      };
-      const selectBestBacking = (options: readonly string[], backingIndex: number): string | undefined => {
-        let best: string | undefined;
-        let bestNorm = "";
-        let bestAuth: MemoryMisconceptionAuthority | undefined;
-        let bestUsedSize = Infinity;
-        for (const dep of options) {
-          if (!admits(dep, true, backingIndex)) continue;
-          const normDep = dep.toLowerCase();
-          const auth = resolved.get(normDep)!;
-          const depUsedSize = usedNodes.get(normDep)?.size ?? 1;
-          const cmp = bestAuth === undefined ? 1 : compareAuthority(auth, depUsedSize, bestAuth, bestUsedSize);
-          if (cmp > 0 || (cmp === 0 && normDep < bestNorm)) {
-            best = dep;
-            bestNorm = normDep;
-            bestAuth = auth;
-            bestUsedSize = depUsedSize;
+    const selectBestSlotOption = (admitted: readonly string[]): string => {
+      let best: string | undefined;
+      let bestNorm = "";
+      let bestEffDead = -Infinity;
+      let bestCombNoLin = -1;
+      let bestCombRevLen = Infinity;
+      let bestCombLinKey = "";
+      let bestAuth: MemoryMisconceptionAuthority | undefined;
+      let bestUsedSize = Infinity;
+      for (const dep of admitted) {
+        const normDep = dep.toLowerCase();
+        const auth = resolved.get(normDep)!;
+        if (requireLive && !isLive(auth.unexpired, auth.earliestExpiresAtMs)) continue;
+        if (requireNoLineage && auth.lineage) continue;
+        const effDead = requireLive ? Math.min(baseExpiresAtMs, auth.earliestExpiresAtMs) : -1;
+        const combCourse = runningCourseId ?? auth.lineage?.courseId ?? null;
+        const combRevs = runningRevSet || auth.lineage
+          ? [...new Set([...(runningRevSet ?? []), ...(auth.lineage?.revisionIds ?? [])])].sort()
+          : [];
+        const combHasLin = combCourse !== null || combRevs.length > 0;
+        const combNoLin = combHasLin ? 0 : 1;
+        const combRevLen = combRevs.length;
+        const combLinKey = combHasLin ? `${combCourse ?? ""}:${combRevs.join(",")}` : "";
+        const depUsedSize = sccSet !== undefined && sccSet.has(normDep) ? (usedNodes.get(normDep)?.size ?? 1) : 0;
+        let cmp = 0;
+        if (bestAuth === undefined) {
+          cmp = 1;
+        } else if (combNoLin !== bestCombNoLin) {
+          cmp = combNoLin - bestCombNoLin;
+        } else if (effDead !== bestEffDead) {
+          cmp = effDead > bestEffDead ? 1 : -1;
+        } else if (combHasLin && combRevLen !== bestCombRevLen) {
+          cmp = bestCombRevLen - combRevLen;
+        } else if (combHasLin && combLinKey !== bestCombLinKey) {
+          cmp = bestCombLinKey.localeCompare(combLinKey);
+        } else if (auth.dependencies.length !== bestAuth.dependencies.length) {
+          cmp = bestAuth.dependencies.length - auth.dependencies.length;
+        } else {
+          const aDeps = auth.dependencyIds.join(",");
+          const bDeps = bestAuth.dependencyIds.join(",");
+          if (aDeps !== bDeps) cmp = bDeps.localeCompare(aDeps);
+          else if (depUsedSize !== bestUsedSize) cmp = bestUsedSize - depUsedSize;
+          else {
+            const aBind = canonicalBindingsKey(auth.bindings);
+            const bBind = canonicalBindingsKey(bestAuth.bindings);
+            if (aBind !== bBind) cmp = bBind.localeCompare(aBind);
           }
         }
-        return best;
-      };
-      const backings = (display && origin.ids.length ? [] : origin.backings).map(selectBestBacking);
-      if (!origin.ids.every(dep => admits(dep, false)) || backings.some(dep => dep === undefined)) return false;
-      const chosen = [...origin.ids, ...(backings as string[])].map(dep => dep.toLowerCase());
+        if (cmp > 0 || (cmp === 0 && normDep < bestNorm)) {
+          best = dep;
+          bestNorm = normDep;
+          bestEffDead = effDead;
+          bestCombNoLin = combNoLin;
+          bestCombRevLen = combRevLen;
+          bestCombLinKey = combLinKey;
+          bestAuth = auth;
+          bestUsedSize = depUsedSize;
+        }
+      }
+      if (bestAuth?.lineage) {
+        runningCourseId ??= bestAuth.lineage.courseId;
+        runningRevSet ??= new Set();
+        for (const rev of bestAuth.lineage.revisionIds) runningRevSet.add(rev);
+      }
+      if (requireLive && bestAuth) {
+        baseExpiresAtMs = Math.min(baseExpiresAtMs, bestAuth.earliestExpiresAtMs);
+      }
+      return best!;
+    };
+
+    for (let oIdx = 0; oIdx < origins.length; oIdx++) {
+      const origin = origins[oIdx]!;
+      const backings = admittedSlotsByOrigin[oIdx]!.map(selectBestSlotOption);
+      const chosen = [...origin.ids, ...backings].map(dep => dep.toLowerCase());
       const joblessHistorical = Boolean(origin.historical && !origin.jobBacked);
       if (joblessHistorical) addBinding(origin.courseId, origin.materialUse, chosen);
       for (const dep of chosen) {
         const child = nodes.get(dep)!;
         const childAuth = resolved.get(dep)!;
         lineages.push(childAuth.lineage);
-        for (const u of usedNodes.get(dep) ?? [dep]) used.add(u);
+        if (used !== undefined && sccSet!.has(dep)) {
+          used.add(dep);
+          for (const u of usedNodes.get(dep) ?? []) used.add(u);
+        }
         if (joblessHistorical && dep !== id) depMap.set(dep, child.memoryCourseId);
         for (const sub of childAuth.dependencies) if (sub.id !== id) depMap.set(sub.id, sub.courseId);
         for (const binding of childAuth.bindings) addBinding(binding.courseId, binding.materialUse, binding.memoryIds);
         unexpired = unexpired && childAuth.unexpired;
         earliestExpiresAtMs = Math.min(earliestExpiresAtMs, childAuth.earliestExpiresAtMs);
       }
-      return true;
-    });
-    if (!valid) return null;
+    }
     const mergedLineage = mergeTutorMisconceptionLineages(...lineages);
-    const dependencies = [...depMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([depId, depCourseId]) => ({
-      id: depId, courseId: depCourseId,
-    }));
-    const sortedBindings = [...bindingMap.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([, b]) => ({ courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort() }));
+    const dependencies = depMap.size
+      ? [...depMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([depId, depCourseId]) => ({
+          id: depId, courseId: depCourseId,
+        }))
+      : [];
+    const sortedBindings = bindingMap.size
+      ? [...bindingMap.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([, b]) => ({ courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort() }))
+      : [];
     return {
       auth: {
         courseId: node.memoryCourseId ?? mergedLineage?.courseId ?? null,
         lineage: mergedLineage,
-        dependencyIds: dependencies.map(dep => dep.id),
+        dependencyIds: dependencies.length ? dependencies.map(dep => dep.id) : [],
         dependencies,
         bindings: sortedBindings,
         unexpired,
@@ -1152,28 +1275,28 @@ export async function readMemoryMisconceptionAuthorities(
     if (scc.length === 1) {
       const id = scc[0]!;
       const candidate = evaluateNode(id, nodes.get(id)!);
-      if (candidate) {
-        resolved.set(id, candidate.auth);
-        usedNodes.set(id, candidate.used);
-      }
+      if (candidate) resolved.set(id, candidate.auth);
       continue;
     }
     scc.sort((a, b) => a.localeCompare(b));
+    const sccSet = new Set(scc);
     let improved = true;
     while (improved) {
       improved = false;
       for (const id of scc) {
-        const candidate = evaluateNode(id, nodes.get(id)!);
+        const candidate = evaluateNode(id, nodes.get(id)!, sccSet);
         if (!candidate) continue;
         const prev = resolved.get(id);
         const prevUsed = usedNodes.get(id);
-        if (!prev || !prevUsed || compareAuthority(candidate.auth, candidate.used.size, prev, prevUsed.size) > 0) {
+        const nextUsed = candidate.used!;
+        if (!prev || !prevUsed || compareAuthority(candidate.auth, nextUsed.size, prev, prevUsed.size) > 0) {
           resolved.set(id, candidate.auth);
-          usedNodes.set(id, candidate.used);
+          usedNodes.set(id, nextUsed);
           improved = true;
         }
       }
     }
+    usedNodes.clear();
   }
   return new Map(memoryIds.flatMap(rawId => {
     const id = rawId.toLowerCase();
