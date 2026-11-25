@@ -1,13 +1,31 @@
 import type { CourseSourceUse, MaterialSegment, OpeningMaterialPurposePin, SourceChunk } from "@aistudy/contracts";
+import {
+  parsePedagogicalAst,
+  rankPedagogicalEvidence,
+  type PedagogicalAstBlock,
+  type PedagogicalBlockKind,
+  type PedagogicalChunk,
+  type PedagogicalConceptNode,
+  type PedagogicalGraphEdge,
+  type PedagogicalRetrievalAuthorization,
+  type PedagogicalVisibility,
+  type ScoredCandidate,
+} from "@aistudy/domain/pedagogical-retrieval";
 import { keywordOverlapScore, renderContext } from "./context";
 import type { ParentInteractionBudget } from "./parent-interaction-budget";
 
 export type { MaterialSegment } from "@aistudy/contracts";
+export type MaterialPedagogicalGraph = {
+  readonly concepts: readonly PedagogicalConceptNode[];
+  readonly edges: readonly PedagogicalGraphEdge[];
+  readonly authorization: PedagogicalRetrievalAuthorization;
+};
 export type MaterialRetrievalInput = {
   chunks: SourceChunk[];
   sourceIds: string[];
   /** Server-resolved context. null explicitly means standalone; omission is not authorization. */
   courseContext?: { courseId: string | null; materialUse: CourseSourceUse };
+  pedagogicalGraph?: MaterialPedagogicalGraph;
   query: string;
   maxCharacters: number;
   preferChunkId?: string;
@@ -518,6 +536,237 @@ export function budgetRankedMaterial(chunks: SourceChunk[], maxCharacters: numbe
   return selected;
 }
 
+const PROSE_UNCONDITIONAL_SEALED_LINE_RE =
+  /^[ \t]*(?:\*\*|__|\*|_)?(?:answers?(?:\s+key)?|official\s+solutions?|reference\s+solutions?|model\s+answers?|correct\s+answers?|rubrics?|marking\s+schemes?)(?:\s+#?\d+(?:\.\d+)*)?(?:\*\*|__|\*|_)?[ \t]*[:：]|^[ \t]*(?:【[ \t]*(?:参考答案|标准答案|正确答案|官方答案|答案|解析)[ \t]*】|(?:参考答案|标准答案|正确答案|官方答案|答案)[ \t]*[:：])/iu;
+const PROSE_CONTEXTUAL_SOLUTION_LINE_RE =
+  /^[ \t]*(?:\*\*|__|\*|_)?(?:worked\s+solutions?|solutions?)(?:\s+#?\d+(?:\.\d+)*)?(?:\*\*|__|\*|_)?[ \t]*[:：]|^[ \t]*(?:【[ \t]*解答[ \t]*】|解答[ \t]*[:：])/iu;
+const PROSE_HINT_LINE_RE =
+  /^[ \t]*(?:\*\*|__|\*|_)?(?:hints?|scaffolds?)(?:\s+#?\d+(?:\.\d+)*)?(?:\*\*|__|\*|_)?[ \t]*[:：]|^[ \t]*(?:【[ \t]*(?:提示|解题提示|思路提示|分步提示)[ \t]*】|(?:提示|解题提示|思路提示|分步提示)[ \t]*[:：])/iu;
+
+function classifyPlainLeadKind(line: string, isHeading: boolean): PedagogicalBlockKind | null {
+  const trimmed = line.trimStart().replace(/^(?:#{1,6}[ \t]+)?(?:\*\*|__|\*|_)?/, "");
+  if (isHeading) {
+    if (/^(?:definitions?|def\.?\b|定义)/iu.test(trimmed)) return "definition";
+    if (/^(?:lemmas?\b|引理)/iu.test(trimmed)) return "lemma";
+    if (/^(?:theorems?|propositions?|corollary|corollaries\b|定理|命题|推论)/iu.test(trimmed)) return "theorem";
+    if (/^(?:proofs?\b|证明)/iu.test(trimmed)) return "proof";
+    if (/^(?:(?:worked\s+)?examples?\b|例题)/iu.test(trimmed)) return "example";
+    if (/^(?:exercises?|problems?\b|习题|练习)/iu.test(trimmed)) return "exercise";
+    return null;
+  }
+  const match = /^(?<kw>definition|def\.?|lemma|theorem|proposition|corollary|proof|worked\s+example|example|exercise|problem|定义|引理|定理|命题|推论|证明|例题|习题|练习)(?<qual>(?:[ \t]+#?\d+(?:\.\d+)*)?(?:[ \t]*[（(][^（）()\r\n]{1,120}[）)])?)(?:\*\*|__|\*|_)?[ \t]*(?<punct>[:：.]?)/iu.exec(trimmed);
+  if (!match?.groups) return null;
+  const kw = match.groups.kw!.toLowerCase();
+  const hasQual = Boolean(match.groups.qual?.trim());
+  const punct = match.groups.punct ?? "";
+  const isProofDot = (kw === "proof" || kw === "证明") && punct === ".";
+  if (punct !== ":" && punct !== "：" && !(hasQual && punct === ".") && !isProofDot) return null;
+  if (kw === "definition" || kw.startsWith("def") || kw === "定义") return "definition";
+  if (kw === "lemma" || kw === "引理") return "lemma";
+  if (kw === "theorem" || kw === "proposition" || kw === "corollary" || kw === "定理" || kw === "命题" || kw === "推论") return "theorem";
+  if (kw === "proof" || kw === "证明") return "proof";
+  if (kw.includes("example") || kw === "例题") return "example";
+  if (kw === "exercise" || kw === "problem" || kw === "习题" || kw === "练习") return "exercise";
+  return null;
+}
+
+function splitChunkDiscourseBlocks(text: string): PedagogicalAstBlock[] {
+  const rawBlocks = parsePedagogicalAst(text);
+  const refined: PedagogicalAstBlock[] = [];
+  let inWorkedExample = false;
+
+  for (const block of rawBlocks) {
+    if (block.visibility === "sealed") {
+      refined.push(block);
+      continue;
+    }
+    if (block.kind === "example") {
+      inWorkedExample = true;
+      refined.push(block);
+      continue;
+    }
+    if (block.kind === "heading") {
+      const headingKind = block.visibility === "public"
+        ? classifyPlainLeadKind(block.label ?? block.text, true)
+        : null;
+      if (headingKind === "example") inWorkedExample = true;
+      else if (headingKind) inWorkedExample = false;
+      refined.push(headingKind ? { ...block, kind: headingKind } : block);
+      continue;
+    }
+    if (block.kind !== "prose") {
+      if (block.kind === "exercise" || block.kind === "theorem" || block.kind === "definition" || block.kind === "lemma") {
+        inWorkedExample = false;
+      }
+      refined.push(block);
+      continue;
+    }
+
+    const slice = text.slice(block.startOffset, block.endOffset);
+    const lineStarts: number[] = [0];
+    for (const nl of slice.matchAll(/\r\n?|\n/g)) {
+      const nextStart = nl.index + nl[0].length;
+      if (nextStart < slice.length) lineStarts.push(nextStart);
+    }
+
+    type SubSpan = { relStart: number; kind: PedagogicalBlockKind; visibility: PedagogicalVisibility };
+    const spans: SubSpan[] = [];
+    for (let idx = 0; idx < lineStarts.length; idx++) {
+      const relStart = lineStarts[idx]!;
+      const relEnd = idx + 1 < lineStarts.length ? lineStarts[idx + 1]! : slice.length;
+      const line = slice.slice(relStart, relEnd).replace(/\r?\n$/, "");
+      if (!line.trim()) continue;
+
+      let lineKind: PedagogicalBlockKind | null = null;
+      let lineVis: PedagogicalVisibility = block.visibility;
+      if (PROSE_UNCONDITIONAL_SEALED_LINE_RE.test(line) || (!inWorkedExample && PROSE_CONTEXTUAL_SOLUTION_LINE_RE.test(line))) {
+        lineKind = "solution";
+        lineVis = "sealed";
+      } else if (PROSE_HINT_LINE_RE.test(line)) {
+        lineKind = "hint";
+        lineVis = block.visibility === "public" ? "hint_gated" : block.visibility;
+      } else if (block.visibility === "public") {
+        lineKind = classifyPlainLeadKind(line, false);
+        if (lineKind === "example") inWorkedExample = true;
+        else if (lineKind === "exercise" || lineKind === "theorem" || lineKind === "definition" || lineKind === "lemma") {
+          inWorkedExample = false;
+        }
+      }
+
+      if (spans.length === 0) {
+        spans.push({ relStart: 0, kind: lineKind ?? block.kind, visibility: lineVis });
+      } else if (lineKind !== null && (lineVis !== spans[spans.length - 1]!.visibility || lineKind !== spans[spans.length - 1]!.kind)) {
+        spans.push({ relStart, kind: lineKind, visibility: lineVis });
+      }
+    }
+
+    if (spans.length <= 1) {
+      const only = spans[0];
+      refined.push(
+        only && (only.kind !== block.kind || only.visibility !== block.visibility)
+          ? { ...block, kind: only.kind, visibility: only.visibility }
+          : block,
+      );
+      continue;
+    }
+
+    for (let s = 0; s < spans.length; s++) {
+      const cur = spans[s]!;
+      const nextRel = s + 1 < spans.length ? spans[s + 1]!.relStart : slice.length;
+      const absStart = block.startOffset + cur.relStart;
+      const absEnd = block.startOffset + nextRel;
+      if (absEnd > absStart) {
+        refined.push({
+          ...block,
+          kind: cur.kind,
+          visibility: cur.visibility,
+          startOffset: absStart,
+          endOffset: absEnd,
+          text: text.slice(absStart, absEnd),
+        });
+      }
+    }
+  }
+
+  return refined;
+}
+
+function selectSegmentBlockKind(blocks: readonly PedagogicalAstBlock[]): PedagogicalBlockKind {
+  const kinds = new Set<PedagogicalBlockKind>(blocks.map(b => b.kind));
+  if (kinds.has("definition") && (kinds.has("proof") || kinds.has("theorem") || kinds.has("lemma"))) {
+    if (kinds.has("proof")) return "proof";
+    if (kinds.has("theorem")) return "theorem";
+    return "lemma";
+  }
+  if (kinds.has("definition")) return "definition";
+  if (kinds.has("lemma")) return "lemma";
+  if (kinds.has("theorem")) return "theorem";
+  if (kinds.has("proof")) return "proof";
+  if (kinds.has("display_math")) return "display_math";
+  if (kinds.has("example")) return "example";
+  if (kinds.has("exercise")) return "exercise";
+  if (kinds.has("hint")) return "hint";
+  return blocks[0]?.kind ?? "prose";
+}
+
+function matchesPrivacyEpoch(itemEpoch: number | undefined, expectedEpoch: number | undefined): boolean {
+  if (expectedEpoch === undefined) return true;
+  if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 0) return false;
+  return itemEpoch === expectedEpoch;
+}
+
+function stableSegmentOrder(a: MaterialSegment, b: MaterialSegment): number {
+  return a.chunk.sourceId.localeCompare(b.chunk.sourceId)
+    || (a.chunk.page ?? Infinity) - (b.chunk.page ?? Infinity)
+    || a.chunk.id.localeCompare(b.chunk.id)
+    || a.segmentIndex - b.segmentIndex;
+}
+
+function mergePedagogicalBudgetedSegments(selected: readonly MaterialSegment[], maxCharacters: number): SourceChunk[] {
+  const budgeted = budgetRankedMaterial(selected.map(segment => segment.chunk), maxCharacters);
+  const grouped = new Map<string, { base: SourceChunk; parts: Array<{ segmentIndex: number; text: string }> }>();
+  for (let i = 0; i < budgeted.length; i++) {
+    const chunk = budgeted[i]!;
+    const segmentIndex = selected[i]?.segmentIndex ?? i;
+    const existing = grouped.get(chunk.id);
+    if (existing) {
+      existing.parts.push({ segmentIndex, text: chunk.text });
+    } else {
+      grouped.set(chunk.id, { base: { ...chunk }, parts: [{ segmentIndex, text: chunk.text }] });
+    }
+  }
+  const result: SourceChunk[] = [];
+  for (const { base, parts } of grouped.values()) {
+    parts.sort((a, b) => a.segmentIndex - b.segmentIndex);
+    result.push({ ...base, text: parts.map(p => p.text).join("\n[…]\n") });
+  }
+  return result;
+}
+
+function selectAndMergeStandard(
+  segments: MaterialSegment[],
+  dense: MaterialSegment[],
+  input: { query: string; maxCharacters: number; preferChunkId?: string; preferPage?: number },
+): SourceChunk[] {
+  const all = new Map(segments.map(segment => [materialSegmentKey(segment), segment]));
+  const lexical = segments.map(segment => ({ segment, score: materialLexicalScore(input.query, segment.chunk.text) }))
+    .sort((a, b) => b.score - a.score || stableSegmentOrder(a.segment, b.segment));
+  const lexicalScores = new Map(lexical.map(entry => [materialSegmentKey(entry.segment), entry.score]));
+  const scores = new Map<string, number>();
+  const add = (list: MaterialSegment[]) => list.forEach((segment, rank) => {
+    const key = materialSegmentKey(segment);
+    if (all.has(key)) scores.set(key, (scores.get(key) ?? 0) + 1 / (60 + rank + 1));
+  });
+  add(lexical.filter(entry => entry.score > 0).slice(0, 48).map(entry => entry.segment));
+  add(dense.slice(0, 48));
+  const preference = (segment: MaterialSegment) => segment.chunk.id === input.preferChunkId ? 2
+    : input.preferPage !== undefined && segment.chunk.page === input.preferPage ? 1 : 0;
+  let candidates = [...all.values()].filter(segment => preference(segment) || scores.has(materialSegmentKey(segment)));
+  if (!candidates.length) candidates = lexical.map(entry => entry.segment);
+  const selected: MaterialSegment[] = [], counts = new Map<string, number>();
+  // The provider accepts at most 64 chunks. A large lexical-fallback pool must not require N full sorts.
+  while (candidates.length && selected.length < 64) {
+    const score = (segment: MaterialSegment) => (scores.get(materialSegmentKey(segment)) ?? 0)
+      + Math.min(1, lexicalScores.get(materialSegmentKey(segment)) ?? 0) * 0.001
+      - (counts.get(segment.chunk.sourceId) ?? 0) * 0.002;
+    let best = 0;
+    for (let index = 1; index < candidates.length; index++) {
+      const a = candidates[index]!, b = candidates[best]!;
+      if ((preference(b) - preference(a) || score(b) - score(a) || stableSegmentOrder(a, b)) < 0) best = index;
+    }
+    const next = candidates.splice(best, 1)[0]!;
+    selected.push(next);
+    counts.set(next.chunk.sourceId, (counts.get(next.chunk.sourceId) ?? 0) + 1);
+  }
+  const merged = new Map<string, SourceChunk>();
+  for (const chunk of budgetRankedMaterial(selected.map(segment => segment.chunk), input.maxCharacters)) {
+    const previous = merged.get(chunk.id);
+    if (previous) previous.text += `\n[…]\n${chunk.text}`;
+    else merged.set(chunk.id, { ...chunk });
+  }
+  return [...merged.values()];
+}
+
 /** RRF followed by explicit location priority, query coverage and source diversity. */
 export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceIds" | "operationId" | "signal"> & {
   dense?: MaterialSegment[];
@@ -599,44 +848,414 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       }
     }
   }
-  const stable = (a: MaterialSegment, b: MaterialSegment) =>
-    a.chunk.sourceId.localeCompare(b.chunk.sourceId) || (a.chunk.page ?? Infinity) - (b.chunk.page ?? Infinity)
-    || a.chunk.id.localeCompare(b.chunk.id) || a.segmentIndex - b.segmentIndex;
-  const lexical = segments.map(segment => ({ segment, score: materialLexicalScore(input.query, segment.chunk.text) }))
-    .sort((a, b) => b.score - a.score || stable(a.segment, b.segment));
-  const lexicalScores = new Map(lexical.map(entry => [materialSegmentKey(entry.segment), entry.score]));
-  const scores = new Map<string, number>();
-  const add = (list: MaterialSegment[]) => list.forEach((segment, rank) => {
-    const key = materialSegmentKey(segment);
-    if (all.has(key)) scores.set(key, (scores.get(key) ?? 0) + 1 / (60 + rank + 1));
-  });
-  add(lexical.filter(entry => entry.score > 0).slice(0, 48).map(entry => entry.segment));
-  add(dense.slice(0, 48));
-  const preference = (segment: MaterialSegment) => segment.chunk.id === input.preferChunkId ? 2
-    : input.preferPage !== undefined && segment.chunk.page === input.preferPage ? 1 : 0;
-  let candidates = [...all.values()].filter(segment => preference(segment) || scores.has(materialSegmentKey(segment)));
-  if (!candidates.length) candidates = lexical.map(entry => entry.segment);
-  const selected: MaterialSegment[] = [], counts = new Map<string, number>();
-  // The provider accepts at most 64 chunks. A large lexical-fallback pool must not require N full sorts.
-  while (candidates.length && selected.length < 64) {
-    const score = (segment: MaterialSegment) => (scores.get(materialSegmentKey(segment)) ?? 0)
-      + Math.min(1, lexicalScores.get(materialSegmentKey(segment)) ?? 0) * 0.001
-      - (counts.get(segment.chunk.sourceId) ?? 0) * 0.002;
-    let best = 0;
-    for (let index = 1; index < candidates.length; index++) {
-      const a = candidates[index]!, b = candidates[best]!;
-      if ((preference(b) - preference(a) || score(b) - score(a) || stable(a, b)) < 0) best = index;
+
+  if (!input.pedagogicalGraph) {
+    return selectAndMergeStandard(segments, dense, input);
+  }
+
+  const { authorization } = input.pedagogicalGraph;
+  const admissibleSourceIds = authorization.admissibleSourceIds instanceof Set
+    ? authorization.admissibleSourceIds
+    : new Set(authorization.admissibleSourceIds);
+  const excludedItemFamilyIds = !authorization.excludedItemFamilyIds
+    ? new Set<string>()
+    : authorization.excludedItemFamilyIds instanceof Set
+      ? authorization.excludedItemFamilyIds
+      : new Set(authorization.excludedItemFamilyIds);
+  const allowHintGated = authorization.allowHintGated ?? false;
+  const expectedPrivacyEpoch = authorization.expectedPrivacyEpoch;
+  const admissibleSourceVersions = authorization.admissibleSourceVersions;
+
+  const isAdmissibleSourceAndVersion = (sourceId: string): boolean => {
+    if (!admissibleSourceIds.has(sourceId)) return false;
+    if (admissibleSourceVersions !== undefined) {
+      if (!Object.hasOwn(admissibleSourceVersions, sourceId)) return false;
+      const expected = admissibleSourceVersions[sourceId];
+      if (typeof expected !== "number" || !Number.isSafeInteger(expected) || expected < 0) return false;
     }
-    const next = candidates.splice(best, 1)[0]!;
-    selected.push(next);
+    return true;
+  };
+
+  const isChunkSourceVersionAdmissible = (sourceId: string, sourceVersion: number): boolean => {
+    if (!isAdmissibleSourceAndVersion(sourceId)) return false;
+    if (admissibleSourceVersions !== undefined && admissibleSourceVersions[sourceId] !== sourceVersion) {
+      return false;
+    }
+    return true;
+  };
+
+  chunksById ??= new Map(input.chunks.map(chunk => [chunk.id, chunk]));
+  const allPhysicalChunkIds = new Set(input.chunks.map(chunk => chunk.id));
+  const astBlocksByChunkId = new Map<string, PedagogicalAstBlock[]>();
+
+  const pedagogicalChunks: PedagogicalChunk[] = [];
+  const admissibleSegments: MaterialSegment[] = [];
+  const fallbackSegments: MaterialSegment[] = [];
+  const admissibleSegmentKeys = new Set<string>();
+  const quarantinedSegmentKeys = new Set<string>();
+  const admissibleSegmentKeysByPhysicalChunkId = new Map<string, string[]>();
+
+  for (const entry of entries) {
+    const segKey = materialSegmentKey(entry.segment);
+    const originalChunk = chunksById.get(entry.segment.chunk.id) ?? entry.segment.chunk;
+    const chunkEpoch = Object.hasOwn(originalChunk, "privacyEpoch")
+      ? (originalChunk as SourceChunk & { privacyEpoch?: number }).privacyEpoch
+      : expectedPrivacyEpoch;
+    const chunkAdmissible = isChunkSourceVersionAdmissible(originalChunk.sourceId, originalChunk.sourceVersion)
+      && matchesPrivacyEpoch(chunkEpoch, expectedPrivacyEpoch);
+    const chunkFamilyId = Object.hasOwn(originalChunk, "itemFamilyId")
+      ? (originalChunk as SourceChunk & { itemFamilyId?: string }).itemFamilyId
+      : undefined;
+
+    if (!originalChunk.text.trim() && originalChunk.imageObjectKey) {
+      const excludedByFamily = chunkFamilyId !== undefined && excludedItemFamilyIds.has(chunkFamilyId);
+      pedagogicalChunks.push({
+        id: segKey,
+        sourceId: originalChunk.sourceId,
+        sourceVersion: originalChunk.sourceVersion,
+        ...(chunkEpoch !== undefined ? { privacyEpoch: chunkEpoch } : {}),
+        kind: "prose",
+        constructKinds: ["prose"],
+        visibility: "public",
+        atomicConstruct: false,
+        text: entry.segment.chunk.text,
+        startOffset: entry.startOffset,
+        endOffset: entry.endOffset,
+        pageStart: originalChunk.page,
+        pageEnd: originalChunk.page,
+        startMs: originalChunk.startMs,
+        endMs: originalChunk.endMs,
+        keyframeChunkId: null,
+        oversizedSplit: false,
+        ...(chunkFamilyId !== undefined ? { itemFamilyId: chunkFamilyId } : {}),
+      });
+      if (chunkAdmissible && !excludedByFamily) {
+        admissibleSegments.push(entry.segment);
+        fallbackSegments.push(entry.segment);
+        admissibleSegmentKeys.add(segKey);
+        const list = admissibleSegmentKeysByPhysicalChunkId.get(originalChunk.id);
+        if (list) list.push(segKey);
+        else admissibleSegmentKeysByPhysicalChunkId.set(originalChunk.id, [segKey]);
+      } else {
+        quarantinedSegmentKeys.add(segKey);
+      }
+      continue;
+    }
+
+    let astBlocks = astBlocksByChunkId.get(originalChunk.id);
+    if (!astBlocks) {
+      astBlocks = splitChunkDiscourseBlocks(originalChunk.text);
+      astBlocksByChunkId.set(originalChunk.id, astBlocks);
+    }
+
+    const overlapping = astBlocks.filter(
+      block => block.endOffset > entry.startOffset && block.startOffset < entry.endOffset,
+    );
+    if (overlapping.length === 0) {
+      const chunkHasProtectedAst = astBlocks.some(
+        b => b.visibility === "sealed" || (b.visibility === "hint_gated" && !allowHintGated),
+      );
+      const excludedByFamily = chunkFamilyId !== undefined && excludedItemFamilyIds.has(chunkFamilyId);
+      if (chunkAdmissible && !chunkHasProtectedAst && !excludedByFamily) {
+        fallbackSegments.push(entry.segment);
+      } else {
+        quarantinedSegmentKeys.add(segKey);
+      }
+      continue;
+    }
+
+    let visibility: PedagogicalVisibility = "public";
+    for (const block of overlapping) {
+      if (block.visibility === "sealed") {
+        visibility = "sealed";
+        break;
+      }
+      if (block.visibility === "hint_gated") {
+        visibility = "hint_gated";
+      }
+    }
+
+    let segmentFamilyId = chunkFamilyId;
+    for (const block of overlapping) {
+      const blockFamily = (block as PedagogicalAstBlock & { itemFamilyId?: string }).itemFamilyId;
+      if (blockFamily !== undefined) {
+        if (excludedItemFamilyIds.has(blockFamily)) {
+          segmentFamilyId = blockFamily;
+          break;
+        }
+        segmentFamilyId ??= blockFamily;
+      }
+    }
+
+    const visibleBlocks = overlapping.filter(
+      b => b.visibility === "public" || (b.visibility === "hint_gated" && allowHintGated),
+    );
+    const kind = visibility === "sealed" && overlapping.some(b => b.kind === "solution")
+      ? "solution"
+      : selectSegmentBlockKind(visibleBlocks.length > 0 ? visibleBlocks : overlapping);
+    const constructKinds: PedagogicalBlockKind[] = [];
+    for (const block of overlapping) {
+      if (!constructKinds.includes(block.kind)) constructKinds.push(block.kind);
+    }
+
+    pedagogicalChunks.push({
+      id: segKey,
+      sourceId: originalChunk.sourceId,
+      sourceVersion: originalChunk.sourceVersion,
+      ...(chunkEpoch !== undefined ? { privacyEpoch: chunkEpoch } : {}),
+      kind,
+      constructKinds,
+      visibility,
+      atomicConstruct: overlapping.some(b => b.atomicConstruct),
+      text: entry.segment.chunk.text,
+      startOffset: entry.startOffset,
+      endOffset: entry.endOffset,
+      pageStart: originalChunk.page,
+      pageEnd: originalChunk.page,
+      startMs: originalChunk.startMs,
+      endMs: originalChunk.endMs,
+      keyframeChunkId: null,
+      oversizedSplit: false,
+      ...(segmentFamilyId !== undefined ? { itemFamilyId: segmentFamilyId } : {}),
+    });
+
+    const visibilityAdmissible = visibility === "public" || (visibility === "hint_gated" && allowHintGated);
+    const excludedByFamily = segmentFamilyId !== undefined && excludedItemFamilyIds.has(segmentFamilyId);
+    if (chunkAdmissible && visibilityAdmissible && !excludedByFamily) {
+      admissibleSegments.push(entry.segment);
+      fallbackSegments.push(entry.segment);
+      admissibleSegmentKeys.add(segKey);
+      const list = admissibleSegmentKeysByPhysicalChunkId.get(originalChunk.id);
+      if (list) list.push(segKey);
+      else admissibleSegmentKeysByPhysicalChunkId.set(originalChunk.id, [segKey]);
+    } else {
+      quarantinedSegmentKeys.add(segKey);
+    }
+  }
+
+  const resolveAdmissibleChunkRef = (refId: string): readonly string[] | undefined => {
+    const byPhysical = admissibleSegmentKeysByPhysicalChunkId.get(refId);
+    if (byPhysical && byPhysical.length > 0) return byPhysical;
+    if (!allPhysicalChunkIds.has(refId) && admissibleSegmentKeys.has(refId)) return [refId];
+    return undefined;
+  };
+
+  const candidateConcepts: PedagogicalConceptNode[] = [];
+  const rejectedConceptIds = new Set<string>();
+  for (const concept of input.pedagogicalGraph.concepts) {
+    if (quarantinedSegmentKeys.has(concept.id) || admissibleSegmentKeys.has(concept.id)) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
+    if (!matchesPrivacyEpoch(concept.privacyEpoch, expectedPrivacyEpoch)) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
+    if ((concept.supportingSourceIds ?? []).some(srcId => !isAdmissibleSourceAndVersion(srcId))) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
+    if (!Array.isArray(concept.evidenceChunkIds) || concept.evidenceChunkIds.length === 0) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
+    const expandedEvidence: string[] = [];
+    const seenEvidence = new Set<string>();
+    let allResolved = true;
+    for (const cid of concept.evidenceChunkIds) {
+      const resolved = resolveAdmissibleChunkRef(cid);
+      if (!resolved || resolved.length === 0) {
+        allResolved = false;
+        break;
+      }
+      for (const segKey of resolved) {
+        if (!seenEvidence.has(segKey)) {
+          seenEvidence.add(segKey);
+          expandedEvidence.push(segKey);
+        }
+      }
+    }
+    if (!allResolved || expandedEvidence.length === 0) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
+    candidateConcepts.push({
+      ...concept,
+      evidenceChunkIds: expandedEvidence,
+    });
+  }
+
+  const mappedConcepts: PedagogicalConceptNode[] = [];
+  const survivingConceptIds = new Set<string>();
+  for (const concept of candidateConcepts) {
+    if (!rejectedConceptIds.has(concept.id) && !survivingConceptIds.has(concept.id)) {
+      survivingConceptIds.add(concept.id);
+      mappedConcepts.push(concept);
+    }
+  }
+
+  const resolveEndpointTargets = (endpoint: string): readonly string[] | undefined => {
+    if (survivingConceptIds.has(endpoint)) return [endpoint];
+    if (rejectedConceptIds.has(endpoint)) return undefined;
+    return resolveAdmissibleChunkRef(endpoint);
+  };
+
+  const mappedEdges: PedagogicalGraphEdge[] = [];
+  for (const edge of input.pedagogicalGraph.edges) {
+    if ((edge.kind as string) === "solves") continue;
+    if (edge.visibility === "sealed") continue;
+    if (edge.visibility === "hint_gated" && !allowHintGated) continue;
+    if (!matchesPrivacyEpoch(edge.privacyEpoch, expectedPrivacyEpoch)) continue;
+    if (edge.weight !== undefined && (!Number.isFinite(edge.weight) || edge.weight <= 0)) continue;
+    if (edge.sourceId !== undefined && !isAdmissibleSourceAndVersion(edge.sourceId)) continue;
+    if ((edge.supportingSourceIds ?? []).some(srcId => !isAdmissibleSourceAndVersion(srcId))) continue;
+
+    let expandedSupportingChunks: string[] | undefined;
+    if (edge.supportingChunkIds !== undefined) {
+      expandedSupportingChunks = [];
+      const seenSupport = new Set<string>();
+      let allSupportResolved = true;
+      for (const cid of edge.supportingChunkIds) {
+        const resolved = resolveAdmissibleChunkRef(cid);
+        if (!resolved || resolved.length === 0) {
+          allSupportResolved = false;
+          break;
+        }
+        for (const segKey of resolved) {
+          if (!seenSupport.has(segKey)) {
+            seenSupport.add(segKey);
+            expandedSupportingChunks.push(segKey);
+          }
+        }
+      }
+      if (!allSupportResolved) continue;
+    }
+
+    const fromTargets = resolveEndpointTargets(edge.from);
+    const toTargets = resolveEndpointTargets(edge.to);
+    if (!fromTargets?.length || !toTargets?.length) continue;
+
+    for (const fromId of fromTargets) {
+      for (const toId of toTargets) {
+        if (fromId === toId && edge.kind === "prerequisite") continue;
+        mappedEdges.push({
+          ...edge,
+          from: fromId,
+          to: toId,
+          ...(expandedSupportingChunks !== undefined ? { supportingChunkIds: expandedSupportingChunks } : {}),
+        });
+      }
+    }
+  }
+
+  const admissibleDense = dense.filter(seg => admissibleSegmentKeys.has(materialSegmentKey(seg)));
+  if (mappedConcepts.length === 0 && mappedEdges.length === 0) {
+    return selectAndMergeStandard(fallbackSegments, admissibleDense, input);
+  }
+
+  const admissibleLexical = admissibleSegments
+    .map(segment => ({ segment, score: materialLexicalScore(input.query, segment.chunk.text) }))
+    .sort((a, b) => b.score - a.score || stableSegmentOrder(a.segment, b.segment));
+
+  const lexicalRanking: ScoredCandidate[] = admissibleLexical
+    .filter(entry => entry.score > 0)
+    .slice(0, 48)
+    .map(entry => ({ id: materialSegmentKey(entry.segment), score: entry.score }));
+  const denseRanking: ScoredCandidate[] = admissibleDense
+    .slice(0, 48)
+    .map((seg, idx) => ({ id: materialSegmentKey(seg), score: 1 / (60 + idx + 1) }));
+
+  const normalizedAuthorization: PedagogicalRetrievalAuthorization = {
+    admissibleSourceIds,
+    ...(admissibleSourceVersions !== undefined ? { admissibleSourceVersions } : {}),
+    ...(expectedPrivacyEpoch !== undefined ? { expectedPrivacyEpoch } : {}),
+    allowHintGated,
+    excludedItemFamilyIds,
+  };
+
+  const pedResult = rankPedagogicalEvidence({
+    chunks: pedagogicalChunks,
+    concepts: mappedConcepts,
+    edges: mappedEdges,
+    lexicalRanking,
+    denseRanking,
+    authorization: normalizedAuthorization,
+    options: {
+      maxResults: Math.max(64, pedagogicalChunks.length),
+      orderFoundationsFirst: true,
+    },
+  });
+
+  if (pedResult.ranked.length === 0) {
+    return selectAndMergeStandard(fallbackSegments, admissibleDense, input);
+  }
+
+  const rankedItems = pedResult.ranked;
+  const pedSelectionScores = new Float64Array(rankedItems.length);
+  let runningMaxScore = 0;
+  for (let i = rankedItems.length - 1; i >= 0; i--) {
+    const score = rankedItems[i]!.combinedScore;
+    if (score > runningMaxScore) runningMaxScore = score;
+    pedSelectionScores[i] = runningMaxScore;
+  }
+  const pedByKey = new Map<string, { pedRankIndex: number; selectionScore: number }>();
+  for (let i = 0; i < rankedItems.length; i++) {
+    pedByKey.set(rankedItems[i]!.chunk.id, {
+      pedRankIndex: i,
+      selectionScore: pedSelectionScores[i]!,
+    });
+  }
+
+  const preference = (segment: MaterialSegment) =>
+    segment.chunk.id === input.preferChunkId ? 2
+      : input.preferPage !== undefined && segment.chunk.page === input.preferPage ? 1 : 0;
+
+  const admissibleByKey = new Map(admissibleSegments.map(seg => [materialSegmentKey(seg), seg]));
+  const candidateKeys = new Set<string>();
+  const pool: MaterialSegment[] = [];
+  for (const item of rankedItems) {
+    const seg = admissibleByKey.get(item.chunk.id);
+    if (seg && !candidateKeys.has(item.chunk.id)) {
+      candidateKeys.add(item.chunk.id);
+      pool.push(seg);
+    }
+  }
+  for (const seg of admissibleSegments) {
+    const key = materialSegmentKey(seg);
+    if (!candidateKeys.has(key) && preference(seg) > 0) {
+      candidateKeys.add(key);
+      pool.push(seg);
+    }
+  }
+
+  const picked: MaterialSegment[] = [];
+  const counts = new Map<string, number>();
+  while (pool.length && picked.length < 64) {
+    const score = (segment: MaterialSegment) =>
+      (pedByKey.get(materialSegmentKey(segment))?.selectionScore ?? 0)
+      - (counts.get(segment.chunk.sourceId) ?? 0) * 0.002;
+    const rankTie = (a: MaterialSegment, b: MaterialSegment) => {
+      const ra = pedByKey.get(materialSegmentKey(a))?.pedRankIndex ?? Number.MAX_SAFE_INTEGER;
+      const rb = pedByKey.get(materialSegmentKey(b))?.pedRankIndex ?? Number.MAX_SAFE_INTEGER;
+      return ra - rb || stableSegmentOrder(a, b);
+    };
+    let best = 0;
+    for (let index = 1; index < pool.length; index++) {
+      const a = pool[index]!, b = pool[best]!;
+      if ((preference(b) - preference(a) || score(b) - score(a) || rankTie(a, b)) < 0) best = index;
+    }
+    const next = pool.splice(best, 1)[0]!;
+    picked.push(next);
     counts.set(next.chunk.sourceId, (counts.get(next.chunk.sourceId) ?? 0) + 1);
   }
-  // Citation identity stays the physical chunk id. Merge selected excerpts for a page.
-  const merged = new Map<string, SourceChunk>();
-  for (const chunk of budgetRankedMaterial(selected.map(segment => segment.chunk), input.maxCharacters)) {
-    const previous = merged.get(chunk.id);
-    if (previous) previous.text += `\n[…]\n${chunk.text}`;
-    else merged.set(chunk.id, { ...chunk });
-  }
-  return [...merged.values()];
+
+  const pref2 = picked.filter(seg => preference(seg) === 2);
+  const pref1 = picked.filter(seg => preference(seg) === 1);
+  const pref0 = picked
+    .filter(seg => preference(seg) === 0)
+    .sort((a, b) =>
+      ((pedByKey.get(materialSegmentKey(a))?.pedRankIndex ?? Number.MAX_SAFE_INTEGER)
+        - (pedByKey.get(materialSegmentKey(b))?.pedRankIndex ?? Number.MAX_SAFE_INTEGER))
+      || stableSegmentOrder(a, b));
+  return mergePedagogicalBudgetedSegments([...pref2, ...pref1, ...pref0], input.maxCharacters);
 }

@@ -1,14 +1,21 @@
-import { rankMaterialContext, runBudgetedEmbedding, type MaterialRetriever } from "@aistudy/ai";
+import { rankMaterialContext, runBudgetedEmbedding, type MaterialPedagogicalGraph, type MaterialRetriever } from "@aistudy/ai";
 import { loadOpeningEmbeddingConfig } from "@aistudy/config";
-import { createOpeningCourseReadySourcesRepository, createOpeningSourceEmbeddingsRepository, OpeningBudgetError, type OpeningBudgetRepository } from "@aistudy/database";
+import {
+  createOpeningCourseReadySourcesRepository,
+  createOpeningKnowledgeRepository,
+  createOpeningSourceEmbeddingsRepository,
+  OpeningBudgetError,
+  OpeningKnowledgeError,
+  type OpeningBudgetRepository,
+} from "@aistudy/database";
 import type { Sql } from "postgres";
-import type { CourseSourceUse } from "@aistudy/contracts";
+import type { CourseKnowledgeRecordResponse, CourseSourceUse, SourceChunk } from "@aistudy/contracts";
+import { scopeBudget } from "./model-gateway";
 
 type CourseMaterialContext = { courseId: string | null; materialUse: CourseSourceUse };
 type ScopedMaterialRetriever = (scope: Parameters<MaterialRetriever>[0],
   input: Parameters<MaterialRetriever>[1] & { courseContext?: CourseMaterialContext; lexicalOnly?: boolean }) =>
     Promise<Awaited<ReturnType<MaterialRetriever>> & { assertCurrent(): Promise<void> }>;
-import { scopeBudget } from "./model-gateway";
 
 export const retrievalBudgetId = (parentId: string) => {
   let root = parentId;
@@ -20,6 +27,169 @@ export const retrievalBudgetId = (parentId: string) => {
   return root.startsWith("retrieval:") ? root : `retrieval:${root}`;
 };
 
+const SUPPORTED_KNOWLEDGE_EDGE_KINDS = new Set(["contains", "prerequisite", "applies_to"] as const);
+
+function reconcileCoursePedagogicalGraph(
+  courseId: string,
+  record: CourseKnowledgeRecordResponse,
+  afterChunks: readonly SourceChunk[],
+  privacyEpoch: number,
+): MaterialPedagogicalGraph | undefined {
+  if (
+    record.sync?.status !== "up_to_date" ||
+    record.snapshot.courseId !== courseId ||
+    (record.snapshot.nodes.length === 0 && record.snapshot.edges.length === 0)
+  ) {
+    return undefined;
+  }
+
+  const admissibleSourceVersions: Record<string, number> = Object.create(null) as Record<string, number>;
+  const conflictingSourceIds = new Set<string>();
+  for (const chunk of afterChunks) {
+    if (
+      Object.hasOwn(admissibleSourceVersions, chunk.sourceId) &&
+      admissibleSourceVersions[chunk.sourceId] !== chunk.sourceVersion
+    ) {
+      conflictingSourceIds.add(chunk.sourceId);
+    } else {
+      admissibleSourceVersions[chunk.sourceId] = chunk.sourceVersion;
+    }
+  }
+  for (const badId of conflictingSourceIds) {
+    delete admissibleSourceVersions[badId];
+  }
+
+  const admissibleSourceIds = new Set<string>();
+  const afterChunkById = new Map<string, SourceChunk>();
+  for (const chunk of afterChunks) {
+    if (conflictingSourceIds.has(chunk.sourceId)) continue;
+    admissibleSourceIds.add(chunk.sourceId);
+    afterChunkById.set(chunk.id, chunk);
+  }
+  if (admissibleSourceIds.size === 0) return undefined;
+
+  const graphConsistentSourceIds = new Set<string>();
+  for (const sourceId of admissibleSourceIds) {
+    const liveVersion = admissibleSourceVersions[sourceId]!;
+    if (Object.hasOwn(record.sourceVersions, sourceId) && record.sourceVersions[sourceId] !== liveVersion) {
+      continue;
+    }
+    if (
+      record.snapshot.coveredSourceVersions &&
+      Object.hasOwn(record.snapshot.coveredSourceVersions, sourceId) &&
+      record.snapshot.coveredSourceVersions[sourceId] !== liveVersion
+    ) {
+      continue;
+    }
+    if (
+      record.sync.coveredSourceVersions &&
+      Object.hasOwn(record.sync.coveredSourceVersions, sourceId) &&
+      record.sync.coveredSourceVersions[sourceId] !== liveVersion
+    ) {
+      continue;
+    }
+    graphConsistentSourceIds.add(sourceId);
+  }
+  if (graphConsistentSourceIds.size === 0) return undefined;
+
+  type ConceptList = MaterialPedagogicalGraph["concepts"][number][];
+  type EdgeList = MaterialPedagogicalGraph["edges"][number][];
+  const candidateConcepts: ConceptList = [];
+  const rejectedNodeIds = new Set<string>();
+  for (const node of record.snapshot.nodes) {
+    if (
+      node.status !== "supported" ||
+      node.courseId !== courseId ||
+      !Array.isArray(node.evidenceChunkIds) ||
+      node.evidenceChunkIds.length === 0
+    ) {
+      rejectedNodeIds.add(node.id);
+      continue;
+    }
+    const supportingSources = new Set<string>();
+    let allChunksValid = true;
+    for (const cid of node.evidenceChunkIds) {
+      const chunk = afterChunkById.get(cid);
+      if (!chunk || !graphConsistentSourceIds.has(chunk.sourceId)) {
+        allChunksValid = false;
+        break;
+      }
+      supportingSources.add(chunk.sourceId);
+    }
+    if (!allChunksValid) {
+      rejectedNodeIds.add(node.id);
+      continue;
+    }
+    candidateConcepts.push({
+      id: node.id,
+      label: node.label,
+      kind: node.kind,
+      supportingSourceIds: [...supportingSources],
+      evidenceChunkIds: [...node.evidenceChunkIds],
+      privacyEpoch,
+    });
+  }
+
+  const concepts: ConceptList = [];
+  const survivingConceptsById = new Map<string, MaterialPedagogicalGraph["concepts"][number]>();
+  for (const concept of candidateConcepts) {
+    if (!rejectedNodeIds.has(concept.id) && !survivingConceptsById.has(concept.id)) {
+      survivingConceptsById.set(concept.id, concept);
+      concepts.push(concept);
+    }
+  }
+  if (concepts.length === 0) return undefined;
+
+  const edges: EdgeList = [];
+  for (const edge of record.snapshot.edges) {
+    const rawKind = edge.kind as string;
+    if (edge.status !== "supported" || rawKind === "solves") continue;
+    if (!SUPPORTED_KNOWLEDGE_EDGE_KINDS.has(edge.kind)) continue;
+    const fromConcept = survivingConceptsById.get(edge.from);
+    const toConcept = survivingConceptsById.get(edge.to);
+    if (!fromConcept || !toConcept) continue;
+    if (edge.kind === "prerequisite" && edge.from === edge.to) continue;
+    if (!Array.isArray(edge.evidenceChunkIds)) continue;
+
+    const supportingSources = new Set<string>();
+    let allEdgeChunksValid = true;
+    for (const cid of edge.evidenceChunkIds) {
+      const chunk = afterChunkById.get(cid);
+      if (!chunk || !graphConsistentSourceIds.has(chunk.sourceId)) {
+        allEdgeChunksValid = false;
+        break;
+      }
+      supportingSources.add(chunk.sourceId);
+    }
+    if (!allEdgeChunksValid) continue;
+
+    if (supportingSources.size === 0) {
+      for (const s of fromConcept.supportingSourceIds ?? []) supportingSources.add(s);
+      for (const s of toConcept.supportingSourceIds ?? []) supportingSources.add(s);
+    }
+
+    edges.push({
+      from: edge.from,
+      to: edge.to,
+      kind: edge.kind,
+      supportingSourceIds: [...supportingSources],
+      supportingChunkIds: [...edge.evidenceChunkIds],
+      privacyEpoch,
+    });
+  }
+
+  return {
+    concepts,
+    edges,
+    authorization: {
+      admissibleSourceIds,
+      admissibleSourceVersions,
+      expectedPrivacyEpoch: privacyEpoch,
+      allowHintGated: false,
+    },
+  };
+}
+
 /** One material path for saved chat, temporary chat and the teaching compiler. */
 export function createOpeningMaterialRetriever(
   sql: Sql,
@@ -28,6 +198,8 @@ export function createOpeningMaterialRetriever(
 ): ScopedMaterialRetriever {
   const purposes = createOpeningCourseReadySourcesRepository(sql);
   const repository = createOpeningSourceEmbeddingsRepository(sql);
+  const hasSqlClient = typeof sql === "function" || typeof (sql as { begin?: unknown } | null)?.begin === "function";
+  const knowledge = hasSqlClient ? createOpeningKnowledgeRepository(sql) : null;
   return async (scope, input) => {
     if (!input.courseContext || (input.courseContext.courseId !== null
       && (typeof input.courseContext.courseId !== "string" || !input.courseContext.courseId))
@@ -74,8 +246,51 @@ export function createOpeningMaterialRetriever(
     }
     await purposes.assertMaterialPurposePin(scope, purposePin);
     const after = await repository.authorizeChunks(scope, before.chunks);
-    return { chunks: rankMaterialContext({ ...input, chunks: after.chunks, dense }), mode, purposePin,
+
+    let pedagogicalGraph = input.pedagogicalGraph;
+    if (!pedagogicalGraph && knowledge !== null && input.courseContext.courseId !== null && after.chunks.length > 0) {
+      if (input.signal?.aborted) {
+        throw input.signal.reason instanceof Error
+          ? input.signal.reason
+          : Object.assign(new Error("material retrieval aborted"), { code: "ABORTED" });
+      }
+      try {
+        const record = await knowledge.getWithSync(scope, input.courseContext.courseId);
+        if (input.signal?.aborted) {
+          throw input.signal.reason instanceof Error
+            ? input.signal.reason
+            : Object.assign(new Error("material retrieval aborted"), { code: "ABORTED" });
+        }
+        pedagogicalGraph = reconcileCoursePedagogicalGraph(
+          input.courseContext.courseId,
+          record,
+          after.chunks,
+          after.privacyEpoch,
+        );
+      } catch (error) {
+        if (
+          input.signal?.aborted ||
+          !(
+            (error instanceof OpeningKnowledgeError && error.code === "VALIDATION") ||
+            (error as { name?: string } | null)?.name === "ZodError"
+          )
+        ) {
+          throw error;
+        }
+      }
+    }
+
+    return {
+      chunks: rankMaterialContext({
+        ...input,
+        chunks: after.chunks,
+        dense,
+        ...(pedagogicalGraph ? { pedagogicalGraph } : {}),
+      }),
+      mode,
+      purposePin,
       // Caller must keep this exact pin through the actual model send/release.
-      assertCurrent: () => purposes.assertMaterialPurposePin(scope, purposePin) };
+      assertCurrent: () => purposes.assertMaterialPurposePin(scope, purposePin),
+    };
   };
 }
