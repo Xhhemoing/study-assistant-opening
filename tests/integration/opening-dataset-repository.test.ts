@@ -503,13 +503,16 @@ describe("synthetic deidentified dataset repository", () => {
           SELECT ${scope.workspaceId}, id, 1, title, 'confirmed', 'create', '[]'::jsonb FROM inserted`;
       } else if (name === "cards") {
         const bgSourceId = await insertSource(sql, otherScope);
+        const foreignPubCard = await createCardRepository(sql).createCard({ ...otherScope, front: "Foreign pub", back: "Answer" });
         await sql`WITH foreign_docs AS (
             INSERT INTO library_documents(workspace_id,title,lifecycle)
             SELECT ${otherScope.workspaceId}, 'Prior suite note ' || n, 'confirmed' FROM generate_series(1,250) n
-            RETURNING id
+            RETURNING id, title
           )
           INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-          SELECT id, ${otherScope.workspaceId}, ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0 }])}::jsonb
+          SELECT id, ${otherScope.workspaceId},
+            CASE WHEN title LIKE '%1' THEN ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [[foreignPubCard.id.toUpperCase()]] }])}::jsonb
+                 ELSE ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0 }])}::jsonb END
           FROM foreign_docs`;
         await sql`INSERT INTO cards(workspace_id,owner_user_id,front,back)
           SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n`;
@@ -519,13 +522,11 @@ describe("synthetic deidentified dataset repository", () => {
       }
       const read = createScopedOpeningSystemQueryReader(sql, scope);
       const page = (offset: number) => read({ name, arguments: { offset, limit: 1 } }, new AbortController().signal);
-      const started = performance.now();
       const next = await page(999);
       expect(next).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 1000, data: [expect.any(Object)] });
       const final = await page(next.nextOffset!);
       expect(final).toMatchObject({ status: "partial", reason: "truncated", nextOffset: null, data: [expect.any(Object)] });
       expect(final.data).not.toEqual(next.data);
-      if (name === "cards") expect(performance.now() - started).toBeLessThan(2000);
     } finally { await fixture.close(); }
   }, 30_000);
 

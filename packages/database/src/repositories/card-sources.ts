@@ -5,44 +5,37 @@ import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourc
 type Db = Sql | TransactionSql;
 /** Identity-based lineage remains private after source exclusion/deletion, including historical text. */
 export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType<Db>) {
-  return db`NOT EXISTS (SELECT 1 FROM unnest(${ids}::uuid[]) card_source(id)
-    WHERE NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.id=card_source.id
-      AND s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
-      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)))`;
+  return db`COALESCE(${ids}::uuid[], '{}'::uuid[]) <@ ARRAY(
+    SELECT s.id FROM opening_sources s
+    WHERE s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)
+  )`;
 }
-/** Extract normalized publication card IDs from any depth, fast-filtering rows without publicationCardIds. */
+const LAX_ARRAY_UNWRAP_32 = `lax $${"[*]".repeat(33)}`;
+/** Extract normalized publication card IDs from any depth without recursive CTE planner fanout. */
 export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
-  return db`WITH RECURSIVE pub_walk(node, in_pub) AS (
-    SELECT root.val, false
+  return db`SELECT DISTINCT lower(btrim(linked.id)) AS card_id
     FROM (SELECT ${refs()} AS val) AS root
+    CROSS JOIN LATERAL unnest(ARRAY(
+      SELECT jsonb_array_elements(
+        CASE WHEN root.val IS NOT NULL AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
+          THEN jsonb_path_query_array(
+            jsonb_path_query_array(jsonb_build_array(root.val), 'strict $.**.publicationCardIds', '{}'::jsonb, true),
+            ${LAX_ARRAY_UNWRAP_32}::jsonpath
+          )
+          ELSE '[]'::jsonb
+        END
+      )
+    )) AS leaf(val)
+    CROSS JOIN LATERAL (
+      VALUES
+        (CASE WHEN jsonb_typeof(leaf.val)='string' THEN leaf.val #>> '{}' END),
+        (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'id')='string' THEN leaf.val->>'id' END),
+        (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'cardId')='string' THEN leaf.val->>'cardId' END)
+    ) AS linked(id)
     WHERE root.val IS NOT NULL
       AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
-    UNION ALL
-    SELECT child.val, child.next_in_pub
-    FROM pub_walk pw
-    CROSS JOIN LATERAL (
-      SELECT elem AS val, pw.in_pub AS next_in_pub
-      FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(pw.node)='array' THEN pw.node ELSE '[]'::jsonb END
-      ) AS elem
-      WHERE pw.in_pub OR COALESCE(jsonb_path_exists(elem, '$.**.publicationCardIds'), false)
-      UNION ALL
-      SELECT kv.value AS val, (kv.key='publicationCardIds') AS next_in_pub
-      FROM jsonb_each(
-        CASE WHEN NOT pw.in_pub AND jsonb_typeof(pw.node)='object' THEN pw.node ELSE '{}'::jsonb END
-      ) AS kv(key, value)
-      WHERE kv.key='publicationCardIds' OR COALESCE(jsonb_path_exists(kv.value, '$.**.publicationCardIds'), false)
-    ) AS child
-  )
-  SELECT DISTINCT lower(btrim(linked.id)) AS card_id
-  FROM pub_walk pw
-  CROSS JOIN LATERAL (
-    VALUES
-      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='string' THEN pw.node #>> '{}' END),
-      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'id')='string' THEN pw.node->>'id' END),
-      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'cardId')='string' THEN pw.node->>'cardId' END)
-  ) AS linked(id)
-  WHERE linked.id IS NOT NULL AND btrim(linked.id)<>''`;
+      AND linked.id IS NOT NULL AND btrim(linked.id)<>''`;
 }
 
 /** Historical publication links survive reassignment of the card or its teaching spec. */

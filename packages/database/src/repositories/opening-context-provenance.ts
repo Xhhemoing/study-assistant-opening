@@ -154,18 +154,26 @@ export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] |
 
 /** Strip the exact note-only metadata shapes before applying source admission. */
 export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
-  return db`CASE WHEN jsonb_typeof(${refs()})='array' THEN (
-    SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs()}) ref
-    WHERE ref <> '{"snippetLineageVersion":1}'::jsonb AND NOT EXISTS (
-      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
-      WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
-        AND jsonb_typeof(ref->metadata.key)='array'
-        AND (metadata.key<>'originTurnIds' OR ref->metadata.key<>'[]'::jsonb)
-        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ref->metadata.key)='array'
-          THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
-          WHERE item.value IS NULL OR item.value !~* ${UUID.source})
-    )
-  ) ELSE ${refs()} END`;
+  return db`(
+    SELECT CASE WHEN jsonb_typeof(note_root.val)='array' THEN (
+      SELECT COALESCE(jsonb_agg(ref_item.ref ORDER BY ref_item.ord), '[]'::jsonb)
+      FROM unnest(ARRAY(SELECT jsonb_array_elements(
+        CASE WHEN jsonb_typeof(note_root.val)='array' THEN note_root.val ELSE '[]'::jsonb END
+      ))) WITH ORDINALITY AS ref_item(ref, ord)
+      WHERE ref_item.ref <> '{"snippetLineageVersion":1}'::jsonb AND NOT EXISTS (
+        SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds'), ('originTurnIds')) AS metadata(key)
+        WHERE ref_item.ref=jsonb_build_object(metadata.key, ref_item.ref->metadata.key)
+          AND jsonb_typeof(ref_item.ref->metadata.key)='array'
+          AND (metadata.key<>'originTurnIds' OR ref_item.ref->metadata.key<>'[]'::jsonb)
+          AND NOT EXISTS (SELECT 1 FROM unnest(ARRAY(SELECT jsonb_array_elements_text(
+            CASE WHEN jsonb_typeof(ref_item.ref->metadata.key)='array'
+              THEN ref_item.ref->metadata.key ELSE '[]'::jsonb END
+          ))) AS item(value)
+            WHERE item.value IS NULL OR item.value !~* ${UUID.source})
+      )
+    ) ELSE note_root.val END
+    FROM (SELECT ${refs()} AS val OFFSET 0) AS note_root
+  )`;
 }
 
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */
@@ -174,64 +182,71 @@ export function contextSourceRefsIncluded(
   bareSourceIds?: FragmentFactory, citations?: FragmentFactory,
 ): Fragment {
   const separateInputs = bareSourceIds !== undefined || citations !== undefined;
-  const safeArray = (value: FragmentFactory): Fragment => db`CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END`;
-  return db`
-    COALESCE(jsonb_typeof(${refs()}) = 'array', false)
-    ${citations ? db`AND COALESCE(jsonb_typeof(${citations()}) = 'array', false)` : db``}
-    AND NOT EXISTS (
-      SELECT 1 FROM ${separateInputs ? db`(
-        SELECT elem, false, true FROM jsonb_array_elements(${safeArray(refs)}) elem
-        ${bareSourceIds ? db`UNION ALL
-          SELECT jsonb_build_object('sourceId', sid.id), true, false FROM unnest(${bareSourceIds()}) sid(id)` : db``}
-        ${citations ? db`UNION ALL SELECT elem, false, false FROM jsonb_array_elements(${safeArray(citations)}) elem` : db``}
-      ) AS input(provenance_ref, unversioned, allow_dependency_metadata)` : db`jsonb_array_elements(${safeArray(refs)}) provenance_ref`}
-      WHERE NOT (
-          ${separateInputs ? db`input.allow_dependency_metadata AND` : db``}
-          provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
-          AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
-          AND provenance_ref->'memoryDependencyIds' <> '[]'::jsonb
-          AND NOT EXISTS (
-            SELECT 1 FROM jsonb_array_elements_text(
-              CASE WHEN jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
-                THEN provenance_ref->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(value)
-            WHERE dep.value IS NULL OR dep.value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+  const safeElements = (value: FragmentFactory): Fragment => db`unnest(ARRAY(SELECT jsonb_array_elements(
+    CASE WHEN jsonb_typeof(${value()}) = 'array' THEN ${value()} ELSE '[]'::jsonb END
+  )))`;
+  return db`EXISTS (
+    SELECT 1 FROM (
+      SELECT ${refs()} AS refs_val${citations ? db`, ${citations()} AS citations_val` : db``}
+      OFFSET 0
+    ) AS provenance_inputs
+    WHERE jsonb_typeof(provenance_inputs.refs_val) = 'array'
+      ${citations ? db`AND jsonb_typeof(provenance_inputs.citations_val) = 'array'` : db``}
+      AND NOT EXISTS (
+        SELECT 1 FROM ${separateInputs ? db`(
+          SELECT elem, false, true FROM ${safeElements(() => db`provenance_inputs.refs_val`)} AS elem
+          ${bareSourceIds ? db`UNION ALL
+            SELECT jsonb_build_object('sourceId', sid.id), true, false FROM unnest(${bareSourceIds()}) sid(id)` : db``}
+          ${citations ? db`UNION ALL SELECT elem, false, false FROM ${safeElements(() => db`provenance_inputs.citations_val`)} AS elem` : db``}
+        ) AS input(provenance_ref, unversioned, allow_dependency_metadata)` : db`${safeElements(() => db`provenance_inputs.refs_val`)} AS provenance_ref`}
+        WHERE NOT (
+            ${separateInputs ? db`input.allow_dependency_metadata AND` : db``}
+            provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
+            AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+            AND provenance_ref->'memoryDependencyIds' <> '[]'::jsonb
+            AND NOT EXISTS (
+              SELECT 1 FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+                  THEN provenance_ref->'memoryDependencyIds' ELSE '[]'::jsonb END
+              ) AS dep(value)
+              WHERE dep.value IS NULL OR dep.value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
           )
-        )
-        AND (
-          jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
-          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.publicationCardIds'), false)
-          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.answerKeyBlockIds'), false)
-          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.originTurnIds'), false)
-          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.snippetLineageVersion'), false)
-          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.memoryDependencyIds'), false)
-          OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
-          OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-          OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
-          OR (${bareSourceIds ? db`NOT input.unversioned AND` : db``} (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
-            OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'))
-          OR CASE WHEN jsonb_typeof(provenance_ref->'sourceVersion') = 'number'
-            AND (provenance_ref->>'sourceVersion') ~ '^[0-9]+$'
-            THEN (provenance_ref->>'sourceVersion')::numeric > 9007199254740991 ELSE false END
-          OR NOT EXISTS (
-            SELECT 1 FROM opening_sources provenance_source
-            WHERE provenance_source.id = ${lineageUuid(db, () => db`provenance_ref->>'sourceId'`)}
-              AND provenance_source.workspace_id = ${workspaceId}
-              AND provenance_source.upload_state = 'uploaded'
-              AND (${!requireAvailability} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
-                WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
-                  AND provenance_version.version::text=COALESCE(provenance_ref->>'sourceVersion', provenance_source.version::text)
-                  AND provenance_version.availability='unavailable'))
-              AND (${allowHistoricalVersions} OR ${bareSourceIds ? db`input.unversioned OR` : db``}
-                provenance_source.version::text = provenance_ref->>'sourceVersion')
-              AND NOT EXISTS (
-                SELECT 1 FROM opening_privacy_exclusions provenance_exclusion
-                WHERE provenance_exclusion.workspace_id = ${workspaceId}
-                  AND provenance_exclusion.source_id = provenance_source.id
-              )
+          AND (
+            jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
+            OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.publicationCardIds'), false)
+            OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.answerKeyBlockIds'), false)
+            OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.originTurnIds'), false)
+            OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.snippetLineageVersion'), false)
+            OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.memoryDependencyIds'), false)
+            OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
+            OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
+            OR (${bareSourceIds ? db`NOT input.unversioned AND` : db``} (jsonb_typeof(provenance_ref->'sourceVersion') IS DISTINCT FROM 'number'
+              OR (provenance_ref->>'sourceVersion') !~ '^[0-9]+$'))
+            OR CASE WHEN jsonb_typeof(provenance_ref->'sourceVersion') = 'number'
+              AND (provenance_ref->>'sourceVersion') ~ '^[0-9]+$'
+              THEN (provenance_ref->>'sourceVersion')::numeric > 9007199254740991 ELSE false END
+            OR NOT EXISTS (
+              SELECT 1 FROM opening_sources provenance_source
+              WHERE provenance_source.id = ${lineageUuid(db, () => db`provenance_ref->>'sourceId'`)}
+                AND provenance_source.workspace_id = ${workspaceId}
+                AND provenance_source.upload_state = 'uploaded'
+                AND (${!requireAvailability} OR NOT EXISTS (SELECT 1 FROM opening_source_versions provenance_version
+                  WHERE provenance_version.workspace_id=${workspaceId} AND provenance_version.source_id=provenance_source.id
+                    AND provenance_version.version::text=COALESCE(provenance_ref->>'sourceVersion', provenance_source.version::text)
+                    AND provenance_version.availability='unavailable'))
+                AND (${allowHistoricalVersions} OR ${bareSourceIds ? db`input.unversioned OR` : db``}
+                  provenance_source.version::text = provenance_ref->>'sourceVersion')
+                AND NOT EXISTS (
+                  SELECT 1 FROM opening_privacy_exclusions provenance_exclusion
+                  WHERE provenance_exclusion.workspace_id = ${workspaceId}
+                    AND provenance_exclusion.source_id = provenance_source.id
+                )
+            )
           )
-        )
-    )`;
+      )
+  )`;
 }
 
 /** Version pins can exist independently of the turn's explicit source_ids. */

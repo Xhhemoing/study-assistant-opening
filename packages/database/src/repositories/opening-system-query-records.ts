@@ -121,32 +121,40 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
               AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
           ) np
           CROSS JOIN LATERAL (${notePublicationCardIds(tx, () => tx`np.context_source_refs`)}) AS pub(card_id)
+        ),
+        card_doc_links AS MATERIALIZED (
+          SELECT DISTINCT c.id AS card_id, linked.id AS document_id
+          FROM cards c
+          CROSS JOIN LATERAL (
+            SELECT c.source_document_id AS id WHERE c.source_document_id IS NOT NULL
+            UNION SELECT pl.document_id FROM pub_links pl WHERE pl.card_id=c.id::text
+            UNION SELECT linked.id FROM opening_learning_observations o
+              LEFT JOIN opening_teaching_activity_specs spec ON spec.activity_id=o.activity_id AND spec.workspace_id=o.workspace_id
+              LEFT JOIN opening_teaching_units unit ON unit.id=spec.teaching_unit_id AND unit.workspace_id=o.workspace_id
+              LEFT JOIN opening_learning_item_versions item ON item.id=o.item_version_id AND item.workspace_id=o.workspace_id
+              LEFT JOIN library_revisions revision ON revision.id=item.teaching_revision_id AND revision.workspace_id=o.workspace_id
+              CROSS JOIN LATERAL unnest(ARRAY[spec.document_id,unit.document_id,revision.document_id]) linked(id)
+              WHERE o.id=c.origin_observation_root_id AND o.workspace_id=c.workspace_id AND o.owner_user_id=c.owner_user_id
+                AND linked.id IS NOT NULL
+          ) linked
+          WHERE c.id=ANY(${batchIds}::uuid[]) AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+        ),
+        admitted_docs AS MATERIALIZED (
+          SELECT doc.document_id,
+            d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
+              (np.workspace_id=${scope.workspaceId} AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
+                () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
+            np.context_source_refs, np.document_id IS NOT NULL AS has_note_provenance,
+            CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END AS snippet_origin
+          FROM (SELECT DISTINCT document_id FROM card_doc_links) doc
+          LEFT JOIN library_documents d ON d.id=doc.document_id AND d.workspace_id=${scope.workspaceId}
+          LEFT JOIN opening_note_provenance np ON np.document_id=doc.document_id
+          LEFT JOIN library_revisions origin ON origin.document_id=doc.document_id AND origin.workspace_id=${scope.workspaceId} AND origin.revision_number=1
         )
-        SELECT
-          c.id AS card_id, linked.id AS document_id,
-          d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
-            (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
-              () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
-          np.context_source_refs, np.document_id IS NOT NULL AS has_note_provenance,
-          CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END AS snippet_origin
-        FROM cards c
-        CROSS JOIN LATERAL (
-          SELECT c.source_document_id AS id WHERE c.source_document_id IS NOT NULL
-          UNION SELECT pl.document_id FROM pub_links pl WHERE pl.card_id=c.id::text
-          UNION SELECT linked.id FROM opening_learning_observations o
-            LEFT JOIN opening_teaching_activity_specs spec ON spec.activity_id=o.activity_id AND spec.workspace_id=o.workspace_id
-            LEFT JOIN opening_teaching_units unit ON unit.id=spec.teaching_unit_id AND unit.workspace_id=o.workspace_id
-            LEFT JOIN opening_learning_item_versions item ON item.id=o.item_version_id AND item.workspace_id=o.workspace_id
-            LEFT JOIN library_revisions revision ON revision.id=item.teaching_revision_id AND revision.workspace_id=o.workspace_id
-            CROSS JOIN LATERAL unnest(ARRAY[spec.document_id,unit.document_id,revision.document_id]) linked(id)
-            WHERE o.id=c.origin_observation_root_id AND o.workspace_id=c.workspace_id AND o.owner_user_id=c.owner_user_id
-              AND linked.id IS NOT NULL
-        ) linked
-        LEFT JOIN library_documents d ON d.id=linked.id AND d.workspace_id=c.workspace_id
-        LEFT JOIN opening_note_provenance np ON np.document_id=linked.id
-        LEFT JOIN library_revisions origin ON origin.document_id=linked.id AND origin.workspace_id=c.workspace_id AND origin.revision_number=1
-        WHERE c.id=ANY(${batchIds}::uuid[]) AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
-        ORDER BY c.id, linked.id`;
+        SELECT l.card_id, l.document_id, a.admitted, a.context_source_refs, a.has_note_provenance, a.snippet_origin
+        FROM card_doc_links l
+        JOIN admitted_docs a ON a.document_id=l.document_id
+        ORDER BY l.card_id, l.document_id`;
       const byCardId = new Map<string, Record<string, unknown>[]>();
       for (const document of documents) {
         const cardId = String(document.card_id);
