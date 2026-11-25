@@ -1162,5 +1162,151 @@ describe("material hybrid retrieval", () => {
         `${midSegs[0]!.chunk.text}\n[…]\n${midSegs[2]!.chunk.text}`,
       );
     });
+
+    it("preserves per-chunk AST sealing as a monotonic floor when cross-chunk code fences close around ## Answer Key", () => {
+      const fencedSrc = "fenced-exam-source";
+      // Exact Round-2 Step-1 P1 scenario: opening fence on page 1, ## Answer Key + answer on page 2, closing fence on page 3.
+      const p1FenceOpen: SourceChunk = {
+        ...chunk("fence-p1", "```markdown\nStarter scaffold", 1),
+        sourceId: fencedSrc,
+      };
+      const p2AnswerKey: SourceChunk = {
+        ...chunk("fence-p2", "## Answer Key\nSecret answer x = 42", 2),
+        sourceId: fencedSrc,
+      };
+      const p3FenceClose: SourceChunk = {
+        ...chunk("fence-p3", "```", 3),
+        sourceId: fencedSrc,
+      };
+
+      const emptyGraphRanked = rankMaterialContext({
+        chunks: [p1FenceOpen, p2AnswerKey, p3FenceClose],
+        query: "Secret answer x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "fence-p2",
+        preferPage: 2,
+        dense: [{ chunk: p2AnswerKey, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [fencedSrc],
+            admissibleSourceVersions: { [fencedSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(emptyGraphRanked).toEqual([]);
+      expect(JSON.stringify(emptyGraphRanked)).not.toContain("Secret answer x = 42");
+
+      // Multi-page continuation variant: page 3 has >6,000B answer continuation before closing ```,
+      // followed by page 4 reopening ## Public Section (plus nested subheading stack pop check).
+      const extSrc = "fenced-continuation-source";
+      const extP1: SourceChunk = {
+        ...chunk("ext-p1", "```\nTemplate header", 1),
+        sourceId: extSrc,
+      };
+      const extP2: SourceChunk = {
+        ...chunk("ext-p2", "# Chapter 1\n\n## Answer Key\nSecret answer x = 42", 2),
+        sourceId: extSrc,
+      };
+      const extP3: SourceChunk = {
+        ...chunk(
+          "ext-p3",
+          "Secret continuation y = 99 for spectral convergence. ".repeat(130) + "\n```",
+          3,
+        ),
+        sourceId: extSrc,
+      };
+      const extP4Public: SourceChunk = {
+        ...chunk(
+          "ext-p4",
+          "## Public Section\nPublic theorem on spectral convergence.",
+          4,
+        ),
+        sourceId: extSrc,
+      };
+      expect(segmentMaterialChunks([extP3]).length).toBeGreaterThan(1);
+
+      const extFallbackP2 = rankMaterialContext({
+        chunks: [extP3, extP4Public, extP1, extP2],
+        query: "spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "ext-p2",
+        preferPage: 2,
+        dense: [
+          { chunk: extP2, segmentIndex: 0 },
+          ...segmentMaterialChunks([extP3]),
+        ],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [extSrc],
+            admissibleSourceVersions: { [extSrc]: 1 },
+            expectedPrivacyEpoch: 2,
+          },
+        },
+      });
+      expect(extFallbackP2.map(c => c.id)).toEqual(["ext-p4"]);
+      expect(JSON.stringify(extFallbackP2)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(extFallbackP2)).not.toContain("Secret continuation y = 99");
+
+      const extFallbackP3 = rankMaterialContext({
+        chunks: [extP1, extP2, extP3, extP4Public],
+        query: "Secret continuation y = 99 spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "ext-p3",
+        preferPage: 3,
+        pedagogicalGraph: {
+          concepts: [
+            // Tainted concept citing fenced-sealed chunks must be discarded while public page 4 survives.
+            { id: "c-leak", label: "Leak", evidenceChunkIds: ["ext-p2"], privacyEpoch: 2 },
+            { id: "c-leak-cont", label: "Leak Cont", evidenceChunkIds: ["ext-p3"], privacyEpoch: 2 },
+            { id: "c-pub", label: "Spectral Convergence", evidenceChunkIds: ["ext-p4"], privacyEpoch: 2 },
+          ],
+          edges: [
+            { from: "c-leak", to: "c-pub", kind: "prerequisite", privacyEpoch: 2 },
+            { from: "c-leak-cont", to: "c-pub", kind: "prerequisite", privacyEpoch: 2 },
+          ],
+          authorization: {
+            admissibleSourceIds: [extSrc],
+            admissibleSourceVersions: { [extSrc]: 1 },
+            expectedPrivacyEpoch: 2,
+          },
+        },
+      });
+      expect(extFallbackP3.map(c => c.id)).toEqual(["ext-p4"]);
+      expect(JSON.stringify(extFallbackP3)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(extFallbackP3)).not.toContain("Secret continuation y = 99");
+
+      // Nested local heading stack check: `# Chapter` -> `### Sub-Answer` (page 2) -> `### Public Section` (page 4)
+      // after fence closes on page 3 cleanly pops `### Sub-Answer` back to `"public"`.
+      const subSrc = "fenced-subheading-source";
+      const subChunks: SourceChunk[] = [
+        { ...chunk("sub-p1", "```\nCode lead", 1), sourceId: subSrc },
+        { ...chunk("sub-p2", "# Chapter 1\n\n### Sub-Answer\nHidden sub-answer z = 7", 2), sourceId: subSrc },
+        { ...chunk("sub-p3", "Hidden sub-answer continuation\n```", 3), sourceId: subSrc },
+        { ...chunk("sub-p4", "### Public Section\nAccessible corollary for subheading check.", 4), sourceId: subSrc },
+      ];
+      const subRanked = rankMaterialContext({
+        chunks: subChunks,
+        query: "Accessible corollary subheading",
+        maxCharacters: 8000,
+        preferChunkId: "sub-p2",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [subSrc],
+            admissibleSourceVersions: { [subSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(subRanked.map(c => c.id)).toEqual(["sub-p4"]);
+      expect(JSON.stringify(subRanked)).not.toContain("Hidden sub-answer");
+    });
   });
 });

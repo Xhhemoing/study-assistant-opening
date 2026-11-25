@@ -570,19 +570,96 @@ function classifyPlainLeadKind(line: string, isHeading: boolean): PedagogicalBlo
   return null;
 }
 
+const PEDAGOGICAL_VISIBILITY_RANK: Readonly<Record<PedagogicalVisibility, number>> = {
+  public: 0,
+  hint_gated: 1,
+  sealed: 2,
+};
+
+function maxPedagogicalVisibility(
+  a: PedagogicalVisibility,
+  b: PedagogicalVisibility,
+): PedagogicalVisibility {
+  return PEDAGOGICAL_VISIBILITY_RANK[a] >= PEDAGOGICAL_VISIBILITY_RANK[b] ? a : b;
+}
+
 function headingMarkdownLevel(block: PedagogicalAstBlock): number | null {
   if (block.kind !== "heading") return null;
   const atx = /^[ \t]{0,3}(#{1,6})(?:[ \t]|$)/.exec(block.text);
   if (atx) return atx[1]!.length;
   const html = /^<h([1-6])(?=[\t\n\f\r />])/i.exec(block.text.trimStart());
   if (html) return Number(html[1]);
-  if (/\r?\n[ \t]*=+[ \t]*$/.test(block.text)) return 1;
-  if (/\r?\n[ \t]*-+[ \t]*$/.test(block.text)) return 2;
-  return 1;
+  if (/(?:^|\r?\n)[ \t]*=+[ \t]*$/.test(block.text)) return 1;
+  if (/(?:^|\r?\n)[ \t]*-+[ \t]*$/.test(block.text)) return 2;
+  return null;
 }
 
-function splitChunkDiscourseBlocks(text: string): PedagogicalAstBlock[] {
-  const rawBlocks = parsePedagogicalAst(text);
+function extractTopLevelHeadings(
+  text: string,
+  rawBlocks: readonly PedagogicalAstBlock[],
+): PedagogicalAstBlock[] {
+  const candidateIndices: number[] = [];
+  for (let i = 0; i < rawBlocks.length; i++) {
+    const block = rawBlocks[i]!;
+    if (block.kind !== "heading") continue;
+    let lineStart = block.startOffset;
+    while (lineStart > 0 && text[lineStart - 1] !== "\n" && text[lineStart - 1] !== "\r") {
+      lineStart--;
+    }
+    if (/^[ \t]{0,3}>/.test(text.slice(lineStart, block.endOffset))) continue;
+    const isAtLineStart = /^[ \t]*$/.test(text.slice(lineStart, block.startOffset));
+    if (!isAtLineStart && headingMarkdownLevel(block) === null) continue;
+    candidateIndices.push(i);
+  }
+  if (candidateIndices.length === 0) return [];
+
+  const candidateSet = new Set(candidateIndices);
+  let eofVisibility: PedagogicalVisibility | undefined;
+  const headings: PedagogicalAstBlock[] = [];
+  for (const idx of candidateIndices) {
+    const block = rawBlocks[idx]!;
+    if (block.visibility !== "public") {
+      const level = headingMarkdownLevel(block) ?? 6;
+      const rank = PEDAGOGICAL_VISIBILITY_RANK[block.visibility];
+      let closedByNextHeading = false;
+      let droppedVisibility = false;
+      for (let k = idx + 1; k < rawBlocks.length; k++) {
+        const next = rawBlocks[k]!;
+        if (candidateSet.has(k) && (headingMarkdownLevel(next) ?? 6) <= level) {
+          closedByNextHeading = true;
+          break;
+        }
+        if (PEDAGOGICAL_VISIBILITY_RANK[next.visibility] < rank) {
+          droppedVisibility = true;
+          break;
+        }
+      }
+      if (droppedVisibility) continue;
+      if (!closedByNextHeading) {
+        let hasPrecedingAtomic = false;
+        for (let p = 0; p < idx; p++) {
+          if (rawBlocks[p]!.atomicConstruct) {
+            hasPrecedingAtomic = true;
+            break;
+          }
+        }
+        if (hasPrecedingAtomic) {
+          if (eofVisibility === undefined) {
+            eofVisibility = parsePedagogicalAst(`${text}\n\nprobe`).at(-1)?.visibility ?? "public";
+          }
+          if (PEDAGOGICAL_VISIBILITY_RANK[eofVisibility] < rank) continue;
+        }
+      }
+    }
+    headings.push(block);
+  }
+  return headings;
+}
+
+function splitChunkDiscourseBlocks(
+  text: string,
+  rawBlocks: readonly PedagogicalAstBlock[] = parsePedagogicalAst(text),
+): PedagogicalAstBlock[] {
   const refined: PedagogicalAstBlock[] = [];
   let inWorkedExample = false;
   let workedExampleHeadingLevel: number | null = null;
@@ -934,19 +1011,66 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
   const allPhysicalChunkIds = new Set(input.chunks.map(chunk => chunk.id));
 
   type DocChunkItem = { chunk: SourceChunk; inputIndex: number };
+  type LocalHeadingFloorSpan = {
+    start: number;
+    end: number;
+    visibility: PedagogicalVisibility;
+  };
   type IndexedDocAst = {
     blocks: readonly PedagogicalAstBlock[];
+    headings: readonly PedagogicalAstBlock[];
     prefixMaxEnd: Float64Array;
   };
   type ChunkDocSpan = {
     docKey: string;
     docStart: number;
     docEnd: number;
+    localHeadingFloorSpans: readonly LocalHeadingFloorSpan[];
     chunkHasProtectedAst: boolean;
   };
 
+  const isProtectedVisibility = (visibility: PedagogicalVisibility): boolean =>
+    visibility === "sealed" || (visibility === "hint_gated" && !allowHintGated);
   const isProtectedAstBlock = (b: PedagogicalAstBlock): boolean =>
-    b.visibility === "sealed" || (b.visibility === "hint_gated" && !allowHintGated);
+    isProtectedVisibility(b.visibility);
+
+  const getIndexedAstBlocks = (text: string, includeHeadings = false): IndexedDocAst => {
+    const rawBlocks = parsePedagogicalAst(text);
+    const headings = includeHeadings
+      ? extractTopLevelHeadings(text, rawBlocks)
+          .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset)
+      : [];
+    const blocks = splitChunkDiscourseBlocks(text, rawBlocks)
+      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+    const prefixMaxEnd = new Float64Array(blocks.length);
+    let maxEnd = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      if (blocks[i]!.endOffset > maxEnd) maxEnd = blocks[i]!.endOffset;
+      prefixMaxEnd[i] = maxEnd;
+    }
+    return { blocks, headings, prefixMaxEnd };
+  };
+
+  const chunkAstById = new Map<string, IndexedDocAst>();
+  const getOrCreateChunkAst = (chunkId: string, text: string): IndexedDocAst => {
+    let cached = chunkAstById.get(chunkId);
+    if (!cached) {
+      cached = getIndexedAstBlocks(text, true);
+      chunkAstById.set(chunkId, cached);
+    }
+    return cached;
+  };
+
+  const stackVisibility = (
+    stack: ReadonlyArray<{ level: number; visibility: PedagogicalVisibility }>,
+  ): PedagogicalVisibility => {
+    let vis: PedagogicalVisibility = "public";
+    for (const entry of stack) {
+      vis = maxPedagogicalVisibility(vis, entry.visibility);
+      if (vis === "sealed") break;
+    }
+    return vis;
+  };
 
   const sliceOverlappingAstBlocks = (
     docAst: IndexedDocAst,
@@ -1010,11 +1134,12 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
         || a.inputIndex - b.inputIndex,
     );
     const parts: string[] = [];
-    const spans: Array<{ chunkId: string; docStart: number; docEnd: number }> = [];
+    const spans: Array<{ chunk: SourceChunk; docStart: number; docEnd: number }> = [];
     let offset = 0;
     let prevText = "";
     for (let i = 0; i < group.length; i++) {
-      const currText = group[i]!.chunk.text;
+      const currChunk = group[i]!.chunk;
+      const currText = currChunk.text;
       if (i > 0) {
         const hasBoundaryNewline =
           prevText.endsWith("\n") || prevText.endsWith("\r")
@@ -1027,43 +1152,81 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       const docStart = offset;
       parts.push(currText);
       offset += currText.length;
-      spans.push({ chunkId: group[i]!.chunk.id, docStart, docEnd: offset });
+      spans.push({ chunk: currChunk, docStart, docEnd: offset });
       prevText = currText;
     }
-    const docText = parts.join("");
-    const blocks = splitChunkDiscourseBlocks(docText)
-      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
-    const prefixMaxEnd = new Float64Array(blocks.length);
-    let maxEnd = 0;
-    for (let i = 0; i < blocks.length; i++) {
-      if (blocks[i]!.endOffset > maxEnd) maxEnd = blocks[i]!.endOffset;
-      prefixMaxEnd[i] = maxEnd;
-    }
-    const indexedAst: IndexedDocAst = { blocks, prefixMaxEnd };
+    const indexedAst = getIndexedAstBlocks(parts.join(""));
     docAstByKey.set(docKey, indexedAst);
+
+    const localHeadingStack: Array<{ level: number; visibility: PedagogicalVisibility }> = [];
     for (const span of spans) {
-      const chunkBlocks = sliceOverlappingAstBlocks(indexedAst, span.docStart, span.docEnd);
-      chunkDocSpanById.set(span.chunkId, {
+      const localAst = getOrCreateChunkAst(span.chunk.id, span.chunk.text);
+      const localIntraChunkStack: Array<{ level: number; visibility: PedagogicalVisibility }> = [];
+      const localHeadingFloorSpans: LocalHeadingFloorSpan[] = [];
+      let cursor = 0;
+      let currentFloorVis = stackVisibility(localHeadingStack);
+
+      for (const heading of localAst.headings) {
+        if (heading.startOffset > cursor) {
+          localHeadingFloorSpans.push({
+            start: cursor,
+            end: heading.startOffset,
+            visibility: currentFloorVis,
+          });
+          cursor = heading.startOffset;
+        }
+        const level = headingMarkdownLevel(heading) ?? 6;
+        while (
+          localHeadingStack.length > 0
+          && localHeadingStack[localHeadingStack.length - 1]!.level >= level
+        ) {
+          localHeadingStack.pop();
+        }
+        while (
+          localIntraChunkStack.length > 0
+          && localIntraChunkStack[localIntraChunkStack.length - 1]!.level >= level
+        ) {
+          localIntraChunkStack.pop();
+        }
+        const localParentVis = stackVisibility(localIntraChunkStack);
+        const ownRawHeadingVis = localParentVis === "public"
+          ? heading.visibility
+          : (parsePedagogicalAst(heading.text)[0]?.visibility ?? heading.visibility);
+        localIntraChunkStack.push({
+          level,
+          visibility: maxPedagogicalVisibility(localParentVis, ownRawHeadingVis),
+        });
+        localHeadingStack.push({
+          level,
+          visibility: maxPedagogicalVisibility(stackVisibility(localHeadingStack), ownRawHeadingVis),
+        });
+        currentFloorVis = stackVisibility(localHeadingStack);
+      }
+
+      if (cursor < span.chunk.text.length) {
+        localHeadingFloorSpans.push({
+          start: cursor,
+          end: span.chunk.text.length,
+          visibility: currentFloorVis,
+        });
+      }
+
+      const docChunkBlocks = sliceOverlappingAstBlocks(indexedAst, span.docStart, span.docEnd);
+      const chunkHasProtectedLocalHeadingFloor = localHeadingFloorSpans.some(s =>
+        isProtectedVisibility(s.visibility),
+      );
+      chunkDocSpanById.set(span.chunk.id, {
         docKey,
         docStart: span.docStart,
         docEnd: span.docEnd,
-        chunkHasProtectedAst: chunkBlocks.some(isProtectedAstBlock),
+        localHeadingFloorSpans,
+        chunkHasProtectedAst:
+          docChunkBlocks.some(isProtectedAstBlock)
+          || localAst.blocks.some(isProtectedAstBlock)
+          || chunkHasProtectedLocalHeadingFloor,
       });
     }
   }
-
-  const fallbackChunkAstById = new Map<string, IndexedDocAst>();
-  const getIndexedAstBlocks = (text: string): IndexedDocAst => {
-    const blocks = splitChunkDiscourseBlocks(text)
-      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
-    const prefixMaxEnd = new Float64Array(blocks.length);
-    let maxEnd = 0;
-    for (let i = 0; i < blocks.length; i++) {
-      if (blocks[i]!.endOffset > maxEnd) maxEnd = blocks[i]!.endOffset;
-      prefixMaxEnd[i] = maxEnd;
-    }
-    return { blocks, prefixMaxEnd };
-  };
 
   const pedagogicalChunks: PedagogicalChunk[] = [];
   const admissibleSegments: MaterialSegment[] = [];
@@ -1123,30 +1286,55 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
 
     const chunkSpan = chunkDocSpanById.get(originalChunk.id);
     let docAst: IndexedDocAst;
+    let localAst: IndexedDocAst;
     let segDocStart: number;
     let segDocEnd: number;
+    let localStart: number;
+    let localEnd: number;
+    let localHeadingFloorVis: PedagogicalVisibility = "public";
     let chunkHasProtectedAst: boolean;
     if (chunkSpan && entry.endOffset <= chunkSpan.docEnd - chunkSpan.docStart) {
       docAst = docAstByKey.get(chunkSpan.docKey)!;
+      localAst = getOrCreateChunkAst(originalChunk.id, originalChunk.text);
       segDocStart = chunkSpan.docStart + entry.startOffset;
       segDocEnd = chunkSpan.docStart + entry.endOffset;
+      localStart = entry.startOffset;
+      localEnd = entry.endOffset;
+      for (const floorSpan of chunkSpan.localHeadingFloorSpans) {
+        if (floorSpan.end <= localStart) continue;
+        if (floorSpan.start >= localEnd) break;
+        localHeadingFloorVis = maxPedagogicalVisibility(localHeadingFloorVis, floorSpan.visibility);
+        if (localHeadingFloorVis === "sealed") break;
+      }
       chunkHasProtectedAst = chunkSpan.chunkHasProtectedAst;
     } else {
-      let cached = fallbackChunkAstById.get(originalChunk.id);
-      if (!cached) {
-        cached = getIndexedAstBlocks(originalChunk.text);
-        fallbackChunkAstById.set(originalChunk.id, cached);
-      }
-      docAst = cached;
-      segDocStart = entry.startOffset;
-      segDocEnd = entry.endOffset;
-      chunkHasProtectedAst = docAst.blocks.some(isProtectedAstBlock);
+      const fitsOriginal = entry.endOffset <= originalChunk.text.length;
+      localAst = fitsOriginal
+        ? getOrCreateChunkAst(originalChunk.id, originalChunk.text)
+        : getIndexedAstBlocks(entry.segment.chunk.text, true);
+      docAst = localAst;
+      localStart = fitsOriginal ? entry.startOffset : 0;
+      localEnd = fitsOriginal ? entry.endOffset : entry.segment.chunk.text.length;
+      segDocStart = localStart;
+      segDocEnd = localEnd;
+      chunkHasProtectedAst = localAst.blocks.some(isProtectedAstBlock);
     }
 
-    const overlapping = sliceOverlappingAstBlocks(docAst, segDocStart, segDocEnd);
-    if (overlapping.length === 0) {
-      const prevBlock = findPrecedingAstBlock(docAst, segDocEnd);
-      const segmentInProtectedScope = chunkHasProtectedAst || (prevBlock !== undefined && isProtectedAstBlock(prevBlock));
+    const docOverlapping = sliceOverlappingAstBlocks(docAst, segDocStart, segDocEnd);
+    const localOverlapping = docAst === localAst
+      ? docOverlapping
+      : sliceOverlappingAstBlocks(localAst, localStart, localEnd);
+
+    if (docOverlapping.length === 0 && localOverlapping.length === 0) {
+      const prevDocBlock = findPrecedingAstBlock(docAst, segDocEnd);
+      const prevLocalBlock = docAst === localAst
+        ? prevDocBlock
+        : findPrecedingAstBlock(localAst, localEnd);
+      const segmentInProtectedScope =
+        chunkHasProtectedAst
+        || isProtectedVisibility(localHeadingFloorVis)
+        || (prevDocBlock !== undefined && isProtectedAstBlock(prevDocBlock))
+        || (prevLocalBlock !== undefined && isProtectedAstBlock(prevLocalBlock));
       const excludedByFamily = chunkFamilyId !== undefined && excludedItemFamilyIds.has(chunkFamilyId);
       if (chunkAdmissible && !segmentInProtectedScope && !excludedByFamily) {
         fallbackSegments.push(entry.segment);
@@ -1157,38 +1345,55 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       continue;
     }
 
-    let visibility: PedagogicalVisibility = "public";
-    for (const block of overlapping) {
-      if (block.visibility === "sealed") {
-        visibility = "sealed";
-        break;
-      }
-      if (block.visibility === "hint_gated") {
-        visibility = "hint_gated";
-      }
+    let docVis: PedagogicalVisibility = "public";
+    for (const block of docOverlapping) {
+      docVis = maxPedagogicalVisibility(docVis, block.visibility);
+      if (docVis === "sealed") break;
     }
+    let localVis: PedagogicalVisibility = "public";
+    for (const block of localOverlapping) {
+      localVis = maxPedagogicalVisibility(localVis, block.visibility);
+      if (localVis === "sealed") break;
+    }
+    const visibility = maxPedagogicalVisibility(
+      maxPedagogicalVisibility(docVis, localVis),
+      localHeadingFloorVis,
+    );
+
+    const combinedOverlapping = docAst === localAst
+      ? docOverlapping
+      : [...docOverlapping, ...localOverlapping];
 
     let segmentFamilyId = chunkFamilyId;
-    for (const block of overlapping) {
-      const blockFamily = (block as PedagogicalAstBlock & { itemFamilyId?: string }).itemFamilyId;
-      if (blockFamily !== undefined) {
-        if (excludedItemFamilyIds.has(blockFamily)) {
-          segmentFamilyId = blockFamily;
-          break;
+    if (segmentFamilyId === undefined || !excludedItemFamilyIds.has(segmentFamilyId)) {
+      for (const block of combinedOverlapping) {
+        const blockFamily = (block as PedagogicalAstBlock & { itemFamilyId?: string }).itemFamilyId;
+        if (blockFamily !== undefined) {
+          if (excludedItemFamilyIds.has(blockFamily)) {
+            segmentFamilyId = blockFamily;
+            break;
+          }
+          segmentFamilyId ??= blockFamily;
         }
-        segmentFamilyId ??= blockFamily;
       }
     }
 
-    const visibleBlocks = overlapping.filter(
+    const primaryOverlapping = docOverlapping.length > 0 ? docOverlapping : localOverlapping;
+    const visibleBlocks = primaryOverlapping.filter(
       b => b.visibility === "public" || (b.visibility === "hint_gated" && allowHintGated),
     );
-    const kind = visibility === "sealed" && overlapping.some(b => b.kind === "solution")
-      ? "solution"
-      : selectSegmentBlockKind(visibleBlocks.length > 0 ? visibleBlocks : overlapping);
+    const kind: PedagogicalBlockKind =
+      visibility === "sealed"
+      && (combinedOverlapping.some(b => b.kind === "solution" || b.visibility === "sealed")
+        || localHeadingFloorVis === "sealed")
+        ? "solution"
+        : selectSegmentBlockKind(visibleBlocks.length > 0 ? visibleBlocks : primaryOverlapping);
     const constructKinds: PedagogicalBlockKind[] = [];
-    for (const block of overlapping) {
+    for (const block of primaryOverlapping) {
       if (!constructKinds.includes(block.kind)) constructKinds.push(block.kind);
+    }
+    if (kind === "solution" && !constructKinds.includes("solution")) {
+      constructKinds.push("solution");
     }
 
     pedagogicalChunks.push({
@@ -1199,7 +1404,7 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       kind,
       constructKinds,
       visibility,
-      atomicConstruct: overlapping.some(b => b.atomicConstruct),
+      atomicConstruct: primaryOverlapping.some(b => b.atomicConstruct),
       text: entry.segment.chunk.text,
       startOffset: entry.startOffset,
       endOffset: entry.endOffset,
