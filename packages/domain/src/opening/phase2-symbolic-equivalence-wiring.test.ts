@@ -4,7 +4,7 @@ import { acceptedAiGradingOutcome, evaluateAiCorrectness } from "./ai-evaluation
 import { observation } from "./evidence-eligibility-fixtures";
 import type { EvidenceEligibilityReasonCode } from "./evidence-eligibility-types";
 import { proofFeedbackAllowsOutcome } from "./proof-feedback";
-import { proofStepUsesRealScalar, verifyStandaloneProofEquationClaim, verifySymbolicStepEquivalence } from "./symbolic-answer-bridge";
+import { independentProseClauses, proofStepUsesRealScalar, verifyStandaloneProofEquationClaim, verifySymbolicStepEquivalence } from "./symbolic-answer-bridge";
 import { evaluateTeachingAnswer as check } from "./teaching-answer-check";
 
 const numeric = { kind: "numeric" as const };
@@ -462,6 +462,178 @@ function expectOutcome(
       expected === "correct" ? "ai_graded_correct" : "ai_graded_incorrect", "ai_evaluation_uncalibrated",
     ] });
 }
+
+describe("symbolic proof feedback Round 18", () => {
+  const real = { transcription: "Work over ℝ. 1+1=0." };
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    'The rubric gives "work over F₂" as feedback.',
+    "The rubric gives “work over F₂” as an example of feedback.",
+    "The rubric says 'work over F₂'.", "The rubric says ‘work over F₂’.",
+    "评分细则写着「在 F₂ 上计算」。", "评分细则写着『在 F₂ 上计算』。",
+    "The rubric uses work over F₂ as an example.",
+    "The rubric illustrates its wording, for example, work over F₂.",
+    "The rubric illustrates its wording, e.g. work over F₂.",
+    "评分细则将在 F₂ 上计算作为反馈示例。", "评分细则举例说明：在 F₂ 上计算。",
+  ])("ignores illustrative scalar domains in %s", feedback => {
+    const steps = sequence("1+1=0");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified", real);
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      feedback, transcription: "Work over ℝ. " + feedback + " 1+1=0.",
+    });
+  });
+
+  it.each([
+    "Work over $F₂$.", "For example, over $F₂$, 1+1=0.", "例如在 $F₂$ 上有 1+1=0。",
+  ])("preserves mathematical domain evidence in %s", transcription => {
+    expectOutcome("correct", sequence("1+1=0"), "correct", { transcription });
+  });
+
+  it("keeps asserted evidence before an illustrative aside", () => {
+    const steps = sequence("1+1=0");
+    steps.steps[0]!.feedback = "Work over ℝ, for example the rubric mentions F₂.";
+    expectOutcome("correct", steps, "unverified", { transcription: "Work over F₂. 1+1=0." });
+  });
+
+  it.each([
+    "Use F₂ starting in the next step.", "Use F₂, starting in the next step.",
+    "Use F₂, in the next step.", "Work over F₂, from Step 2 onward.",
+    "在 F₂ 上计算，从下一步开始。", "在 F₂ 上计算，仅在下一步。",
+  ])("attaches a trailing step qualifier in %s", feedback => {
+    const steps = sequence("1+1=0", "Continue.");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified", real);
+    expect([...proofStepUsesRealScalar(steps.steps, real.transcription, []).values()]).toEqual([true, false]);
+  });
+
+  it.each([
+    "Use ℝ, and in the next step use F₂", "In Step 1 use ℝ, in Step 2 use F₂",
+    "第一步使用 ℝ，第二步使用 F₂",
+  ])("keeps independent domain clauses in %s", feedback => {
+    const steps = sequence("1+1=2", "1+1=0");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "correct");
+    expect([...proofStepUsesRealScalar(steps.steps, undefined, []).values()]).toEqual([true, false]);
+  });
+
+  it.each([
+    "The next step uses ℝ, but for this step use F₂.",
+    "In Step 2 use ℝ, and in this step use F₂.",
+    "Step 2 uses ℝ, while this step uses F₂.",
+    "The next step uses ℝ, but throughout this particular step use F₂.",
+    "下一步使用 ℝ，但在本步中使用 F₂。", "下一步使用 ℝ，此行使用 F₂。",
+  ])("returns to the current step in %s", feedback => {
+    const steps = sequence("1+1=0", "1+1=2");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "correct", real);
+    expect([...proofStepUsesRealScalar(steps.steps, real.transcription, []).values()]).toEqual([false, true]);
+  });
+
+  it.each([
+    "For this step only, work over F₂.", "Work over F₂ for this step only.",
+    "Only in this step, use F₂.", "In Step 1 only, work over F₂.",
+    "In this single step, work over F₂.", "Temporarily work over F₂ for this step.",
+    "Use F₂ in this step alone.", "Use F₂ solely for this step.", "Use F₂ exclusively in this step.",
+    "Just for this step use F₂.", "Merely for this step use F₂.",
+    "仅在本步中使用 F₂。", "只在第一步使用 F₂。", "本步暂时使用 F₂。",
+  ])("keeps an override local to the named step in %s", feedback => {
+    const steps = sequence("2+2=4", "1+1=0");
+    steps.steps[0]!.feedback = feedback;
+    const transcription = "Work over ℝ. 2+2=4. 1+1=0.";
+    expectOutcome("correct", steps, "unverified", { transcription });
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual([false, true]);
+  });
+
+  it("applies temporary overrides from anchored and transcribed clauses", () => {
+    const steps = sequence("2+2=4", "1+1=0", "1+1=2");
+    const feedback = "Only in Step 2, use F₂.";
+    const transcription = "Work over ℝ. 2+2=4. 1+1=0. 1+1=2.";
+    expectOutcome("correct", steps, "correct", { feedback, transcription });
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, [feedback]).values()]).toEqual([true, false, true]);
+    const inline = "Work over ℝ. 2+2=4, work over F₂ for this step only. 1+1=0. 1+1=2.";
+    expectOutcome("correct", steps, "unverified", { transcription: inline });
+    expect([...proofStepUsesRealScalar(steps.steps, inline, []).values()]).toEqual([false, true, true]);
+  });
+
+  it("keeps a temporary override for a missing step label from leaking to a later step", () => {
+    const steps = sequence("2+2=4", "1+1=0");
+    steps.steps[1]!.stepIndex = 4;
+    const transcription = "Work over ℝ. 2+2=4. 1+1=0.";
+    expectOutcome("correct", steps, "unverified", { transcription, feedback: "Only in Step 2, use F₂." });
+    expectOutcome("correct", steps, "correct", { transcription, feedback: "From Step 2 onward, use F₂." });
+  });
+
+  it.each([
+    "After this, use F₂.", "Following this, use F₂.", "Beyond this, work over F₂.",
+    "Once this is done, use F₂.", "在此之后，使用 F₂。", "这之后使用 F₂。",
+  ])("defers a nounless transition in %s", feedback => {
+    const steps = sequence("1+1=0", "Continue.");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified", real);
+    expect([...proofStepUsesRealScalar(steps.steps, real.transcription, []).values()]).toEqual([true, false]);
+  });
+
+  it.each(["After this field, use F₂.", "After this ring, use F₂.", "After this second step, use F₂."])(
+    "keeps nounless transition matching distinct from other uses of this in %s", feedback => {
+      const steps = sequence("2+2=4", "Continue.", "Finish.");
+      steps.steps[0]!.feedback = feedback;
+      const expected = feedback.includes("second") ? [true, true, false] : [false, false, false];
+      expect([...proofStepUsesRealScalar(steps.steps, undefined, []).values()]).toEqual(expected);
+    },
+  );
+
+  it.each([
+    "both derivations skip", "neither derivation skips", "either step skips", "another proof skips",
+    "other proofs skip", "many lines skip", "several equations skip", "few arguments skip",
+    "most calculations skip", "one derivation skips", "two derivations skip", "three derivations skip",
+    "12 derivations skip", "first steps skip", "second steps skip", "third steps skip", "next steps skip",
+    "later steps skip", "earlier steps skip", "previous steps skip", "subsequent steps skip",
+    "final steps skip", "last steps skip", "remaining steps skip", "following steps skip",
+    "derivations skip", "equalities skip", "Step 1 skips",
+  ])("keeps the coordinated complement under its denial in %s", subject => {
+    const feedback = "It is false that the proof lacks justification, and that " + subject + " a necessary step.";
+    expectOutcome("incorrect", incorrectEquality(identity, feedback), "unverified", { feedback: "The equality is incorrect." });
+    expect(independentProseClauses(feedback)).toEqual([feedback]);
+  });
+
+  it.each([
+    "It is false that the proof lacks justification, and that step skips a necessary step.",
+    "It is false that the proof lacks justification, and that first step skips a necessary step.",
+    "不能说证明缺少理由，但你的证明跳过了必要步骤。",
+  ])("retains the independent critique in %s", feedback => {
+    expect(independentProseClauses(feedback)).toHaveLength(2);
+    const steps = incorrectEquality(identity);
+    steps.steps[0]!.feedback += " " + feedback;
+    expectOutcome("incorrect", steps, "incorrect");
+  });
+
+  it.each(["Step 4", "第4步", "The second step", "第二步", "2nd step", "the final step", "the last step", "最后一步"])(
+    "keeps a critique of %s from authorizing a verdict on another step", label => {
+      const steps = sequence(identity, "1+1=2");
+      Object.assign(steps.steps[0]!, { verdict: "incorrect", feedback: "The equality is incorrect." });
+      steps.steps[1]!.stepIndex = 4;
+      expectOutcome("incorrect", steps, "unverified", { feedback: label + " skips a necessary step." });
+      expectOutcome("incorrect", steps, "unverified", {
+        criteria: [{ label, verdict: "incorrect", feedback: "Missing justification." }],
+      });
+    },
+  );
+
+  it.each(["The first step", "1st step", "第一步", "This step", "本步", "the penultimate step", "倒数第二步"])(
+    "uses %s when it identifies the graded step", label => {
+      const steps = sequence(identity, "1+1=2");
+      Object.assign(steps.steps[0]!, { stepIndex: 2, verdict: "incorrect", feedback: "The equality is incorrect." });
+      steps.steps[1]!.stepIndex = 4;
+      const feedback = label + " skips a necessary step.";
+      expectOutcome("incorrect", steps, "incorrect", { feedback });
+      expectOutcome("incorrect", steps, "incorrect", {
+        criteria: [{ label, verdict: "incorrect", feedback: "Missing justification." }],
+      });
+    },
+  );
+});
 
 describe("symbolic proof feedback Round 17", () => {
   const identity = "(x+1)^2=x^2+2x+1";

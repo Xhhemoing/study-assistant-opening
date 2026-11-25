@@ -1,8 +1,8 @@
 import type { AiGradingProposal, ProofFeedback } from "@aistudy/contracts";
 import {
   assertiveProseSentences, counterfactualProofSteps, feedbackDeniesProvenEquality, ILLUSTRATIVE_PROOF_ROLE,
-  independentProseClauses, maskProofQuotations, proofStepUsesRealScalar,
-  STEP_ANCHOR, verifyStandaloneProofEquationClaim,
+  independentProseClauses, maskProofQuotations, proofStepReferences, proofStepUsesRealScalar,
+  verifyStandaloneProofEquationClaim,
 } from "./symbolic-answer-bridge";
 
 type ProofContext = Partial<Pick<AiGradingProposal, "feedback" | "criteria" | "transcription">>;
@@ -86,21 +86,27 @@ function positiveInferenceClauses(text: string): string[] {
 const STEP_PREFIX_END = /(?:[,;:—–，；：](?:\s*(?:in|for|at|see))?|\b(?:and|but|yet|whereas|also|moreover|furthermore)\b|而且|并且|此外)\s*$/iu;
 const STEP_LABEL_PUNCTUATION = /^\s*[:：,，—–-]+/u;
 
-function scopeFeedbackToStep(text: string | undefined, stepIndex: number): string | undefined {
+function scopeFeedbackToStep(
+  text: string | undefined, stepIndex: number, orderedSteps: ProofFeedback["steps"],
+): string | undefined {
   if (!text) return text;
   text = maskProofQuotations(text);
-  if (!text.matchAll(STEP_ANCHOR).next().value) return text;
+  if (!proofStepReferences(text, orderedSteps, stepIndex).next().value) return text;
   const applicable: string[] = [];
   for (const sentence of assertiveProseSentences(text)) {
     let start = 0;
     let target: number | undefined;
-    for (const anchor of sentence.matchAll(STEP_ANCHOR)) {
-      const segment = sentence.slice(start, anchor.index);
+    for (const anchor of proofStepReferences(sentence, orderedSteps, stepIndex)) {
+      const segment = sentence.slice(start, anchor.start);
+      if (target === undefined && anchor.stepIndex === stepIndex && !STEP_PREFIX_END.test(segment)) {
+        target = stepIndex;
+        continue;
+      }
       if (target === stepIndex || (target === undefined && STEP_PREFIX_END.test(segment))) {
         applicable.push(segment.replace(STEP_PREFIX_END, "").replace(STEP_LABEL_PUNCTUATION, ""));
       }
-      target = Number(anchor[1] ?? anchor[2]);
-      start = anchor.index + anchor[0].length;
+      target = anchor.stepIndex;
+      start = anchor.end;
     }
     if (target === undefined || target === stepIndex) {
       applicable.push(sentence.slice(start).replace(STEP_LABEL_PUNCTUATION, ""));
@@ -159,15 +165,16 @@ export function proofFeedbackAllowsOutcome(
   }
   const incorrectRequired = required.filter(step => step.verdict === "incorrect");
   const incorrectCriteria = context?.criteria?.filter(criterion => criterion.verdict === "incorrect") ?? [];
+  const orderedSteps = [...proof.steps].sort((left, right) => left.stepIndex - right.stepIndex);
   return incorrectRequired.some(step => {
     const { claim, feedback, repairPrompt } = step;
     if (!stepUsesRealScalar.get(step) || !verifyStandaloneProofEquationClaim(claim).unconditional) return true;
-    const proposalFeedback = scopeFeedbackToStep(context?.feedback, step.stepIndex);
+    const proposalFeedback = scopeFeedbackToStep(context?.feedback, step.stepIndex, orderedSteps);
     const criteriaFeedback = incorrectCriteria.flatMap(criterion => {
-      const otherStep = [...criterion.label.matchAll(STEP_ANCHOR)]
-        .some(anchor => Number(anchor[1] ?? anchor[2]) !== step.stepIndex);
+      const otherStep = [...proofStepReferences(maskProofQuotations(criterion.label), orderedSteps, step.stepIndex)]
+        .some(anchor => anchor.stepIndex !== step.stepIndex);
       if (otherStep) return [];
-      const scoped = scopeFeedbackToStep(criterion.feedback, step.stepIndex);
+      const scoped = scopeFeedbackToStep(criterion.feedback, step.stepIndex, orderedSteps);
       return scoped ? [scoped] : [];
     });
     if ([feedback, repairPrompt, proposalFeedback, ...criteriaFeedback]
