@@ -106,13 +106,16 @@ _SEALED_HEADING_CONTINUATION = r"(?:\s*\(\s*(?:continued|cont(?:['’]?d)?\.?)\s
 _ASSESSMENT_NUMBER = r"#?\d+(?:\.\d+)*"
 _ASSESSMENT_RANGE = rf"\s+{_ASSESSMENT_NUMBER}(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER}"
 _ASSESSMENT_TARGET = rf"(?:\s+{_ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER})?)?"
+_ASSESSMENT_QUALIFIER = r"(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*"
+_SINGULAR_ASSESSMENT_TOPIC = r"(?:Exercise|Problem|Question|Review\s+Question|Practice\s+Problem|Self[- ]Check\s+Exercise)"
 _ASSESSMENT_ANSWER_HEADING = (
     r"(?:Answers?|Solutions?|Key)\s+to\s+"
-    r"(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*"
+    rf"{_ASSESSMENT_QUALIFIER}"
     rf"(?:(?:Exercises|Problems|Questions|Review\s+Questions|Practice\s+Problems|Self[- ]Check\s+Exercises){_ASSESSMENT_TARGET}"
-    rf"|(?:Exercise|Problem|Question|Review\s+Question|Practice\s+Problem|Self[- ]Check\s+Exercise)(?:{_ASSESSMENT_RANGE}|(?=\s*(?:[:：(]|$)))"
+    rf"|{_SINGULAR_ASSESSMENT_TOPIC}(?:{_ASSESSMENT_RANGE}|(?=\s*(?:[:：(]|$)))"
     r"|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
 )
+_ENGLISH_ANSWER_QUALIFIER = r"(?:Model|Selected|Official|Reference|Correct|Sample|Odd-Numbered|Even-Numbered)"
 _SOLUTION_QUALIFIER = r"(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)"
 _QUALIFIED_ANSWER_SECTION = rf"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|{_SOLUTION_QUALIFIER}\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
 _CHINESE_ANSWER_HEADING = (
@@ -170,22 +173,25 @@ _NUMBERED_QUESTION_SOLUTION_RE = re.compile(
     rf"^(?:解答{_CHINESE_ANSWER_CONTINUATION}|Solution{_CONTINUED_LABEL})\s*[:：]$",
     re.IGNORECASE,
 )
-_QUALIFIED_SOLUTION_LABEL_RE = re.compile(
-    rf"^{_SOLUTION_QUALIFIER}\s+Solutions?"
-    rf"(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)",
-    re.IGNORECASE,
+_NUMBERED_ANSWER_TARGET = rf"(?:\s+to\s+{_ASSESSMENT_QUALIFIER}{_SINGULAR_ASSESSMENT_TOPIC})"
+_NUMBERED_ENGLISH_INLINE_SUFFIX = rf"\s*{_ASSESSMENT_NUMBER}{_SEALED_HEADING_CONTINUATION}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
+_CASE_SENSITIVE_TARGET = (
+    r"(?:\s+(?:to|TO)\s+(?:(?:the|THE|Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL"
+    r"|(?:Chapter|CHAPTER)\s+\d+|(?:Section|SECTION)\s+\d+(?:\.\d+)*)\s+)*"
+    r"(?:Review\s+[Qq]uestion|REVIEW\s+QUESTION|Practice\s+[Pp]roblem|PRACTICE\s+PROBLEM"
+    r"|Self[- ][Cc]heck\s+[Ee]xercise|SELF[- ]CHECK\s+EXERCISE|Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION))"
 )
-
-_NUMBERED_ANSWER_TARGET = r"(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION))"
-_NUMBERED_ENGLISH_INLINE_SUFFIX = rf"\s*\d+(?:\.\d+)*{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
 
 # Single-item answers use a colon or a standalone qualified heading.
 _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
-    rf"(?:(?:(?:Worked|Full|WORKED|FULL)\s+)?(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)|[Kk]ey|KEY){_NUMBERED_ANSWER_TARGET}?{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
-    rf"|{_ENGLISH_SOLUTION_LABEL}{_NUMBERED_ANSWER_TARGET}{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
+    rf"(?i:(?:{_SEALED_CONTAINER_PREFIX})?(?:"
+    rf"{_SOLUTION_QUALIFIER}\s+Solutions?(?:{_NUMBERED_ANSWER_TARGET}(?:\s*{_ASSESSMENT_NUMBER})?)?(?:\s*{_ASSESSMENT_NUMBER})?{_SEALED_HEADING_CONTINUATION}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
+    rf"|(?:(?:(?:{_ENGLISH_ANSWER_QUALIFIER}|Worked|Full)\s+)?Answers?(?:\s+Key)?|Key){_NUMBERED_ANSWER_TARGET}?{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
+    rf"|(?:(?:Worked|Full|Sample)\s+)?Solutions?{_NUMBERED_ANSWER_TARGET}{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
+    r"))"
     rf"|(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?){_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
-    rf"|{_QUALIFIED_ANSWER_LABEL}(?:{_NUMBERED_ANSWER_TARGET}?\s*\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
+    rf"|{_QUALIFIED_ANSWER_LABEL}{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
     rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案)(?:\s*\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?"
     rf"|(?:{_CHINESE_ANSWER_HEADING}|答案)\s*\d+(?:[.\-]\d+)*{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)"
     rf"|(?:{_CHINESE_ANSWER_HEADING}|答案){_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
@@ -195,8 +201,8 @@ _INLINE_SEALED_ALWAYS_RE = re.compile(
 # Inline solution/proof markers sealed ONLY outside worked_example context.
 _INLINE_SEALED_NON_EXAMPLE_RE = re.compile(
     r"^(?:"
-    rf"{_ENGLISH_SOLUTION_LABEL}{_NUMBERED_ANSWER_TARGET}?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
-    rf"|{_ENGLISH_SOLUTION_LABEL}\s+\d+(?:\.\d+)*{_CONTINUED_LABEL}\s*$"
+    rf"(?i:(?:{_SEALED_CONTAINER_PREFIX})?(?:(?:Worked|Full|Sample)\s+)?Solutions?{_NUMBERED_ENGLISH_INLINE_SUFFIX})"
+    rf"|{_ENGLISH_SOLUTION_LABEL}{_CASE_SENSITIVE_TARGET}?{_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
     rf"|【\s*(?:{_CHINESE_SOLUTION_LABEL}|解)(?:\s*\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?"
     rf"|(?:{_CHINESE_SOLUTION_LABEL}|解)\s*\d+(?:[.\-]\d+)*{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)"
     rf"|(?:{_CHINESE_SOLUTION_LABEL}|解){_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
@@ -781,11 +787,9 @@ def _is_worked_example_heading(stripped: str) -> bool:
 
 
 def _is_titled_non_answer_chapter(stripped: str) -> bool:
-    if _is_running_page_heading(stripped, bare_containers_are_counters=False):
-        return False
     chinese = _CHINESE_CONTAINER_PREFIX_RE.match(stripped)
     m = chinese or _ENGLISH_CONTAINER_PREFIX_RE.match(stripped)
-    if not m:
+    if not m or _is_running_page_heading(stripped, bare_containers_are_counters=False):
         return False
     suffix = stripped[m.end():]
     title = re.sub(r"^[\s:：.．—–-]+", "", suffix)
@@ -926,12 +930,14 @@ def _is_section_sealed_opener(stripped: str) -> bool:
 
 
 def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[str], *, in_worked_example: bool, in_exercise: bool,
-                      follows_numbered_question: bool, seal_mode: str | None, assessment_solutions: bool, assessment_context_line: bool):
+                      follows_numbered_question: bool, seal_mode: str | None, assessment_solutions: bool, assessment_context_line: bool,
+                      stripped: str | None = None):
     """Return (kind, seal_kind, is_explicit_opener, is_section_break, is_major_non_answer, caption_ref, associated_visual_kind)."""
     raw_trimmed = line_text.strip()
     is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
     docling_heading = frag_label in _HEADING_LABELS
-    stripped = _strip_heading_markup(line_text)
+    if stripped is None:
+        stripped = _strip_heading_markup(line_text)
     if assessment_solutions:
         return "solution_sealed", "section_sealed", True, False, False, None, None
     if assessment_context_line:
@@ -965,11 +971,10 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
 
     exercise_answer = (numbered_question_answer
                        or in_exercise and (_BARE_ANSWER_LABEL_RE.match(stripped) or _CHINESE_EXERCISE_ANSWER_RE.match(stripped)))
-    qualified_solution = _QUALIFIED_SOLUTION_LABEL_RE.match(stripped)
     if not exercise_answer and _is_section_sealed_opener(stripped):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
-    if numbered_question_answer or qualified_solution or _INLINE_SEALED_ALWAYS_RE.match(stripped):
+    if numbered_question_answer or _INLINE_SEALED_ALWAYS_RE.match(stripped):
         return "solution_sealed", "inline_sealed", True, False, False, None, None
 
     if (not in_worked_example and not _ASSESSMENT_SOLUTIONS_HEADING_RE.match(stripped)
@@ -1025,7 +1030,7 @@ def _iter_page_units(fragments: list[tuple[str, str | None]]):
 
 
 def _inline_answer_body(stripped: str) -> str:
-    for label in (_NUMBERED_QUESTION_SOLUTION_RE, _INLINE_SEALED_ALWAYS_RE, _QUALIFIED_SOLUTION_LABEL_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
+    for label in (_NUMBERED_QUESTION_SOLUTION_RE, _INLINE_SEALED_ALWAYS_RE, _INLINE_SEALED_NON_EXAMPLE_RE,
                   _STANDALONE_SOLUTION_HEADING_RE):
         match = label.match(stripped)
         if match:
@@ -1161,6 +1166,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             seal_mode=active_seal,
             assessment_solutions=assessment_context >= 0,
             assessment_context_line=index == assessment_context_line,
+            stripped=stripped,
         )
 
         if is_furniture:

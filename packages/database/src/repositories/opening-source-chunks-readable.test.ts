@@ -388,9 +388,26 @@ describe("page-less archived PDF chunks", () => {
       .toEqual(["1. Find x."]);
     expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", "Solution: x = 2.\n\n2. Find y.", "Public follow-up."])).map(c => c.text))
       .toEqual(["1. Find x.", "Public follow-up."]);
-    for (const label of ["答案 1：", "答案 1、", "答案 1。", "Answer to Exercise 1:", "Key 1:", "Solution to Exercise 1:", "解 1：", "【解析】", "Official Answer 1", "Official Solution 1."]) {
-      expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", label, "x = 2"])).map(c => c.text), label)
+    for (const label of [
+      "答案 1：", "答案 1、", "答案 1。", "Answer to Exercise 1:", "Answer to Exercise #1:",
+      "Answer to Review Question 1:", "Solution to Practice Problem #2:", "Key to the Self-Check Exercise #1:",
+      "Answer #1:", "Solution #1:", "Official Solution #1.", "Official Solution to Practice Problem #1.",
+      "Key 1:", "Solution to Exercise 1:", "解 1：", "【解析】", "Official Answer 1", "Official Solution 1.",
+    ]) {
+      expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", label, "2. Find y."])).map(c => c.text), label)
         .toEqual(["1. Find x."]);
+    }
+    for (const inlineDone of [
+      "Answer to Exercise #1: x = 2.", "Answer to Review Question 1: Yes.",
+      "Solution to Practice Problem #2: x = 2.", "Key to the Self-Check Exercise #1: True.",
+      "Official Solution #1. x = 2.",
+    ]) {
+      expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", inlineDone, "2. Find y."])).map(c => c.text), inlineDone)
+        .toEqual(["1. Find x.", "2. Find y."]);
+    }
+    for (const sectionHeading of ["Answers to Exercises #1-#5", "Answer to Review Questions 1-3", "Answer to Exercise:"]) {
+      expect(filterPublicSamePagePdfChunks(chunks([sectionHeading, "1. x = 2.", "2. Find y."])), sectionHeading)
+        .toEqual([]);
     }
     expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", "Solution: Proof. Substitution gives x = 2. ∎", "Chapter 2: Groups"])).map(c => c.text))
       .toEqual(["1. Find x.", "Chapter 2: Groups"]);

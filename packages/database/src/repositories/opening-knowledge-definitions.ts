@@ -17,7 +17,8 @@ const chineseExplanation = "(?:解答|解析|详解)";
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
 const assessmentRange = String.raw` +${assessmentNumber}(?: *[-–—] *| +(?:to|through) +)${assessmentNumber}`;
 const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
-const assessmentTopic = String.raw`(?:(?:review +questions|practice +problems|self[- ]check +exercises|exercises|problems|questions)${assessmentTarget}|(?:review +question|practice +problem|self[- ]check +exercise|exercise|problem|question)(?:${assessmentRange}|(?= *(?:[:：(]|$)))|chapter +\d+|section +\d+(?:\.\d+)*)`;
+const singularAssessmentTopic = String.raw`(?:review +question|practice +problem|self[- ]check +exercise|exercise|problem|question)`;
+const assessmentTopic = String.raw`(?:(?:review +questions|practice +problems|self[- ]check +exercises|exercises|problems|questions)${assessmentTarget}|${singularAssessmentTopic}(?:${assessmentRange}|(?= *(?:[:：(]|$)))|chapter +\d+|section +\d+(?:\.\d+)*)`;
 const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter +\d+|section +\d+(?:\.\d+)*) +)*`;
 const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
 const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|${solutionQualifier} +solutions|solutions? +manual|answers? +and +solutions?)`;
@@ -26,9 +27,9 @@ const assessmentSolutionsHeading = String.raw`${lineStart}Solutions${englishCont
 const assessmentSolutionsContext = String.raw`${lineStart}(?:(?:Chapter|Section|Part|Unit|Lecture) +(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?=[ :：.—–-]|$)|(?:Exercises?|Problems?|Questions?|Review(?: +Questions?)?|Practice(?: +Problems?)?|Quiz|Drills?|Self[- ]Check)\M(?= *(?:[:：.—–-]|$)| +(?:#?\d|(?:for|of|on|from) +(?:Chapter|Section|Part|Unit)\M))|(?:\d+|[a-z])[.)](?= |$)|[（(] *(?:\d+|[a-z]) *[)）](?= |$))`;
 const standaloneAssessmentItem = String.raw`${lineStart}\d+[.)] *$`;
 // Periods also end prose. Keep these patterns separate from case-insensitive answer labels.
-const inlinePeriodSuffix = String.raw`(?: +\d+(?:\.\d+)*)?(?: *\( *(?:continued|cont\.?|CONTD?\.?|CONTINUED) *\))? *\.(?= |$)`;
+const inlinePeriodSuffix = String.raw`(?: +${assessmentNumber})?(?: *\( *(?:continued|cont\.?|CONTD?\.?|CONTINUED) *\))? *\.(?= |$)`;
 const inlineAnswerPeriod = String.raw`(?:Answer +[Kk]ey|ANSWER +KEY|Answers?|ANSWERS?|(?:Official|Model|Correct|Sample|Reference) +[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE) +ANSWER)${inlinePeriodSuffix}`;
-const inlineSolutionPeriod = String.raw`(?:(?:Worked|Full|Sample|Official|Reference) +[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE) +SOLUTIONS?|Solutions?|SOLUTIONS?)(?: +(?:to|TO) +(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION) *\d*(?:\.\d+)*)?${inlinePeriodSuffix}`;
+const inlineSolutionPeriod = String.raw`(?:(?:Worked|Full|Sample|Official|Reference) +[Ss]olutions?|(?:WORKED|FULL|SAMPLE|OFFICIAL|REFERENCE) +SOLUTIONS?|Solutions?|SOLUTIONS?)(?: +(?:to|TO) +(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION) *#?\d*(?:\.\d+)*)?${inlinePeriodSuffix}`;
 const answerPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineAnswerPeriod}`;
 const solutionPeriodLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?${inlineSolutionPeriod}`;
 const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineAnswerPeriod}|${inlineSolutionPeriod})`;
@@ -36,10 +37,10 @@ const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContain
 // and numbered labels can open an inline answer.
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
-const numberedAnswerTarget = String.raw`(?: +to +(?:exercise|problem|question))`;
-const numberedAnswerSuffix = String.raw` *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|(?:\.(?: |$)|。)|$)`;
-const qualifiedSolutionLabel = String.raw`${lineStart}${qualifiedSolution}(?:${numberedAnswerTarget}(?: *\d+(?:\.\d+)*)?)?(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|\.(?= |$) *|$)`;
-const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full|sample) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:【 *)?(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|(?:\.(?: |$)|。)|$)`;
+const numberedAnswerTarget = String.raw`(?: +to +${assessmentQualifier}${singularAssessmentTopic})`;
+const numberedAnswerSuffix = String.raw` *${assessmentNumber}${englishContinuation} *(?:[:：]|(?:\.(?: |$)|。)|$)`;
+const qualifiedSolutionLabel = String.raw`${lineStart}${qualifiedSolution}(?:${numberedAnswerTarget})?(?: *${assessmentNumber})?${englishContinuation} *(?:[:：] *|\.(?= |$) *|$)`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution}|(?:(?:worked|full|sample) +)?solutions?)${numberedAnswerTarget}${numberedAnswerSuffix}|(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerSuffix}|(?:【 *)?(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|(?:\.(?: |$)|。)|$)`;
 // These labels can also explain a worked example. Qualified keys and explicit
 // assessment targets remain unconditional answers.
 const numberedSolution = String.raw`(?:(?:worked|full|sample) +)?solutions?${numberedAnswerSuffix}`;
@@ -91,13 +92,12 @@ const exerciseHeading = String.raw`${lineStart}(?:(?:exercises?|practice +proble
 const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确答案|参考解答|详细解答)${chineseContinuation}[:：] *(?=[^ ])`;
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
 const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
-const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|${numberedSolution} *|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
+const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|${numberedSolution} *|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +${assessmentNumber})?${englishContinuation} *(?:[:：] *|$))`;
 const inlineOpenerPrefix = [
   String.raw`【 *(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)(?: *\d+(?:[.-]\d+)*)?${chineseContinuation}】 *[:：]? *`,
-  String.raw`${qualifiedSolution}(?:${numberedAnswerTarget}(?: *\d+(?:\.\d+)*)?)?(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
-  numberedAnswer,
-  numberedSolution,
-  String.raw`(?:【 *)?(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}】? *(?:[:：、]|(?:\.(?: |$)|。)|$)`,
+  String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution}|(?:(?:worked|full|sample) +)?solutions?)(?:${numberedAnswerTarget})?${numberedAnswerSuffix}`,
+  String.raw`${qualifiedSolution}(?:${numberedAnswerTarget})?${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
+  String.raw`(?:【 *)?(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}】? *(?:[:：、]|(?:\.(?: |$)|。)|$)`,
   String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)${chineseContinuation} *[:：] *`,
   String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation})${chineseContinuation} *$`,
   String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +(?:key|section))?|(?:(?:worked|full|sample|official|reference) +)?solutions?)${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,

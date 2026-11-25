@@ -223,9 +223,11 @@ describe("source content self-read versus additional PDF retry access", () => {
       .resolves.toMatchObject({ pages: [1], text: "1. Find x." });
 
     for (const label of [
-      "答案 1：", "答案 1、", "答案 1。", "参考答案 1：", "Answer to Exercise 1:", "Key 1:",
-      "Answers 1:", "Solution to Exercise 1:", "解 1：", "解答 1：", "解析 1：", "解析：",
-      "详解：", "【参考答案】", "【解析】", "Official Answer 1", "Official Solution 1.",
+      "答案 1：", "答案 1、", "答案 1。", "参考答案 1：", "Answer to Exercise 1:", "Answer to Exercise #1:",
+      "Answer to Review Question 1:", "Solution to Practice Problem #2:", "Key to the Self-Check Exercise #1:",
+      "Answer #1:", "Solution #1:", "Official Solution #1.", "Official Solution to Practice Problem #1.",
+      "Answers to Selected Exercise #1:", "Key 1:", "Answers 1:", "Solution to Exercise 1:", "解 1：", "解答 1：",
+      "解析 1：", "解析：", "详解：", "【参考答案】", "【解析】", "Official Answer 1", "Official Solution 1.",
     ]) {
       const numberedStandalone = [
         { id: "n0", page: 1, text: "1. Find x.", characters: 10, readable: true },
@@ -236,7 +238,11 @@ describe("source content self-read versus additional PDF retry access", () => {
         .resolves.toMatchObject({ pages: [1], characters: 10, text: "1. Find x." });
     }
 
-    for (const inlineDone of ["答案 1。x = 2。", "Chapter 1: Official Solution 1: Yes."]) {
+    for (const inlineDone of [
+      "答案 1。x = 2。", "Chapter 1: Official Solution 1: Yes.", "Answer to Exercise #1: x = 2.",
+      "Answer to Review Question 1: Yes.", "Solution to Practice Problem #2: x = 2.",
+      "Key to the Self-Check Exercise #1: True.", "Official Solution #1. x = 2.",
+    ]) {
       const completedSameLine = [
         { id: "d0", page: 1, text: "1. Find x.", characters: 10, readable: true },
         { id: "d1", page: 1, text: inlineDone, characters: inlineDone.length, readable: true },
@@ -244,6 +250,16 @@ describe("source content self-read versus additional PDF retry access", () => {
       ];
       await expect(readOpeningSourceContent(database(source, completedSameLine), scope, "source", { page: 1 }))
         .resolves.toMatchObject({ pages: [1], text: "1. Find x.\n\n2. Find y." });
+    }
+
+    for (const sectionHeading of ["Answers to Exercises #1-#5", "Answer to Review Questions 1-3", "Answer to Exercise:"]) {
+      const sectionRows = [
+        { id: "s0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+        { id: "s1", page: 1, text: `${sectionHeading}\n1. x = 2.`, characters: sectionHeading.length + 10, readable: true },
+        { id: "s2", page: 1, text: "2. Find y.", characters: 10, readable: true },
+      ];
+      await expect(readOpeningSourceContent(database(source, sectionRows), scope, "source", { page: 1 }))
+        .resolves.toMatchObject({ pages: [1], text: "1. Find x." });
     }
 
     const crossPageWorkedExample = [

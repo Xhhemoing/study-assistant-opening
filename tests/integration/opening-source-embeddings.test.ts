@@ -2541,6 +2541,13 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         ["00000000-0000-4000-8000-000000006519", 10, "Solution: Q.E.D.", null, 19],
         ["00000000-0000-4000-8000-000000006520", 10, "Proof: Another theorem.", null, 20],
         ["00000000-0000-4000-8000-000000006521", 11, "Public continuation of that theorem proof.", null, 21],
+        // Pages 12..13 (Round 66 P1): standalone singular assessment heading seals same-page continuation, while same-line terminal body closes cleanly.
+        ["00000000-0000-4000-8000-000000006522", 12, "1. Review prompt.", null, 22],
+        ["00000000-0000-4000-8000-000000006523", 12, "Answer to Review Question 1:", null, 23],
+        ["00000000-0000-4000-8000-000000006524", 12, "Yes.", null, 24],
+        ["00000000-0000-4000-8000-000000006525", 13, "1. Self-check prompt.", null, 25],
+        ["00000000-0000-4000-8000-000000006526", 13, "Key to the Self-Check Exercise #1: True.", null, 26],
+        ["00000000-0000-4000-8000-000000006527", 13, "2. Solve y + 1 = 3.", null, 27],
       ];
       for (const [id, page, text, imageKey, ms] of specs) {
         await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text,image_object_key,created_at)
@@ -2596,6 +2603,12 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       expect(listed.filter(c => c.page === 11).map(c => c.text)).toEqual([
         "Public continuation of that theorem proof.",
       ]);
+      expect(listed.filter(c => c.page === 12).map(c => c.text)).toEqual([
+        "1. Review prompt.",
+      ]);
+      expect(listed.filter(c => c.page === 13).map(c => c.text)).toEqual([
+        "1. Self-check prompt.", "2. Solve y + 1 = 3.",
+      ]);
 
       // Recovery mode still preserves raw imageObjectKey on Page 3.
       const recoveryPage3 = await chunksRepo.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3], { unpublishedPdfForRecovery: true });
@@ -2626,7 +2639,7 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       ]);
 
       // readOpeningSourceContent matches SQL across cross-page worked examples, proof windows, auxiliary isolation, and post-Q.E.D. Proof.
-      const expectedPages = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11];
+      const expectedPages = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13];
       await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 }))
         .resolves.toMatchObject({ pages: expectedPages, text: "Solution:\n\n(x - 1)(x + 1)." });
       await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
@@ -2641,6 +2654,10 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         .resolves.toMatchObject({ pages: expectedPages, text: "2. Find y." });
       await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 10 }))
         .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x.\n\nProof: Another theorem." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 12 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Review prompt." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 13 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Self-check prompt.\n\n2. Solve y + 1 = 3." });
 
       // readCitedChunk & preserveOpeningKnowledgeDefinitions suppress imageObjectKey on Page 3 while retaining "1. Find x." definition, and drop sealed sibling "x = 2".
       const courseId = randomUUID();
@@ -2682,6 +2699,26 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         SELECT id FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=2)`;
       await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=2`;
       await f.sql`ALTER TABLE opening_source_chunks ADD CONSTRAINT opening_source_chunks_source_id_source_version_page_key UNIQUE (source_id, source_version, page)`;
+    }
+  });
+
+  it("enforces Round-66 singular numbered and #-prefixed assessment answer headings across standalone, same-line, and section-range boundaries", async () => {
+    for (const label of [
+      "Answer to Exercise #1:", "Answer to Review Question 1:", "Solution to Practice Problem #2:",
+      "Key to the Self-Check Exercise #1:", "Answer #1:", "Solution #1:", "Official Solution #1.",
+      "Official Solution to Practice Problem #1.", "Answers to Selected Exercise #1:",
+    ]) {
+      await expectArchivedPdfPages([`1. Find x.\n${label}`, "x = 2.", "Chapter 2: Groups"], [3], 2);
+    }
+    for (const doneLabel of [
+      "Answer to Exercise #1: x = 2.", "Answer to Review Question 1: Yes.",
+      "Solution to Practice Problem #2: x = 2.", "Key to the Self-Check Exercise #1: True.",
+      "Official Solution #1. x = 2.",
+    ]) {
+      await expectArchivedPdfPages([`1. Find x.\n${doneLabel}`, "Public prose after answer."], [2], 1);
+    }
+    for (const sectionHeading of ["Answers to Exercises #1-#5", "Answer to Review Questions 1-3", "Answer to Exercise:"]) {
+      await expectArchivedPdfPages([`${sectionHeading}\n1. x = 2.`, "2. y = 3.", "Chapter 2: Groups"], [3], 2);
     }
   });
 });

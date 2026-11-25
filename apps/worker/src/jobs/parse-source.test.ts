@@ -1509,8 +1509,12 @@ describe("parse source handler", () => {
         [3, `${workedExample}\nChapter 2: 第2张\nSolution: 2张`],
       ]);
 
-    // Round 65 P1 #1: Numbered answer/explanation delimiters carry inline seal when standalone and close when terminal body follows.
-    for (const label of ["答案 1、", "答案 1。", "Answer to Exercise 1:", "Key 1:", "Solution to Exercise 1:", "解析 1。"]) {
+    // Round 65 & 66: Numbered answer/explanation delimiters carry inline seal when standalone and close when terminal body follows.
+    for (const label of [
+      "答案 1、", "答案 1。", "Answer to Exercise 1:", "Answer to Exercise #1:", "Answer to Review Question 1:",
+      "Solution to Practice Problem #2:", "Key to the Self-Check Exercise #1:", "Answer #1:", "Solution #1:",
+      "Official Solution #1.", "Official Solution to Practice Problem #1.", "Key 1:", "Solution to Exercise 1:", "解析 1。",
+    ]) {
       const standaloneRun = await deps({
         segmentPages: 1,
         segments: makeSegments(),
@@ -1535,7 +1539,10 @@ describe("parse source handler", () => {
           [3, "Chapter 2\nPublic prose.", null],
         ]);
     }
-    for (const doneLabel of ["答案 1。x = 2。", "Key 1: x = 2."]) {
+    for (const doneLabel of [
+      "答案 1。x = 2。", "Key 1: x = 2.", "Answer to Exercise #1: x = 2.", "Answer to Review Question 1: Yes.",
+      "Solution to Practice Problem #2: x = 2.", "Key to the Self-Check Exercise #1: True.", "Official Solution #1. x = 2.",
+    ]) {
       const completedRun = await deps({
         segmentPages: 1,
         segments: makeSegments(),
@@ -1556,6 +1563,32 @@ describe("parse source handler", () => {
         .toEqual([
           [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
           [2, "Public prose after answer.", null],
+        ]);
+    }
+    for (const sectionLabel of ["Answers to Exercises #1-#5", "Answer to Review Questions 1-3", "Answer to Exercise:"]) {
+      const sectionRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${sectionLabel}\n1. x = 2.`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : start === 2
+              ? { page: 2, text: seeded === "section_sealed" ? "" : "2. y = 3.", imagePath: null, visualKinds: [],
+                hadSealedContent: seeded === "section_sealed", sectionSealedAtEnd: seeded === "section_sealed" }
+              : { page: 3, text: "Chapter 2: Groups\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(sectionRun.handler({ ...job, claimToken: `claim-r66-section-${sectionLabel}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 3 });
+      expect((sectionRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), sectionLabel)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [3, "Chapter 2: Groups\nPublic prose.", null],
         ]);
     }
   });
