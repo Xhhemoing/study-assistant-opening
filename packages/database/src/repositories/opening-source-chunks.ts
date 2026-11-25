@@ -4,7 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
-import { isPublicSourceChunk, preserveOpeningKnowledgeDefinitions, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { filterPublicChunkRows, preserveOpeningKnowledgeDefinitions, publicPdfChunkImageObjectKey, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
 import { commitPdfPageSeals, type PdfSegmentPage } from "./opening-pdf-segments";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
@@ -29,19 +29,22 @@ export type OpeningPdfChunkPublisher = {
     warning?: ApiFailure & { pdfTextCap?: number[] };
   }): Promise<void>;
 };
-export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
+export function mapChunk(row: Record<string, unknown>): SourceChunk {
+  const imageObjectKey = ("public_image_object_key" in row ? row.public_image_object_key : row.image_object_key) as string | null;
+  return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey };
+}
 async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[],
   options?: { unpublishedPdfForRecovery: true }): Promise<SourceChunk[]> {
   const recovery = options?.unpublishedPdfForRecovery === true;
   const rows = await sql`
     ${recovery ? sql`` : publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds: [sourceId], sourceVersion: version })}
-    SELECT c.*, s.mime FROM opening_source_chunks c
+    SELECT c.*, ${recovery ? sql`` : sql`${publicPdfChunkImageObjectKey(sql)} AS public_image_object_key,`} s.mime FROM opening_source_chunks c
     JOIN opening_sources s ON s.id=c.source_id
     WHERE c.source_id=${sourceId} AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
       AND c.source_version=${version} ${pages ? sql`AND c.page=ANY(${pages}::int[])` : sql``}
       AND ${recovery ? sql`TRUE` : publicPdfChunkPredicate(sql)}
     ORDER BY c.page NULLS LAST, c.created_at`;
-  return (recovery ? rows : rows.filter(isPublicSourceChunk)).map(mapChunk);
+  return (recovery ? rows : filterPublicChunkRows(rows)).map(mapChunk);
 }
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
   return chunks.some((chunk) => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey?.trim()));
@@ -233,7 +236,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
     if (!sourceIds.length) return [];
     const rows = await sql`
       ${publicPdfSealBoundaries(sql, scope.workspaceId, { sourceIds })}
-      SELECT c.*, s.mime FROM opening_source_chunks c
+      SELECT c.*, ${publicPdfChunkImageObjectKey(sql)} AS public_image_object_key, s.mime FROM opening_source_chunks c
       JOIN opening_sources s ON s.id = c.source_id
       JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=${scope.ownerUserId}
       WHERE s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
@@ -251,6 +254,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
         AND c.source_id IN ${sql(sourceIds)}
       ORDER BY c.source_id, c.source_version DESC, c.page NULLS LAST, c.created_at
     `;
-    return rows.filter(isPublicSourceChunk).map(mapChunk);
+    return filterPublicChunkRows(rows).map(mapChunk)
+      .filter(chunk => chunk.text.trim().length > 0 || Boolean(chunk.imageObjectKey));
   },
 }; }

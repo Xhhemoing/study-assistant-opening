@@ -104,11 +104,14 @@ _SEALED_SECTION_CONTAINER = r"(?:Appendix\b(?:\s+[A-Z0-9]+)?|Chapter\s+\d+|Secti
 _SEALED_CONTAINER_PREFIX = rf"(?:{_SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)|附录)"
 _SEALED_HEADING_CONTINUATION = r"(?:\s*\(\s*(?:continued|cont(?:['’]?d)?\.?)\s*\))?"
 _ASSESSMENT_NUMBER = r"#?\d+(?:\.\d+)*"
+_ASSESSMENT_RANGE = rf"\s+{_ASSESSMENT_NUMBER}(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER}"
 _ASSESSMENT_TARGET = rf"(?:\s+{_ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+){_ASSESSMENT_NUMBER})?)?"
 _ASSESSMENT_ANSWER_HEADING = (
     r"(?:Answers?|Solutions?|Key)\s+to\s+"
     r"(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*"
-    rf"(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?){_ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
+    rf"(?:(?:Exercises|Problems|Questions|Review\s+Questions|Practice\s+Problems|Self[- ]Check\s+Exercises){_ASSESSMENT_TARGET}"
+    rf"|(?:Exercise|Problem|Question|Review\s+Question|Practice\s+Problem|Self[- ]Check\s+Exercise)(?:{_ASSESSMENT_RANGE}|(?=\s*(?:[:：(]|$)))"
+    r"|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)"
 )
 _SOLUTION_QUALIFIER = r"(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)"
 _QUALIFIED_ANSWER_SECTION = rf"(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|{_SOLUTION_QUALIFIER}\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)"
@@ -173,22 +176,30 @@ _QUALIFIED_SOLUTION_LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_NUMBERED_ANSWER_TARGET = r"(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION))"
+_NUMBERED_ENGLISH_INLINE_SUFFIX = rf"\s*\d+(?:\.\d+)*{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
+
 # Single-item answers use a colon or a standalone qualified heading.
 _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
-    rf"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
-    rf"|{_QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
-    rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案){_CHINESE_ANSWER_CONTINUATION}\s*】"
-    rf"|(?:{_CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
+    rf"(?:(?:(?:Worked|Full|WORKED|FULL)\s+)?(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)|[Kk]ey|KEY){_NUMBERED_ANSWER_TARGET}?{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
+    rf"|{_ENGLISH_SOLUTION_LABEL}{_NUMBERED_ANSWER_TARGET}{_NUMBERED_ENGLISH_INLINE_SUFFIX}"
+    rf"|(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?){_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
+    rf"|{_QUALIFIED_ANSWER_LABEL}(?:{_NUMBERED_ANSWER_TARGET}?\s*\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*(?:{_ENGLISH_INLINE_DELIMITER}|$)"
+    rf"|【\s*(?:{_CHINESE_ANSWER_HEADING}|答案)(?:\s*\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?"
+    rf"|(?:{_CHINESE_ANSWER_HEADING}|答案)\s*\d+(?:[.\-]\d+)*{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)"
+    rf"|(?:{_CHINESE_ANSWER_HEADING}|答案){_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
     r")"
 )
 
 # Inline solution/proof markers sealed ONLY outside worked_example context.
 _INLINE_SEALED_NON_EXAMPLE_RE = re.compile(
     r"^(?:"
-    rf"{_ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
-    rf"|【\s*{_CHINESE_SOLUTION_LABEL}{_CHINESE_ANSWER_CONTINUATION}\s*】"
-    rf"|(?:{_CHINESE_SOLUTION_LABEL}|解)\s*(?:\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
+    rf"{_ENGLISH_SOLUTION_LABEL}{_NUMBERED_ANSWER_TARGET}?(?:\s+\d+(?:\.\d+)*)?{_CONTINUED_LABEL}\s*{_ENGLISH_INLINE_DELIMITER}"
+    rf"|{_ENGLISH_SOLUTION_LABEL}\s+\d+(?:\.\d+)*{_CONTINUED_LABEL}\s*$"
+    rf"|【\s*(?:{_CHINESE_SOLUTION_LABEL}|解)(?:\s*\d+(?:[.\-]\d+)*)?{_CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?"
+    rf"|(?:{_CHINESE_SOLUTION_LABEL}|解)\s*\d+(?:[.\-]\d+)*{_CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)"
+    rf"|(?:{_CHINESE_SOLUTION_LABEL}|解){_CHINESE_ANSWER_CONTINUATION}\s*[:：]"
     r")"
 )
 _STANDALONE_SOLUTION_HEADING_RE = re.compile(

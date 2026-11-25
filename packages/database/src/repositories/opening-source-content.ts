@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
-import { filterPublicSamePagePdfChunks, publicPdfChunkPredicate, publicPdfSealBoundaries } from "./opening-knowledge-definitions";
+import { filterPublicSamePagePdfChunks, publicPdfChunkPredicate, publicPdfSealBoundaries, type ArchivePdfCursorState } from "./opening-knowledge-definitions";
 
 type PageStats = { page: number | null; characters: number; readable: boolean };
 
@@ -44,11 +44,25 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
         SELECT c.id,c.page,length(c.text)::int AS characters,c.text ~ '[^[:space:]]' AS readable,c.text
         ${fromPdf} ORDER BY c.page NULLS LAST,c.created_at,c.id`;
       const byPage = new Map<number | null, PageStats>();
+      const cursorState: ArchivePdfCursorState = {
+        inWorkedExample: false,
+        inExercise: false,
+        previousNumberedQuestion: false,
+      };
+      let lastFlushedPage: number | null | undefined;
       let bufferedPage: number | null | undefined;
       let pageRows: Array<Record<string, unknown> & { text: string; page: number | null }> = [];
       const flushPage = () => {
         if (!pageRows.length) return;
-        for (const row of filterPublicSamePagePdfChunks(pageRows)) {
+        const currentPage = pageRows[0]?.page == null ? null : Number(pageRows[0].page);
+        if (currentPage === null) {
+          cursorState.inWorkedExample = false;
+          cursorState.inExercise = false;
+          cursorState.previousNumberedQuestion = false;
+        } else if (lastFlushedPage !== undefined && lastFlushedPage !== null && currentPage > lastFlushedPage + 1) {
+          cursorState.previousNumberedQuestion = false;
+        }
+        for (const row of filterPublicSamePagePdfChunks(pageRows, currentPage === null ? undefined : cursorState)) {
           const page = row.page == null ? null : Number(row.page);
           const current = byPage.get(page);
           byPage.set(page, { page, characters: (current?.characters ?? 0) + Number(row.characters), readable: Boolean(current?.readable || row.readable) });
@@ -56,6 +70,7 @@ export async function readOpeningSourceContent(sql: Sql, scope: OpeningScope, id
           ids.push(String(row.id));
           permittedIds.set(page, ids);
         }
+        lastFlushedPage = currentPage;
         pageRows = [];
       };
       for await (const rows of query.cursor(16)) {

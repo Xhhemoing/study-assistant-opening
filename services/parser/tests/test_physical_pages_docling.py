@@ -1921,6 +1921,33 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             self.assertTrue(ext_exited.had_sealed_by_page[1], non_running_in_example)
             self.assertTrue(ext_exited.inline_sealed_by_page[1], non_running_in_example)
 
+        for standalone_label in ("答案 1、", "答案 1。", "Answer to Exercise 1:", "Key 1:", "Solution to Exercise 1:", "解析 1。"):
+            ext_standalone = physical_pages.extract_physical_pages(
+                result_for(
+                    [text_element(1, f"1. Find x.\n{standalone_label}", 1)],
+                    [text_element(2, "x = 2.", 2)],
+                    [text_element(3, "Public prose after answer.", 3)],
+                    start_page=1,
+                )
+            )
+            self.assertEqual(ext_standalone.texts_by_page[1], ["1. Find x."], standalone_label)
+            self.assertTrue(ext_standalone.inline_sealed_by_page[1], standalone_label)
+            self.assertFalse(ext_standalone.inline_answer_has_body_by_page[1], standalone_label)
+            self.assertEqual(ext_standalone.texts_by_page[2], [], standalone_label)
+            self.assertEqual(ext_standalone.texts_by_page[3], ["Public prose after answer."], standalone_label)
+
+        for completed_label in ("答案 1。x = 2。", "Answer to Exercise 1: x = 2.", "Key 1: x = 2."):
+            ext_completed = physical_pages.extract_physical_pages(
+                result_for(
+                    [text_element(1, f"1. Find x.\n{completed_label}", 1)],
+                    [text_element(2, "Public prose after answer.", 2)],
+                    start_page=1,
+                )
+            )
+            self.assertEqual(ext_completed.texts_by_page[1], ["1. Find x."], completed_label)
+            self.assertFalse(ext_completed.inline_sealed_by_page[1], completed_label)
+            self.assertEqual(ext_completed.texts_by_page[2], ["Public prose after answer."], completed_label)
+
 
 if __name__ == "__main__":
     if WORKER_FIXTURE_MODE:

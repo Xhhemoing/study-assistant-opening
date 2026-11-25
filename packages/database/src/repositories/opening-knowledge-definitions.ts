@@ -15,8 +15,9 @@ const chineseAnswerHeading = "(?:参考答案与解析|参考答案|标准答案
 const chineseContinuation = String.raw`(?: *[（(](?:续|接上页)[）)])? *`;
 const chineseExplanation = "(?:解答|解析|详解)";
 const assessmentNumber = String.raw`#?\d+(?:\.\d+)*`;
+const assessmentRange = String.raw` +${assessmentNumber}(?: *[-–—] *| +(?:to|through) +)${assessmentNumber}`;
 const assessmentTarget = String.raw`(?: +${assessmentNumber}(?:(?: *[-–—] *| +(?:to|through) +)${assessmentNumber})?)?`;
-const assessmentTopic = String.raw`(?:(?:review +questions?|practice +problems?|self[- ]check +exercises?|exercises?|problems?|questions?)${assessmentTarget}|chapter +\d+|section +\d+(?:\.\d+)*)`;
+const assessmentTopic = String.raw`(?:(?:review +questions|practice +problems|self[- ]check +exercises|exercises|problems|questions)${assessmentTarget}|(?:review +question|practice +problem|self[- ]check +exercise|exercise|problem|question)(?:${assessmentRange}|(?= *(?:[:：(]|$)))|chapter +\d+|section +\d+(?:\.\d+)*)`;
 const assessmentQualifier = String.raw`(?:(?:the|selected|odd-numbered|even-numbered|all|chapter +\d+|section +\d+(?:\.\d+)*) +)*`;
 const assessmentAnswers = String.raw`(?:answers?|solutions?|key) +to +${assessmentQualifier}${assessmentTopic}`;
 const qualifiedSectionAnswers = String.raw`(?:(?:selected|odd-numbered|even-numbered) +answers?|model +answers|${solutionQualifier} +solutions|solutions? +manual|answers? +and +solutions?)`;
@@ -36,9 +37,9 @@ const exerciseInlineAnswerPeriod = String.raw`${lineStart}(?:${pdfHeadingContain
 const sectionAnswer = String.raw`(?:(?:${pdfHeadingContainer})?(?:(?:${assessmentAnswers}|${qualifiedSectionAnswers})${englishContinuation} *(?:[:：]|$)|(?:answers? +(?:key|section)|answers)${englishContinuation} *[:：]? *$|(?:【 *${chineseAnswerHeading}${chineseContinuation}】|${chineseAnswerHeading}${chineseContinuation} *(?:[:：]|$))|答案${chineseContinuation}[:：]? *$)|${pdfHeadingContainer}(?:answers? +key|(?:${englishAnswerQualifier} +)?(?:answers?|solutions?)|${chineseAnswerHeading}|答案|解答)${englishContinuation} *(?:[:：]|$))`;
 const inlineAnswer = String.raw`(?:(?:answers? +(?:key|section)|${englishAnswerQualifier} +answers?|(?:official|reference) +solutions?|answers?)${englishContinuation} *(?:[:：]|$)|(?:【 *)?(?:${chineseAnswerHeading}|答案)${chineseContinuation}(?:】|[:：]|$))`;
 const numberedAnswerTarget = String.raw`(?: +to +(?:exercise|problem|question))`;
-const numberedAnswerSuffix = String.raw` *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|[.。](?: |$)|$)`;
+const numberedAnswerSuffix = String.raw` *\d+(?:\.\d+)*${englishContinuation} *(?:[:：]|(?:\.(?: |$)|。)|$)`;
 const qualifiedSolutionLabel = String.raw`${lineStart}${qualifiedSolution}(?:${numberedAnswerTarget}(?: *\d+(?:\.\d+)*)?)?(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|\.(?= |$) *|$)`;
-const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full|sample) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|[.。](?: |$)|$)`;
+const numberedAnswer = String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +key)?|key|${qualifiedSolution})${numberedAnswerTarget}?${numberedAnswerSuffix}|(?:(?:worked|full|sample) +)?solutions?${numberedAnswerTarget}${numberedAnswerSuffix}|(?:【 *)?(?:${chineseAnswerHeading}|答案) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[:：、】]|(?:\.(?: |$)|。)|$)`;
 // These labels can also explain a worked example. Qualified keys and explicit
 // assessment targets remain unconditional answers.
 const numberedSolution = String.raw`(?:(?:worked|full|sample) +)?solutions?${numberedAnswerSuffix}`;
@@ -52,7 +53,7 @@ const jsNumberedQuestion = new RegExp(numberedQuestion, "u");
 const jsEnglishSolutionLabel = new RegExp(lineStart + englishSolutionLabel, "iu");
 const sectionAnswerLine = String.raw`${lineStart}(?:${sectionAnswer}|解答${chineseContinuation}[:：]? *$)`;
 const answerLabelLine = String.raw`${lineStart}(?:${sectionAnswer}|(?:${pdfHeadingContainer})?(?:${inlineAnswer}|${numberedAnswer}))`;
-const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|[.。](?: |$)|$))`;
+const explanationLabelLine = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${standaloneEnglishSolution}|${numberedSolution}|【 *${chineseExplanation}${chineseContinuation}】|${chineseExplanation}${chineseContinuation}(?=[:：]|$)|(?:${chineseExplanation}|解) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：]|(?:【 *)?(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}(?:[、】]|(?:\.(?: |$)|。)|$))`;
 const answerLabel = new RegExp(answerLabelLine, "imu");
 const jsQualifiedSolution = new RegExp(qualifiedSolutionLabel, "iu");
 const explanationLabel = new RegExp(explanationLabelLine, "iu");
@@ -91,7 +92,17 @@ const qualifiedExerciseAnswer = String.raw`(?:参考答案|标准答案|正确�
 const bracketedExerciseAnswer = String.raw`【 *正确答案 *】 *$`;
 const exerciseSectionException = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|答案 *[:：] *$|解答${chineseContinuation}[:：]? *$|${qualifiedExerciseAnswer})`;
 const exerciseInlineAnswer = String.raw`${lineStart}(?:${bracketedExerciseAnswer}|【 *(?:答案|${chineseExplanation})${chineseContinuation}】 *[:：]? *|(?:答案|解|${chineseExplanation}) *(?:\d+(?:[.-]\d+)*)?${chineseContinuation}[:：] *|${chineseExplanation}${chineseContinuation}$|${qualifiedExerciseAnswer}|${numberedSolution} *|(?:(?:${englishAnswerQualifier} +)?answer(?: +key)?|(?:(?:worked|full|sample|official|reference) +)?solution)(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|$))`;
-const standaloneInlineAnswer = String.raw`${lineStart}(?:(?:${englishAnswerQualifier} +)?answer(?: +\d+(?:\.\d+)*)?${englishContinuation} *[:：]|【 *答案${chineseContinuation}】 *[:：]?|${standaloneEnglishSolution}|解答${chineseContinuation}[:：]|${numberedSolution}) *$`;
+const inlineOpenerPrefix = [
+  String.raw`【 *(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)(?: *\d+(?:[.-]\d+)*)?${chineseContinuation}】 *[:：]? *`,
+  String.raw`${qualifiedSolution}(?:${numberedAnswerTarget}(?: *\d+(?:\.\d+)*)?)?(?: +\d+(?:\.\d+)*)?${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
+  numberedAnswer,
+  numberedSolution,
+  String.raw`(?:【 *)?(?:${chineseExplanation}|解) *\d+(?:[.-]\d+)*${chineseContinuation}】? *(?:[:：、]|(?:\.(?: |$)|。)|$)`,
+  String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation}|解)${chineseContinuation} *[:：] *`,
+  String.raw`(?:${chineseAnswerHeading}|答案|${chineseExplanation})${chineseContinuation} *$`,
+  String.raw`(?:(?:(?:${englishAnswerQualifier}|worked|full) +)?answers?(?: +(?:key|section))?|(?:(?:worked|full|sample|official|reference) +)?solutions?)${englishContinuation} *(?:[:：] *|\.(?: |$) *|$)`,
+].join("|");
+const inlineOpenerLinePrefix = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:${inlineOpenerPrefix})`;
 
 const workedExampleHeading = String.raw`${lineStart}(?:${pdfHeadingContainer})?(?:(?:worked +example|example)(?= +\d| *[(:：.．—–-]| *$)|例题(?= *\d| *[（(:：.．—–-]| *$)|例 *(?=\d|[:：]))`;
 const englishBlock = String.raw`(?:definition|notation|terminology|convention|theorem|lemma|proposition|corollary|axiom|conjecture|claim|proof(?: +of +(?:theorem|lemma|proposition|corollary))?)`;
@@ -460,7 +471,7 @@ const jsNumberedExerciseInstruction = new RegExp(asJsPattern(numberedExerciseIns
 const jsExerciseSectionException = new RegExp(exerciseSectionException, "iu");
 const jsExerciseInlineAnswer = new RegExp(exerciseInlineAnswer, "iu");
 const jsExerciseInlineAnswerWithBody = new RegExp(exerciseInlineAnswer + "[^ ]", "iu");
-const jsStandaloneInlineAnswer = new RegExp(standaloneInlineAnswer, "iu");
+const jsInlineOpenerLinePrefix = new RegExp(inlineOpenerLinePrefix, "iu");
 const jsExerciseInlineAnswerPeriod = new RegExp(exerciseInlineAnswerPeriod, "u");
 const jsAppendixHeading = new RegExp(appendixHeading, "iu");
 const jsBareContainerSuffix = new RegExp(bareContainerSuffix, "u");
@@ -516,6 +527,8 @@ export function publicPdfSealBoundaries(sql: Sql, workspaceId: string,
 function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   return sql`pdf_archive_text AS (
     SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
+      min(c.id::text) OVER (PARTITION BY c.source_id,c.source_version,c.page)
+        <> max(c.id::text) OVER (PARTITION BY c.source_id,c.source_version,c.page) AS multi_chunk_page,
       max(c.page) OVER (PARTITION BY c.source_id,c.source_version) AS max_source_page,
       string_to_array(
         regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
@@ -573,7 +586,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         END AS container_paren_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
-        SELECT id,source_id,source_version,page,max_source_page,created_at,aux_stripped AS raw_line,line_number,atx,unstarred_line,
+        SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,aux_stripped AS raw_line,line_number,atx,unstarred_line,
           CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0 THEN
             regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
               aux_stripped,${pairedBoldEmphasis},${emphasisReplacement},'g'),
@@ -592,7 +605,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
               THEN regexp_replace(regexp_replace(replace(replace(aux_stripped,'**',''),'__',''),${visionAuxiliary},''),' {2,}',' ','g')
               ELSE aux_stripped END AS unstarred_line
           FROM (
-            SELECT id,source_id,source_version,page,max_source_page,created_at,line_number,raw_piece,
+            SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,line_number,raw_piece,
               left(lead_trimmed,1)='#'
                 AND length(lead_trimmed)-length(after_open_hashes)<=6
                 AND (after_open_hashes='' OR left(after_open_hashes,1)=' ') AS atx,
@@ -615,7 +628,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                     CASE WHEN position('[' in raw_piece)>0 OR position('【' in raw_piece)>0
                       THEN regexp_replace(raw_piece,${visionAuxiliary},'') ELSE raw_piece END AS aux_piece
                   FROM (
-                    SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_piece,
+                    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,created_at,unnest(lines) AS raw_piece,
                       generate_subscripts(lines,1) AS line_number
                     FROM pdf_archive_text
                   ) unnested_lines
@@ -628,7 +641,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       ) normalized_lines
     ) heading_suffixes
   ), pdf_archive_lines AS (
-    SELECT id,source_id,source_version,page,max_source_page,raw_line,line,atx,empty_atx,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
+    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,raw_line,line,unstarred_line,atx,empty_atx,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
       NOT wrapper AND NOT empty_atx AND line ~* ${exerciseHeading} AS opens_exercise,
       NOT wrapper AND NOT empty_atx AND public_example AND NOT running_heading AS opens_worked_example,
@@ -681,11 +694,12 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_line_events AS (
     SELECT *, section_without_numbered AND NOT numbered_solution_candidate AS section_answer,
        explanation_label AND (NOT in_worked_example OR numbered_solution_candidate) AS sealed_explanation,
-       (numbered_solution_candidate OR qualified_solution OR period_inline OR line ~* ${exerciseInlineAnswer}
-        AND (in_exercise OR (unconditional_answer OR explanation_label) AND line ~* ${standaloneInlineAnswer}
-          OR (unconditional_answer OR NOT in_worked_example) AND line ~* ${exerciseInlineAnswer + "[^ ]"}))
-         AND (NOT opens_section OR exercise_exception OR numbered_solution_candidate)
-         AND (unconditional_answer OR NOT in_worked_example OR NOT explanation_label OR numbered_solution_candidate) AS inline_opener
+       NOT empty_atx AND NOT (section_without_numbered AND NOT numbered_solution_candidate)
+         AND (unconditional_answer
+           OR (explanation_label AND (NOT in_worked_example OR numbered_solution_candidate))
+           OR (line ~* ${exerciseInlineAnswer}
+             AND (in_exercise OR NOT in_worked_example AND line ~* ${exerciseInlineAnswer + "[^ ]"})
+             AND (NOT in_worked_example OR NOT explanation_label))) AS inline_opener
     FROM (
       SELECT *, opens_section AND NOT (in_exercise AND exercise_exception)
         AND NOT (in_worked_example AND explanation_label) AS section_without_numbered
@@ -695,7 +709,10 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     SELECT *,
       CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
         WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
-        WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
+        WHEN inline_opener THEN btrim(COALESCE(
+          NULLIF(regexp_replace(line,${inlineOpenerLinePrefix},'','i'),line),
+          regexp_replace(unstarred_line,${inlineOpenerLinePrefix},'','i')
+        ))
         WHEN empty_atx OR running_heading OR line ~* ${pdfLeadingTextWrappers} THEN ''
         WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END AS candidate_body,
       -- Carry each provisional section opener on its numbered predecessor so the
@@ -714,6 +731,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       preceding_lines AS (PARTITION BY source_id,source_version ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
   ), pdf_archive_inline_starts AS (
     SELECT *, inline_opener AND NOT auxiliary_complete
+        AND NOT (auxiliary AND position<COALESCE(last_primary_position,0))
         AND NOT (auxiliary AND last_answer_body=''
           AND COALESCE(max(position) FILTER (WHERE unclosed_answer_body) OVER earlier_on_page,0)
             > COALESCE(max(position) FILTER (WHERE section_answer OR opens_exercise OR opens_public
@@ -769,6 +787,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         FROM (
           SELECT *, min(position) FILTER (WHERE NOT auxiliary AND content_line)
             OVER (PARTITION BY source_id,source_version,page) AS first_primary_position,
+            max(position) FILTER (WHERE NOT auxiliary AND content_line)
+              OVER (PARTITION BY source_id,source_version,page) AS last_primary_position,
             min(position) FILTER (WHERE auxiliary AND content_line)
               OVER (PARTITION BY source_id,source_version,page) AS first_page_auxiliary_position,
             min(position) FILTER (WHERE content_line) OVER auxiliary_block_lines AS first_auxiliary_position,
@@ -801,9 +821,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                   FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
               max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
               bool_or(answer_content AND candidate_proof) OVER answer_sequence AS answer_has_proof,
-              min(position) FILTER (WHERE NOT auxiliary AND candidate_proof
-                AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
-                AND (blank_exit_position IS NULL OR position<blank_exit_position)) OVER answer_sequence AS lane_first_proof,
+              min(position) FILTER (WHERE answer_content AND candidate_proof) OVER answer_sequence AS lane_first_proof,
               max(position) FILTER (WHERE NOT auxiliary AND candidate_terminator
                 AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
                 AND (blank_exit_position IS NULL OR position<blank_exit_position)) OVER answer_sequence AS lane_last_terminator,
@@ -881,20 +899,32 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       previous_page AS (PARTITION BY source_id,source_version ORDER BY page GROUPS BETWEEN 1 PRECEDING AND 1 PRECEDING)
   ), pdf_archive_inline_groups AS (
     -- An opener and its continuation lines share a group until the next explicit boundary.
-    SELECT *, first_value(starts_inline) OVER inline_origin AS in_inline_group,
+    SELECT id,source_id,source_version,page,multi_chunk_page,max_source_page,position,inline_group,
+      auxiliary,wrapper,empty_atx,content_line,btrim(line)='' AS blank_line,
+      starts_inline,unconditional_answer,sealed_explanation,inline_opener,
+      candidate_proof,candidate_terminator,auxiliary_proof,auxiliary_terminator,auxiliary_answer_proof_close,
+      native_answer_boundary,follows_completed_answer,first_auxiliary_proof,primary_ends_adjacency,last_primary_position,
+      section_answer,opens_exercise,opens_public,lane_reopening,
+      next_numbered_section,next_content_page,in_sealed_section,withheld_numbered_context,
+      first_value(starts_inline) OVER inline_origin AS in_inline_group,
+      COALESCE(first_value(auxiliary) OVER inline_origin,false) AS auxiliary_inline_origin,
       min(page) FILTER (WHERE starts_inline) OVER (PARTITION BY source_id,source_version,inline_group) AS group_first_page,
-      CASE WHEN NOT auxiliary OR first_value(starts_inline) OVER inline_origin
-        AND id=first_value(id) OVER inline_origin
-        AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
+      CASE WHEN (NOT auxiliary AND NOT COALESCE(first_value(auxiliary) OVER inline_origin
+          AND page=min(page) FILTER (WHERE starts_inline) OVER (PARTITION BY source_id,source_version,inline_group),false))
+        OR first_value(starts_inline) OVER inline_origin
+          AND id=first_value(id) OVER inline_origin
+          AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
       THEN lane_body ELSE '' END AS body_line,
       -- An auxiliary proof that closes in its own block leaves the outer answer active.
       (auxiliary_proof AND NOT (first_auxiliary_proof AND native_answer_boundary AND transcription_reopens_answer)
+        AND NOT (position<COALESCE(last_primary_position,0))
         AND (id=first_value(id) OVER inline_origin
           AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
           OR first_value(last_answer_body) OVER inline_origin<>''
             AND first_value(blank_exit_position) OVER inline_origin IS NULL
           OR native_answer_unclosed)
-        OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator)
+        OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator
+          AND NOT (position<COALESCE(last_primary_position,0)))
         AND first_value(starts_inline) OVER inline_origin
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline
     FROM (
@@ -905,18 +935,42 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     ) grouped_lines
     WINDOW inline_origin AS (PARTITION BY source_id,source_version,inline_group ORDER BY position)
   ), pdf_archive_inline_body AS (
-    SELECT *, min(position) FILTER (WHERE body_line<>'')
-      OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
-      min(position) FILTER (WHERE starts_inline)
-      OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_opener,
-      max(position) FILTER (WHERE auxiliary_proof)
-      OVER (PARTITION BY source_id,source_version,inline_group,page) AS last_page_auxiliary_proof,
-      min(position) FILTER (WHERE upgrades_inline OR NOT auxiliary AND body_line ~* ${answerProofHeading})
-      OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof,
-      min(position) FILTER (WHERE body_line<>'')
-      OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
-        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_body
-    FROM pdf_archive_inline_groups
+    SELECT *,
+      min(position) FILTER (WHERE upgrades_inline
+        OR (NOT auxiliary AND candidate_inline_proof
+          AND (first_page_explicit_close IS NULL OR position<=first_page_explicit_close)
+          AND (first_group_blank_close IS NULL OR position<first_group_blank_close)
+          AND (first_midpage_explicit_close IS NULL OR position<=first_midpage_explicit_close)))
+        OVER (PARTITION BY source_id,source_version,inline_group) AS first_proof
+    FROM (
+      SELECT *,
+        min(position) FILTER (WHERE explicit_inline_close)
+          OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_page_explicit_close,
+        min(position) FILTER (WHERE NOT auxiliary AND blank_line AND position>first_body
+          AND next_body IS NOT NULL AND next_body IS NOT DISTINCT FROM next_non_proof_body)
+          OVER (PARTITION BY source_id,source_version,inline_group) AS first_group_blank_close,
+        min(position) FILTER (WHERE explicit_inline_close AND next_body IS NOT NULL)
+          OVER (PARTITION BY source_id,source_version,inline_group) AS first_midpage_explicit_close
+      FROM (
+        SELECT *,
+          NOT auxiliary AND body_line<>'' AND candidate_proof AS candidate_inline_proof,
+          body_line<>'' AND candidate_terminator AND NOT auxiliary_answer_proof_close AS explicit_inline_close,
+          min(position) FILTER (WHERE body_line<>'')
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_body,
+          min(position) FILTER (WHERE starts_inline)
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_opener,
+          max(position) FILTER (WHERE auxiliary_proof)
+            OVER (PARTITION BY source_id,source_version,inline_group,page) AS last_page_auxiliary_proof,
+          min(position) FILTER (WHERE body_line<>'')
+            OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_body,
+          min(position) FILTER (WHERE body_line<>'' AND NOT upgrades_inline
+            AND NOT (NOT auxiliary AND candidate_proof))
+            OVER (PARTITION BY source_id,source_version,inline_group,page ORDER BY position DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_non_proof_body
+        FROM pdf_archive_inline_groups
+      ) inline_body_candidates
+    ) inline_body_closures
   ), pdf_archive_inline_closes AS (
     SELECT *, min(position) FILTER (WHERE closes_after_blank OR explicit_inline_close)
         OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_inline_close,
@@ -925,15 +979,15 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof)
         OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_proof_close
     FROM (
-      SELECT *, (NOT auxiliary AND btrim(line)='' AND position>first_body AND next_body IS NOT NULL
+      SELECT *, (NOT auxiliary AND blank_line AND position>first_body AND next_body IS NOT NULL
           AND (first_proof IS NULL OR next_body<first_proof)
         OR position=first_opener AND first_body IS NULL
-          AND last_page_auxiliary_proof>first_opener AND first_proof IS NULL) AS closes_after_blank,
-        body_line ~* ${inlineTerminator} AND NOT auxiliary_answer_proof_close AS explicit_inline_close
+          AND last_page_auxiliary_proof>first_opener AND first_proof IS NULL) AS closes_after_blank
       FROM pdf_archive_inline_body
     ) close_events
   ), pdf_archive_inline_pages AS (
-    SELECT source_id,source_version,inline_group,page,max(max_source_page) AS max_source_page,bool_or(starts_inline) AS starts_inline,
+    SELECT source_id,source_version,inline_group,page,bool_or(multi_chunk_page) AS multi_chunk_page,
+      max(max_source_page) AS max_source_page,bool_or(starts_inline) AS starts_inline,
       min(position) AS first_position,
       bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public OR lane_reopening)) AS primary_boundary,
       min(position) FILTER (WHERE position=first_proof) AS proof_position,
@@ -941,13 +995,17 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof) AS primary_proof_close,
       min(position) FILTER (WHERE follows_completed_answer) AS auxiliary_proof_position,
       max(position) FILTER (WHERE follows_completed_answer AND auxiliary
+        AND NOT (position<COALESCE(last_primary_position,0))
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) AS unclosed_auxiliary_proof,
       max(position) FILTER (WHERE follows_completed_answer AND NOT auxiliary
         AND (NOT explicit_inline_close)) AS adjacent_primary_proof,
       min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency) AS adjacent_auxiliary_position,
       min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency
+        AND NOT (position<COALESCE(last_primary_position,0))
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) AS unclosed_adjacent_auxiliary_proof,
       min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS first_primary_terminator,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close
+        AND position>COALESCE(last_page_auxiliary_proof,0)) AS post_aux_primary_terminator,
       max(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS primary_terminator,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
       bool_or(closes_after_blank) AS closed_after_blank,
@@ -959,68 +1017,136 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       min(next_content_page) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_section_page,
       min(position) FILTER (WHERE next_numbered_section IS NOT NULL) AS numbered_predecessor,
       bool_or(next_numbered_section IS NOT NULL AND (in_sealed_section OR withheld_numbered_context)) AS numbered_withheld,
-      bool_or(next_numbered_section IS NOT NULL AND inside_inline_body) AS numbered_in_inline
+      bool_or(next_numbered_section IS NOT NULL AND inside_inline_body) AS numbered_in_inline,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND in_inline_group AND NOT auxiliary
+        AND NOT wrapper AND NOT empty_atx AND NOT blank_line
+        AND NOT COALESCE(auxiliary_inline_origin AND page=group_first_page,false)
+        AND (first_inline_close IS NULL OR position<=first_inline_close
+          OR (NOT group_closed_after_blank AND first_proof IS NOT NULL AND position>=first_proof
+            AND (first_proof_close IS NULL OR position<=first_proof_close)))) AS inline_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line AND first_proof IS NOT NULL
+        AND position>=first_proof AND (first_proof_close IS NULL OR position<=first_proof_close)) AS inline_proof_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND (follows_completed_answer OR (row_aux_proof_pos IS NOT NULL AND position>=row_aux_proof_pos
+          AND row_aux_unclosed AND (row_post_aux_term IS NULL OR position<=row_post_aux_term)))) AS aux_proof_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND ((first_auxiliary_proof AND NOT primary_ends_adjacency)
+          OR (row_adj_aux_pos IS NOT NULL AND position>=row_adj_aux_pos
+            AND row_adj_unclosed AND (row_post_aux_term IS NULL OR position<=row_post_aux_term)))) AS adj_aux_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line
+        AND (row_first_primary_term IS NULL OR position<=row_first_primary_term)) AS pre_term_chunk_ids,
+      array_agg(DISTINCT id) FILTER (WHERE multi_chunk_page AND content_line) AS all_content_chunk_ids
     FROM (
-      SELECT *, first_inline_close IS NULL OR position<=first_inline_close AS inside_inline_body
+      SELECT *, first_inline_close IS NULL OR position<=first_inline_close AS inside_inline_body,
+        min(position) FILTER (WHERE follows_completed_answer) OVER group_page AS row_aux_proof_pos,
+        COALESCE(bool_or(follows_completed_answer AND ((auxiliary AND NOT (position<COALESCE(last_primary_position,0))
+            AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position))
+          OR (NOT auxiliary AND NOT explicit_inline_close))) OVER group_page,false) AS row_aux_unclosed,
+        min(position) FILTER (WHERE first_auxiliary_proof AND NOT primary_ends_adjacency) OVER group_page AS row_adj_aux_pos,
+        COALESCE(bool_or(first_auxiliary_proof AND NOT primary_ends_adjacency
+          AND NOT (position<COALESCE(last_primary_position,0))
+          AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) OVER group_page,false) AS row_adj_unclosed,
+        min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close
+          AND position>COALESCE(last_page_auxiliary_proof,0)) OVER group_page AS row_post_aux_term,
+        min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) OVER group_page AS row_first_primary_term
       FROM pdf_archive_inline_closes
+      WINDOW group_page AS (PARTITION BY source_id,source_version,inline_group,page)
     ) with_line_closes
     GROUP BY source_id,source_version,inline_group,page
   ), pdf_archive_inline_ranges AS (
-    -- A finished answer affects later pages only up to its first closing page.
-    SELECT *, min(page) FILTER (WHERE starts_inline) OVER answer AS first_page,
-      COALESCE(min(page) FILTER (WHERE closed_after_blank
-        OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
-          OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
-        OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
-          AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked})) OVER answer,
-        GREATEST(max(page) OVER answer,COALESCE(
-          min(next_group_page) OVER answer-1,max_source_page))) AS last_page
+    SELECT *, bool_or(page=last_page AND multi_chunk_page)
+        OVER (PARTITION BY source_id,source_version,inline_group) AS last_page_multi_chunk,
+      array_agg(page) FILTER (WHERE multi_chunk_page)
+        OVER (PARTITION BY source_id,source_version) AS multi_chunk_pages
     FROM (
-      SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof,
-        CASE WHEN lead(inline_group) OVER document_order<>inline_group
-          THEN lead(page) OVER document_order END AS next_group_page
-      FROM pdf_archive_inline_pages
-      WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page),
-        document_order AS (PARTITION BY source_id,source_version ORDER BY first_position)
-    ) with_next_page
-    WINDOW answer AS (PARTITION BY source_id,source_version,inline_group)
-  ), pdf_archive_proof_ranges AS (
-    -- A completed answer can start a fresh proof on the adjacent page.
-    -- A terminator in that proof's opening block only closes that proof.
-    SELECT source_id,source_version,page,first_page,last_page,proof_start,first_primary_terminator,
-      primary_proof_position,primary_proof_close,numbered_section_position,numbered_section_page,
-      numbered_predecessor,numbered_withheld,numbered_in_inline,
-      CASE WHEN unclosed_proof_start IS NULL THEN page
-        ELSE COALESCE(min(page) FILTER (WHERE primary_terminator>=COALESCE(unclosed_proof_start,first_position))
-          OVER remaining,GREATEST(max(page) OVER remaining,COALESCE(next_primary_page-1,max_source_page))) END AS proof_end
-    FROM (
-      SELECT *, LEAST(auxiliary_proof_position,
-        CASE WHEN follows_finished_inline THEN adjacent_auxiliary_position END,
-        active_inline_proof) AS proof_start,
-        GREATEST(unclosed_auxiliary_proof,adjacent_primary_proof,
-          CASE WHEN follows_finished_inline THEN unclosed_adjacent_auxiliary_proof END,
-          CASE WHEN primary_proof_close IS NULL THEN active_inline_proof END) AS unclosed_proof_start,
-        count(*) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position
-          ROWS UNBOUNDED PRECEDING) AS primary_group,
-        min(page) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position DESC
-          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_primary_page
+      -- A finished answer affects later pages only up to its first closing page.
+      SELECT *, min(page) FILTER (WHERE starts_inline) OVER answer AS first_page,
+        COALESCE(min(page) FILTER (WHERE closed_after_blank
+          OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
+            OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
+          OR (in_sealed_proof IS NOT TRUE AND continues_into_proof IS NOT TRUE
+            AND last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked})) OVER answer,
+          GREATEST(max(page) OVER answer,COALESCE(
+            min(next_group_page) OVER answer-1,max_source_page))) AS last_page
       FROM (
-        SELECT *, CASE WHEN first_page IS NOT NULL AND page<=last_page AND closed_after_blank IS NOT TRUE
-            THEN proof_position END AS active_inline_proof,
-          lag(page) OVER previous_page=page-1 AND lag(page=last_page AND first_page IS NOT NULL
-          AND in_sealed_proof IS NOT TRUE AND NOT closed_after_blank
-          AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked}))
-          OVER previous_page AS follows_finished_inline
-        FROM pdf_archive_inline_ranges
-        WINDOW previous_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
-      ) adjacent
-    ) proof_groups
-    WINDOW remaining AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position DESC
-      ROWS UNBOUNDED PRECEDING)
+        SELECT *, lead(page) OVER next_page=page+1 AND lead(starts_proof) OVER next_page AS continues_into_proof,
+          CASE WHEN lead(inline_group) OVER document_order<>inline_group
+            THEN lead(page) OVER document_order END AS next_group_page
+        FROM pdf_archive_inline_pages
+        WINDOW next_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page),
+          document_order AS (PARTITION BY source_id,source_version ORDER BY first_position)
+      ) with_next_page
+      WINDOW answer AS (PARTITION BY source_id,source_version,inline_group)
+    ) inline_bounds
+  ), pdf_archive_proof_ranges AS (
+    SELECT *,
+      CASE WHEN multi_chunk_page THEN page+1 ELSE page END AS span_first_page,
+      CASE WHEN COALESCE(proof_end=ANY(multi_chunk_pages),false) THEN proof_end ELSE proof_end+1 END AS span_reopen_page,
+      CASE WHEN multi_chunk_page THEN
+        COALESCE(CASE WHEN first_page IS NOT NULL AND first_page<last_page AND page=last_page THEN inline_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN active_inline_proof IS NOT NULL THEN inline_proof_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN auxiliary_proof_position IS NOT NULL THEN aux_proof_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN follows_finished_inline AND adjacent_auxiliary_position IS NOT NULL THEN adj_aux_chunk_ids END,'{}'::uuid[])
+        || COALESCE(CASE WHEN prior_open_proof_end IS NOT NULL AND page<=prior_open_proof_end THEN
+          CASE WHEN page=prior_open_proof_end AND first_primary_terminator IS NOT NULL THEN pre_term_chunk_ids ELSE all_content_chunk_ids END
+        END,'{}'::uuid[])
+      END AS multi_chunk_sealed_ids
+    FROM (
+      SELECT *, max(proof_end) FILTER (WHERE proof_start IS NOT NULL AND unclosed_proof_start IS NOT NULL)
+        OVER (PARTITION BY source_id,source_version,primary_group ORDER BY first_position
+          ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS prior_open_proof_end
+      FROM (
+        -- A completed answer can start a fresh proof on the adjacent page.
+        -- A terminator in that proof's opening block only closes that proof.
+        SELECT source_id,source_version,page,multi_chunk_page,multi_chunk_pages,first_position,primary_group,
+          first_page,last_page,proof_start,unclosed_proof_start,active_inline_proof,auxiliary_proof_position,
+          follows_finished_inline,adjacent_auxiliary_position,first_primary_terminator,
+          primary_proof_position,primary_proof_close,numbered_section_position,numbered_section_page,
+          numbered_predecessor,numbered_withheld,numbered_in_inline,
+          inline_chunk_ids,inline_proof_chunk_ids,aux_proof_chunk_ids,adj_aux_chunk_ids,pre_term_chunk_ids,all_content_chunk_ids,
+          CASE WHEN unclosed_proof_start IS NULL THEN page
+            WHEN own_close IS NOT NULL THEN page
+            ELSE COALESCE(later_close_page,
+              GREATEST(max(page) OVER remaining,COALESCE(next_primary_page-1,max_source_page))) END AS proof_end
+        FROM (
+          SELECT *,
+            CASE WHEN first_primary_terminator>=unclosed_proof_start THEN first_primary_terminator
+              WHEN post_aux_primary_terminator>=unclosed_proof_start THEN post_aux_primary_terminator END AS own_close,
+            min(page) FILTER (WHERE first_primary_terminator IS NOT NULL) OVER later_in_group AS later_close_page
+          FROM (
+            SELECT *, LEAST(auxiliary_proof_position,
+              CASE WHEN follows_finished_inline THEN adjacent_auxiliary_position END,
+              active_inline_proof) AS proof_start,
+              GREATEST(unclosed_auxiliary_proof,adjacent_primary_proof,
+                CASE WHEN follows_finished_inline THEN unclosed_adjacent_auxiliary_proof END,
+                CASE WHEN primary_proof_close IS NULL THEN active_inline_proof END) AS unclosed_proof_start,
+              count(*) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position
+                ROWS UNBOUNDED PRECEDING) AS primary_group,
+              min(page) FILTER (WHERE primary_boundary) OVER (PARTITION BY source_id,source_version ORDER BY first_position DESC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS next_primary_page
+            FROM (
+              SELECT *, CASE WHEN first_page IS NOT NULL AND page<=last_page AND closed_after_blank IS NOT TRUE
+                  THEN proof_position END AS active_inline_proof,
+                lag(page) OVER previous_page=page-1 AND lag(page=last_page AND first_page IS NOT NULL
+                AND in_sealed_proof IS NOT TRUE AND NOT closed_after_blank
+                AND (terminator_position=last_body_position OR last_body ~* ${inlineTerminal} AND last_body !~* ${inlineFallbackBlocked}))
+                OVER previous_page AS follows_finished_inline
+              FROM pdf_archive_inline_ranges
+              WINDOW previous_page AS (PARTITION BY source_id,source_version,inline_group ORDER BY page)
+            ) adjacent
+          ) proof_groups
+          WINDOW later_in_group AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
+        ) proof_closures
+        WINDOW remaining AS (PARTITION BY source_id,source_version,primary_group ORDER BY first_position DESC
+          ROWS UNBOUNDED PRECEDING)
+      ) with_proof_end
+    ) with_prior_open_proof
   ), pdf_archive_numbered_predecessors AS (
     SELECT *, max(proof_end) FILTER (WHERE proof_start IS NOT NULL) OVER prior_pages AS earlier_proof_end,
       min(first_primary_terminator) OVER same_page AS first_page_primary_terminator,
-      bool_or(proof_start IS NOT NULL AND proof_end>page) OVER same_page AS same_page_proof_open
+      bool_or(proof_start IS NOT NULL AND proof_end>page
+        AND (numbered_predecessor IS NULL OR numbered_predecessor>=proof_start)) OVER same_page AS same_page_proof_open
     FROM pdf_archive_proof_ranges
     WINDOW same_page AS (PARTITION BY source_id,source_version,page),
       prior_pages AS (PARTITION BY source_id,source_version ORDER BY page
@@ -1056,17 +1182,26 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       WHERE section_answer OR section_ends_here OR (NOT answer_label AND reopens_section)
     ) events WHERE section_answer
     UNION ALL
-    SELECT source_id,source_version,first_page+1,last_page+1,NULL::uuid
-    FROM pdf_archive_inline_ranges WHERE starts_inline AND first_page<last_page
+    SELECT source_id,source_version,first_page+1,
+      CASE WHEN last_page_multi_chunk THEN last_page ELSE last_page+1 END,NULL::uuid
+    FROM pdf_archive_inline_ranges
+    WHERE starts_inline AND first_page < CASE WHEN last_page_multi_chunk THEN last_page-1 ELSE last_page END
     UNION ALL
-    SELECT source_id,source_version,page,proof_end+1,NULL::uuid
-    FROM pdf_archive_proof_ranges WHERE proof_start IS NOT NULL
+    SELECT source_id,source_version,span_first_page,span_reopen_page,NULL::uuid
+    FROM pdf_archive_proof_ranges
+    WHERE proof_start IS NOT NULL AND span_first_page<span_reopen_page
+    UNION ALL
+    SELECT DISTINCT source_id,source_version,page,page+1,unnest(multi_chunk_sealed_ids)
+    FROM pdf_archive_proof_ranges
+    WHERE multi_chunk_page AND cardinality(multi_chunk_sealed_ids)>0
     UNION ALL
     SELECT DISTINCT source_id,source_version,page,page+1,id
     FROM pdf_archive_inline_closes
     WHERE sealed_explanation OR unconditional_answer OR (auxiliary AND inline_opener)
       OR starts_inline
-      OR (in_inline_group AND page=group_first_page AND NOT auxiliary AND btrim(line)<>''
+      OR (in_inline_group AND page=group_first_page AND NOT auxiliary
+        AND NOT wrapper AND NOT empty_atx AND NOT blank_line
+        AND NOT COALESCE(auxiliary_inline_origin AND page=group_first_page,false)
         AND (first_inline_close IS NULL OR position<=first_inline_close
           OR (NOT group_closed_after_blank AND first_proof IS NOT NULL AND position>=first_proof
             AND (first_proof_close IS NULL OR position<=first_proof_close))))
@@ -1117,9 +1252,36 @@ export function publicPdfChunkPredicate(sql: Sql, { checkArchive = true } = {}) 
   ))`;
 }
 
+export function publicPdfChunkImageObjectKey(sql: Sql) {
+  return sql`CASE WHEN s.mime='application/pdf' AND c.page IS NOT NULL AND c.image_object_key IS NOT NULL
+    THEN (CASE WHEN EXISTS (
+      SELECT 1 FROM pdf_archive_sealed_spans sealed_sibling
+      WHERE sealed_sibling.source_id=c.source_id AND sealed_sibling.source_version=c.source_version
+        AND sealed_sibling.chunk_id IS NOT NULL AND sealed_sibling.first_page=c.page
+    ) THEN NULL ELSE c.image_object_key END)
+    ELSE c.image_object_key END`;
+}
+
 export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
   // The archive scans physical pages in order. Page-less chunks have only local context.
   return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string, { checkContext: row.page == null });
+}
+
+export function filterPublicChunkRows<T extends Record<string, unknown>>(rows: readonly T[]): T[] {
+  const sealedPages = new Set<string>();
+  const kept: T[] = [];
+  for (const row of rows) {
+    if (isPublicSourceChunk(row)) {
+      kept.push(row);
+    } else if (row.mime === "application/pdf" && row.page != null) {
+      sealedPages.add(`${String(row.source_id)}:${String(row.source_version)}:${String(row.page)}`);
+    }
+  }
+  if (!sealedPages.size) return kept;
+  return kept.map(row => row.mime === "application/pdf" && row.page != null
+    && sealedPages.has(`${String(row.source_id)}:${String(row.source_version)}:${String(row.page)}`)
+    ? { ...row, image_object_key: null, public_image_object_key: null }
+    : row);
 }
 
 function classifyArchivePdfLine(entry: ArchivePdfLine, assessmentSolutions: boolean) {
@@ -1186,9 +1348,50 @@ function classifyArchivePdfLine(entry: ArchivePdfLine, assessmentSolutions: bool
   };
 }
 
-export function filterPublicSamePagePdfChunks<T extends { text: string; page?: number | null }>(rows: readonly T[]): T[] {
+export type ArchivePdfCursorState = {
+  inWorkedExample: boolean;
+  inExercise: boolean;
+  previousNumberedQuestion: boolean;
+};
+
+function advanceArchivePdfCursorState(parsed: readonly ReturnType<typeof parseArchivePdfBlocks>[], state: ArchivePdfCursorState) {
+  const pagePrimaryContent = parsed.flatMap(info => info.primary.filter(entry => entry.contentLine));
+  const assessmentSolutionsSet = new Set<ArchivePdfLine>();
+  for (let index = 0; index + 1 < pagePrimaryContent.length; index++) {
+    const current = pagePrimaryContent[index]!;
+    const next = pagePrimaryContent[index + 1]!;
+    if (jsAssessmentSolutionsHeading.test(current.line) && jsAssessmentSolutionsContext.test(next.line)) {
+      assessmentSolutionsSet.add(current);
+    }
+  }
+  for (const info of parsed) {
+    for (const event of info.primaryEvents) {
+      if ("blank" in event) continue;
+      const { line, contentLine } = event;
+      const followsNumberedQuestion = contentLine && state.previousNumberedQuestion;
+      const numberedSolutionCandidate = followsNumberedQuestion && jsStandaloneNumberedSolution.test(line);
+      if (contentLine) state.previousNumberedQuestion = jsNumberedQuestion.test(line);
+      const flags = classifyArchivePdfLine(event, assessmentSolutionsSet.has(event));
+      if (flags.opensExercise) state.inExercise = true;
+      else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) state.inExercise = false;
+      if (flags.opensWorkedExample) state.inWorkedExample = true;
+      else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+        state.inWorkedExample = false;
+      }
+    }
+  }
+}
+
+export function filterPublicSamePagePdfChunks<T extends { text: string; page?: number | null }>(
+  rows: readonly T[],
+  state?: ArchivePdfCursorState,
+): T[] {
   if (!rows.length) return [];
-  if (rows.length === 1 || rows[0]?.page == null) {
+  if (rows[0]?.page == null) {
+    return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
+  }
+  if (rows.length === 1) {
+    if (state) advanceArchivePdfCursorState([parseArchivePdfBlocks(rows[0]!.text)], state);
     return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
   }
   const parsed = rows.map(row => parseArchivePdfBlocks(row.text));
@@ -1205,9 +1408,9 @@ export function filterPublicSamePagePdfChunks<T extends { text: string; page?: n
   }
 
   const chunkSealed = new Set<number>();
-  let inExercise = false;
-  let inWorkedExample = false;
-  let previousNumberedQuestion = false;
+  let inExercise = state?.inExercise ?? false;
+  let inWorkedExample = state?.inWorkedExample ?? false;
+  let previousNumberedQuestion = state?.previousNumberedQuestion ?? false;
   let mode: "none" | "section" | "inline" | "inline_proof" = "none";
   let lastInlineBody = "";
   let blankPending = false;
@@ -1233,18 +1436,16 @@ export function filterPublicSamePagePdfChunks<T extends { text: string; page?: n
         && !(inWorkedExample && flags.expLabel);
       const sectionAnswer = sectionWithoutNumbered && !numberedSolutionCandidate;
       const sealedExplanation = flags.expLabel && (!inWorkedExample || numberedSolutionCandidate);
-      const inlineOpener = !emptyAtx
-        && (numberedSolutionCandidate || flags.qualifiedSol || flags.periodInline
+      const inlineOpener = !emptyAtx && !sectionAnswer
+        && (flags.unconditionalAnswer || sealedExplanation
           || jsExerciseInlineAnswer.test(line)
-            && (inExercise
-              || (flags.unconditionalAnswer || flags.expLabel) && jsStandaloneInlineAnswer.test(line)
-              || (flags.unconditionalAnswer || !inWorkedExample) && jsExerciseInlineAnswerWithBody.test(line)))
-        && (!flags.opensSection || flags.exerciseException || numberedSolutionCandidate)
-        && (flags.unconditionalAnswer || !inWorkedExample || !flags.expLabel || numberedSolutionCandidate);
+            && (inExercise || !inWorkedExample && jsExerciseInlineAnswerWithBody.test(line))
+            && (!inWorkedExample || !flags.expLabel));
 
+      const strippedOpener = inlineOpener ? line.replace(jsInlineOpenerLinePrefix, "") : line;
       const candidateBody = inlineOpener && flags.qualifiedSol ? line.replace(jsQualifiedSolution, "").trim()
         : inlineOpener && flags.periodInline ? line.replace(jsExerciseInlineAnswerPeriod, "").trim()
-        : inlineOpener ? line.replace(jsExerciseInlineAnswer, "").trim()
+        : inlineOpener ? (strippedOpener !== line ? strippedOpener : event.unstarredLine.replace(jsInlineOpenerLinePrefix, "")).trim()
         : emptyAtx || runningHeading ? ""
         : atx ? line.replace(jsLineStart, "").trim()
         : line.trim();
@@ -1346,14 +1547,15 @@ export function filterPublicSamePagePdfChunks<T extends { text: string; page?: n
       }
       for (const auxEntry of auxLines) {
         const auxFlags = classifyArchivePdfLine(auxEntry, false);
-        const auxInlineOpener = auxFlags.qualifiedSol || auxFlags.periodInline
-          || jsExerciseInlineAnswer.test(auxEntry.line)
-            && (inExercise
-              || (auxFlags.unconditionalAnswer || auxFlags.expLabel) && jsStandaloneInlineAnswer.test(auxEntry.line)
-              || (auxFlags.unconditionalAnswer || !inWorkedExample) && jsExerciseInlineAnswerWithBody.test(auxEntry.line));
-        if (auxFlags.unconditionalAnswer || auxFlags.opensSection
-          || (auxFlags.expLabel && !inWorkedExample)
-          || (auxInlineOpener && (!inWorkedExample || !auxFlags.expLabel || auxFlags.unconditionalAnswer))) {
+        const auxSectionAnswer = auxFlags.opensSection && !(inExercise && auxFlags.exerciseException)
+          && !(inWorkedExample && auxFlags.expLabel);
+        const auxSealedExplanation = auxFlags.expLabel && !inWorkedExample;
+        const auxInlineOpener = !auxEntry.emptyAtx && !auxSectionAnswer
+          && (auxFlags.unconditionalAnswer || auxSealedExplanation
+            || jsExerciseInlineAnswer.test(auxEntry.line)
+              && (inExercise || !inWorkedExample && jsExerciseInlineAnswerWithBody.test(auxEntry.line))
+              && (!inWorkedExample || !auxFlags.expLabel));
+        if (auxFlags.unconditionalAnswer || auxSectionAnswer || auxSealedExplanation || auxInlineOpener) {
           chunkSealed.add(chunkIndex);
           break;
         }
@@ -1361,12 +1563,18 @@ export function filterPublicSamePagePdfChunks<T extends { text: string; page?: n
     }
   }
 
+  if (state) {
+    state.inExercise = inExercise;
+    state.inWorkedExample = inWorkedExample;
+    state.previousNumberedQuestion = previousNumberedQuestion;
+  }
+
   return rows.filter((_, index) => !chunkSealed.has(index));
 }
 
-type ArchivedSealSpan = { first_page: number; reopen_page: number | null; chunk_id: string | null };
+export type ArchivedSealSpan = { first_page: number; reopen_page: number | null; chunk_id: string | null };
 
-async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string,
+export async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string,
   archivedSpans: Map<string, ArchivedSealSpan[]>) {
   // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
   const [row] = await tx<Array<SourceChunk & { mime: string }>>`
@@ -1403,9 +1611,12 @@ async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string
     archivedSpans.set(key, spans);
   }
   const page = chunk.page;
-  return spans.some(span => (span.chunk_id == null || span.chunk_id === id)
-    && span.first_page <= page && (span.reopen_page == null || page < span.reopen_page))
-    ? undefined : chunk;
+  if (spans.some(span => (span.chunk_id == null || span.chunk_id === id)
+    && span.first_page <= page && (span.reopen_page == null || page < span.reopen_page))) {
+    return undefined;
+  }
+  return chunk.imageObjectKey !== null && spans.some(span => span.chunk_id != null && span.first_page === page)
+    ? { ...chunk, imageObjectKey: null } : chunk;
 }
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.

@@ -221,6 +221,76 @@ describe("source content self-read versus additional PDF retry access", () => {
     ];
     await expect(readOpeningSourceContent(database(source, unlabeledContinuation), scope, "source", { page: 1 }))
       .resolves.toMatchObject({ pages: [1], text: "1. Find x." });
+
+    for (const label of [
+      "答案 1：", "答案 1、", "答案 1。", "参考答案 1：", "Answer to Exercise 1:", "Key 1:",
+      "Answers 1:", "Solution to Exercise 1:", "解 1：", "解答 1：", "解析 1：", "解析：",
+      "详解：", "【参考答案】", "【解析】", "Official Answer 1", "Official Solution 1.",
+    ]) {
+      const numberedStandalone = [
+        { id: "n0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+        { id: "n1", page: 1, text: label, characters: label.length, readable: true },
+        { id: "n2", page: 1, text: "x = 2", characters: 5, readable: true },
+      ];
+      await expect(readOpeningSourceContent(database(source, numberedStandalone), scope, "source", { page: 1 }))
+        .resolves.toMatchObject({ pages: [1], characters: 10, text: "1. Find x." });
+    }
+
+    for (const inlineDone of ["答案 1。x = 2。", "Chapter 1: Official Solution 1: Yes."]) {
+      const completedSameLine = [
+        { id: "d0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+        { id: "d1", page: 1, text: inlineDone, characters: inlineDone.length, readable: true },
+        { id: "d2", page: 1, text: "2. Find y.", characters: 10, readable: true },
+      ];
+      await expect(readOpeningSourceContent(database(source, completedSameLine), scope, "source", { page: 1 }))
+        .resolves.toMatchObject({ pages: [1], text: "1. Find x.\n\n2. Find y." });
+    }
+
+    const crossPageWorkedExample = [
+      { id: "cw1", page: 1, text: "Worked Example 1: Factor x^2 - 1.", characters: 33, readable: true },
+      { id: "cw2a", page: 2, text: "Solution:", characters: 9, readable: true },
+      { id: "cw2b", page: 2, text: "Factor the polynomial.", characters: 22, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, crossPageWorkedExample), scope, "source", { page: 2 }))
+      .resolves.toMatchObject({ pages: [1, 2], text: "Solution:\n\nFactor the polynomial." });
+
+    const crossPageNumberedAfterExample = [
+      { id: "cn1", page: 1, text: "Worked Example 1: Factor x^2 - 1.\n1. Find x.", characters: 44, readable: true },
+      { id: "cn2a", page: 2, text: "Solution:", characters: 9, readable: true },
+      { id: "cn2b", page: 2, text: "x = 2.", characters: 6, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, crossPageNumberedAfterExample), scope, "source", { page: 2 }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const crossPageSkippedPageGap = [
+      { id: "cg1", page: 1, text: "Worked Example 1: Factor x^2 - 1.\n1. Find x.", characters: 44, readable: true },
+      { id: "cg3a", page: 3, text: "Solution:", characters: 9, readable: true },
+      { id: "cg3b", page: 3, text: "Factor the polynomial.", characters: 22, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, crossPageSkippedPageGap), scope, "source", { page: 3 }))
+      .resolves.toMatchObject({ pages: [1, 3], text: "Solution:\n\nFactor the polynomial." });
+
+    const crossPageExercise = [
+      { id: "ce1", page: 1, text: "Exercises", characters: 9, readable: true },
+      { id: "ce2a", page: 2, text: "1. Find x.", characters: 10, readable: true },
+      { id: "ce2b", page: 2, text: "答案：", characters: 3, readable: true },
+      { id: "ce2c", page: 2, text: "x = 2", characters: 5, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, crossPageExercise), scope, "source", { page: 2 }))
+      .resolves.toMatchObject({ pages: [1, 2], text: "1. Find x." });
+
+    const samePageProofAndPostQed = [
+      { id: "p0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+      { id: "p1", page: 1, text: "Solution: Proof. Substitution gives x = 2. ∎", characters: 44, readable: true },
+      { id: "p2", page: 1, text: "Chapter 2: Groups", characters: 17, readable: true },
+      { id: "q0", page: 2, text: "1. Find x.", characters: 10, readable: true },
+      { id: "q1", page: 2, text: "Solution: Q.E.D.", characters: 16, readable: true },
+      { id: "q2", page: 2, text: "Proof: Another theorem.", characters: 23, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, samePageProofAndPostQed), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1, 2], text: "1. Find x.\n\nChapter 2: Groups" });
+    await expect(readOpeningSourceContent(database(source, samePageProofAndPostQed), scope, "source", { page: 2 }))
+      .resolves.toMatchObject({ pages: [1, 2], text: "1. Find x.\n\nProof: Another theorem." });
   });
 
   it("does not convert owner/source lookup failures or future versions into readable content", async () => {

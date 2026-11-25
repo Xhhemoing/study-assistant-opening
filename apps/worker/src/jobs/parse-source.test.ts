@@ -1508,5 +1508,55 @@ describe("parse source handler", () => {
         [2, `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`],
         [3, `${workedExample}\nChapter 2: 第2张\nSolution: 2张`],
       ]);
+
+    // Round 65 P1 #1: Numbered answer/explanation delimiters carry inline seal when standalone and close when terminal body follows.
+    for (const label of ["答案 1、", "答案 1。", "Answer to Exercise 1:", "Key 1:", "Solution to Exercise 1:", "解析 1。"]) {
+      const standaloneRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${label}`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 3 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : start === 2
+              ? { page: 2, text: seeded ? "" : "x = 2.", imagePath: null, visualKinds: [], hadSealedContent: Boolean(seeded) }
+              : { page: 3, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(standaloneRun.handler({ ...job, claimToken: `claim-r65-standalone-${label}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 3 });
+      expect((standaloneRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), label)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [3, "Chapter 2\nPublic prose.", null],
+        ]);
+    }
+    for (const doneLabel of ["答案 1。x = 2。", "Key 1: x = 2."]) {
+      const completedRun = await deps({
+        segmentPages: 1,
+        segments: makeSegments(),
+        recognizePage: async () => ({ text: `[转写]\n1. Find x.\n${doneLabel}`, imageObjectKey: "vision/p1" }),
+        runner: async argv => {
+          if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 2 }) };
+          const start = Number(argv[argv.indexOf("--page-start") + 1]);
+          const seeded = argv.includes("--initial-seal-mode") ? argv[argv.indexOf("--initial-seal-mode") + 1] : undefined;
+          const page = start === 1
+            ? { page: 1, text: "1. Find x.", imagePath: null, visualKinds: ["picture"] as const }
+            : { page: 2, text: seeded ? "" : "Public prose after answer.", imagePath: null, visualKinds: [] };
+          return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+        },
+      });
+      await expect(completedRun.handler({ ...job, claimToken: `claim-r65-done-${doneLabel}` }, { sourceId, sourceVersion: 7 }))
+        .resolves.toEqual({ pages: 2 });
+      expect((completedRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text, c.imageObjectKey]), doneLabel)
+        .toEqual([
+          [1, "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n1. Find x.", null],
+          [2, "Public prose after answer.", null],
+        ]);
+    }
   });
 });

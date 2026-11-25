@@ -131,8 +131,9 @@ const SEALED_SECTION_CONTAINER = String.raw`(?:Appendix\b(?:\s+[A-Z0-9]+)?|Chapt
 const SEALED_CONTAINER_PREFIX = String.raw`(?:${SEALED_SECTION_CONTAINER}(?:\s*[:：.\-—–]\s*|\s+)|附录)`;
 const SEALED_HEADING_CONTINUATION = String.raw`(?:\s*\(\s*(?:continued|cont(?:['’]?d)?\.?)\s*\))?`;
 const ASSESSMENT_NUMBER = String.raw`#?\d+(?:\.\d+)*`;
+const ASSESSMENT_RANGE = String.raw`\s+${ASSESSMENT_NUMBER}(?:\s*[-–—]\s*|\s+(?:to|through)\s+)${ASSESSMENT_NUMBER}`;
 const ASSESSMENT_TARGET = String.raw`(?:\s+${ASSESSMENT_NUMBER}(?:(?:\s*[-–—]\s*|\s+(?:to|through)\s+)${ASSESSMENT_NUMBER})?)?`;
-const ASSESSMENT_ANSWER_HEADING = String.raw`(?:Answers?|Solutions?|Key)\s+to\s+(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*(?:(?:Exercises?|Problems?|Questions?|Review\s+Questions?|Practice\s+Problems?|Self[- ]Check\s+Exercises?)${ASSESSMENT_TARGET}|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)`;
+const ASSESSMENT_ANSWER_HEADING = String.raw`(?:Answers?|Solutions?|Key)\s+to\s+(?:(?:Selected|Odd-Numbered|Even-Numbered|All|the|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)\s+)*(?:(?:Exercises|Problems|Questions|Review\s+Questions|Practice\s+Problems|Self[- ]Check\s+Exercises)${ASSESSMENT_TARGET}|(?:Exercise|Problem|Question|Review\s+Question|Practice\s+Problem|Self[- ]Check\s+Exercise)(?:${ASSESSMENT_RANGE}|(?=\s*(?:[:：(]|$)))|Chapter\s+\d+|Section\s+\d+(?:\.\d+)*)`;
 const SOLUTION_QUALIFIER = "(?:Official|Reference|Model|Selected|Correct|Odd-Numbered|Even-Numbered)";
 const QUALIFIED_ANSWER_SECTION = String.raw`(?:(?:Selected|Odd-Numbered|Even-Numbered)\s+Answers?|Model\s+Answers|${SOLUTION_QUALIFIER}\s+Solutions|Solutions?\s+Manual|Answers?\s+and\s+Solutions?)`;
 const CHINESE_ANSWER_HEADING = "(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后练习解答|课后答案|课后解答|章节答案|习题答案|习题解答|练习题答案|练习题解答|练习答案|练习解答|复习题答案|复习题解答|自测题答案|自测题解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)";
@@ -173,21 +174,29 @@ const QUALIFIED_SOLUTION_LABEL_RE = new RegExp(
   String.raw`^${SOLUTION_QUALIFIER}\s+Solutions?(?:\s+to\s+(?:Exercise|Problem|Question)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`, "iu",
 );
 
+const NUMBERED_ANSWER_TARGET = String.raw`(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION))`;
+const NUMBERED_ENGLISH_INLINE_SUFFIX = String.raw`\s*\d+(?:\.\d+)*${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)`;
+
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
-  String.raw`(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
-  String.raw`|${QUALIFIED_ANSWER_LABEL}(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)` +
-  String.raw`|【\s*(?:${CHINESE_ANSWER_HEADING}|答案)${CHINESE_ANSWER_CONTINUATION}\s*】` +
-  String.raw`|(?:${CHINESE_ANSWER_HEADING}|答案)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
+  String.raw`(?:(?:(?:Worked|Full|WORKED|FULL)\s+)?(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)|[Kk]ey|KEY)${NUMBERED_ANSWER_TARGET}?${NUMBERED_ENGLISH_INLINE_SUFFIX}` +
+  String.raw`|${ENGLISH_SOLUTION_LABEL}${NUMBERED_ANSWER_TARGET}${NUMBERED_ENGLISH_INLINE_SUFFIX}` +
+  String.raw`|(?:Answer\s+[Kk]ey|ANSWER\s+KEY|Answers?|ANSWERS?)${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
+  String.raw`|${QUALIFIED_ANSWER_LABEL}(?:${NUMBERED_ANSWER_TARGET}?\s*\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*(?:${ENGLISH_INLINE_DELIMITER}|$)` +
+  String.raw`|【\s*(?:${CHINESE_ANSWER_HEADING}|答案)(?:\s*\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?` +
+  String.raw`|(?:${CHINESE_ANSWER_HEADING}|答案)\s*\d+(?:[.\-]\d+)*${CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)` +
+  String.raw`|(?:${CHINESE_ANSWER_HEADING}|答案)${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
   "u",
 );
 
 const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
   "^(?:" +
-  String.raw`${ENGLISH_SOLUTION_LABEL}(?:\s+(?:to|TO)\s+(?:Exercise|EXERCISE|Problem|PROBLEM|Question|QUESTION)\s*\d*(?:\.\d+)*)?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
-  String.raw`|【\s*${CHINESE_SOLUTION_LABEL}${CHINESE_ANSWER_CONTINUATION}\s*】` +
-  String.raw`|(?:${CHINESE_SOLUTION_LABEL}|解)\s*(?:\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
+  String.raw`${ENGLISH_SOLUTION_LABEL}${NUMBERED_ANSWER_TARGET}?(?:\s+\d+(?:\.\d+)*)?${CONTINUED_LABEL}\s*${ENGLISH_INLINE_DELIMITER}` +
+  String.raw`|${ENGLISH_SOLUTION_LABEL}\s+\d+(?:\.\d+)*${CONTINUED_LABEL}\s*$` +
+  String.raw`|【\s*(?:${CHINESE_SOLUTION_LABEL}|解)(?:\s*\d+(?:[.\-]\d+)*)?${CHINESE_ANSWER_CONTINUATION}\s*】\s*[:：]?` +
+  String.raw`|(?:${CHINESE_SOLUTION_LABEL}|解)\s*\d+(?:[.\-]\d+)*${CHINESE_ANSWER_CONTINUATION}\s*(?:[:：、】]|(?:\.(?=\s|$)|。)|$)` +
+  String.raw`|(?:${CHINESE_SOLUTION_LABEL}|解)${CHINESE_ANSWER_CONTINUATION}\s*[:：]` +
   ")",
   "u",
 );

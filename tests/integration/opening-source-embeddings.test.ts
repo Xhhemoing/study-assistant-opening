@@ -10,7 +10,7 @@ import * as network from "../../packages/ai/src/opening/provider-network";
 import { createOpeningMaterialRetriever, retrievalBudgetId } from "../../apps/worker/src/runtime/material-retrieval";
 import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
 import { createSourceVisualRecognition } from "../../apps/worker/src/runtime/source-visual-recognition";
-import { preserveOpeningKnowledgeDefinitions, publicPdfSealBoundaries } from "../../packages/database/src/repositories/opening-knowledge-definitions";
+import { preserveOpeningKnowledgeDefinitions, publicPdfSealBoundaries, readCitedChunk } from "../../packages/database/src/repositories/opening-knowledge-definitions";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -2076,6 +2076,7 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     "[原生提取]\nAnswer: x = 1\nProof. Done. Q.E.D.\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
     "[原生提取]\nAnswer: x = 1\nProof. Step 1.\nDone. Q.E.D.\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
     "[原生提取]\nAnswer: x = 1\nProof. First. Q.E.D.\nProof. Public theorem proof\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1. Q.E.D.\nProof. Public theorem proof\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
     "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\nProof. Done. Q.E.D.\n\n[图片描述]\nAnswer:",
   ])("starts a fresh archived inline seal from an empty auxiliary Answer: after a closed proof (%j)", async pageOne => {
     await expectArchivedPdfPages([
@@ -2086,10 +2087,10 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
   });
 
   it.each([
-    "[原生提取]\nAnswer: x = 1. Q.E.D.\nProof. Unfinished\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
-    "[原生提取]\nTheorem 1.\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1. Q.E.D.\nProof. Unfinished\n\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1\nProof. Unfinished\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nTheorem 1.\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\nProof. Unfinished\n\n[图片描述]\nAnswer:",
     "[视觉转写与描述]\n[图片描述]\nAnswer: x = 1\nProof. First. Q.E.D.\nProof. Unfinished\n\n[不确定处]\nAnswer:",
-  ])("keeps unclosed_answer_body true and seals proof continuations when an unclosed proof follows Q.E.D. (%j)", async pageOne => {
+  ])("keeps unclosed_answer_body true and seals proof continuations when an unclosed proof remains active (%j)", async pageOne => {
     const pages = [
       pageOne,
       "Intermediate step ends with a period.",
@@ -2492,6 +2493,194 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       await f.sql`DELETE FROM opening_source_embeddings WHERE source_id=${pdf.sourceId} AND chunk_id IN (
         SELECT id FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=6)`;
       await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=6`;
+      await f.sql`ALTER TABLE opening_source_chunks ADD CONSTRAINT opening_source_chunks_source_id_source_version_page_key UNIQUE (source_id, source_version, page)`;
+    }
+  });
+
+  it("enforces Round-65 standalone numbered openers, sibling image suppression, cross-page reader state, multi-chunk proof windows, auxiliary isolation, and post-Q.E.D. Proof visibility", async () => {
+    // 1. Cross-page standalone numbered/explanation openers seal Page 2 and reopen on Page 3.
+    for (const label of [
+      "答案 1：", "答案 1、", "答案 1。", "参考答案 1：", "Answer to Exercise 1:", "Key 1:",
+      "Answers 1:", "Solution to Exercise 1:", "解 1：", "解答 1：", "解析 1：", "解析：",
+      "详解：", "【解析】", "Official Answer 1", "Official Solution 1.",
+    ]) {
+      await expectArchivedPdfPages([`1. Find x.\n${label}`, "x = 2.", "Chapter 2: Groups"], [3], 2);
+    }
+    await expectArchivedPdfPages(["1. Find x.\n答案 1。x = 2。", "Public prose after answer."], [2], 1);
+
+    // 2. Multi-chunk archive topologies for Findings #1..#6 + sibling imageObjectKey suppression.
+    const pdf = await seed(["Worked Example 1: Factor x^2 - 1."]);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    await f.sql`ALTER TABLE opening_source_chunks DROP CONSTRAINT opening_source_chunks_source_id_source_version_page_key`;
+    try {
+      const specs: Array<[string, number, string, string | null, number]> = [
+        // Page 2 (Finding #3): multi-chunk worked example continuation from 1-chunk Page 1 + clean image retained.
+        ["00000000-0000-4000-8000-000000006501", 2, "Solution:", "scan/p2-sol.png", 1],
+        ["00000000-0000-4000-8000-000000006502", 2, "(x - 1)(x + 1).", "scan/p2-body.png", 2],
+        // Page 3 (Finding #1 + #2): standalone numbered label "答案 1：" seals chunk 3, suppresses sibling image, drops blank image-only row in listForSources.
+        ["00000000-0000-4000-8000-000000006503", 3, "1. Find x.", "scan/p3-q.png", 3],
+        ["00000000-0000-4000-8000-000000006504", 3, "   ", "scan/p3-blank.png", 4],
+        ["00000000-0000-4000-8000-000000006505", 3, "答案 1：", "scan/p3-lbl.png", 5],
+        ["00000000-0000-4000-8000-000000006506", 3, "x = 2.", "scan/p3-ans.png", 6],
+        // Page 4 (Finding #4 single-page multi-chunk proof): chunks before proof_start and after ∎ stay public, image suppressed.
+        ["00000000-0000-4000-8000-000000006507", 4, "1. Find x.", "scan/p4-q.png", 7],
+        ["00000000-0000-4000-8000-000000006508", 4, "Solution: Proof. Substitution gives x = 2. ∎", "scan/p4-pf.png", 8],
+        ["00000000-0000-4000-8000-000000006509", 4, "Chapter 2: Groups", null, 9],
+        // Pages 5..7 (Finding #4 multi-page proof): starts mid-page on Page 5, covers full Page 6, closes mid-page at ∎ before Chapter 3 on Page 7.
+        ["00000000-0000-4000-8000-000000006510", 5, "1. Prove associativity.", "scan/p5-q.png", 10],
+        ["00000000-0000-4000-8000-000000006511", 5, "Solution: Proof. Begin private derivation.", null, 11],
+        ["00000000-0000-4000-8000-000000006512", 6, "Intermediate private derivation on page 6.", null, 12],
+        ["00000000-0000-4000-8000-000000006513", 7, "Conclude private derivation. ∎", null, 13],
+        ["00000000-0000-4000-8000-000000006514", 7, "Chapter 3: Rings", "scan/p7-ch.png", 14],
+        // Pages 8..9 (Finding #5): auxiliary Vision inline answer in Chunk 0 on Page 8 isolated from same-page primary Chunk 1 and Page 9.
+        ["00000000-0000-4000-8000-000000006515", 8, "1. Find x.\n[图片描述]\nAnswer: x = 2", "scan/p8-aux.png", 15],
+        ["00000000-0000-4000-8000-000000006516", 8, "2. Find y.", "scan/p8-q2.png", 16],
+        ["00000000-0000-4000-8000-000000006517", 9, "Public prose after isolated auxiliary block.", null, 17],
+        // Pages 10..11 (Finding #6): post-Q.E.D. "Proof: Another theorem." does not upgrade to first_proof on Page 10 or Page 11.
+        ["00000000-0000-4000-8000-000000006518", 10, "1. Find x.", null, 18],
+        ["00000000-0000-4000-8000-000000006519", 10, "Solution: Q.E.D.", null, 19],
+        ["00000000-0000-4000-8000-000000006520", 10, "Proof: Another theorem.", null, 20],
+        ["00000000-0000-4000-8000-000000006521", 11, "Public continuation of that theorem proof.", null, 21],
+      ];
+      for (const [id, page, text, imageKey, ms] of specs) {
+        await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text,image_object_key,created_at)
+          VALUES(${id}::uuid,${pdf.sourceId},1,${page},${text},${imageKey},now() + (${ms} * interval '1 millisecond'))`;
+        if (text.trim()) {
+          await f.sql`INSERT INTO opening_source_embeddings(chunk_id,source_id,source_version,model_key,dimensions,segment_index,text,embedding)
+            VALUES(${id}::uuid,${pdf.sourceId},1,${model.modelKey},${model.dimensions},0,${text},'[1,0,0]'::vector)`;
+        }
+      }
+
+      const chunksRepo = createOpeningSourceChunksRepository(f.sql);
+      const listed = await chunksRepo.listChunks(f.scope, pdf.sourceId);
+      const atVersion = await chunksRepo.listChunksAtVersion(f.scope, pdf.sourceId, 1);
+      const forSources = await chunksRepo.listForSources(f.scope, [pdf.sourceId]);
+      const snap = await pdf.repository.snapshot(f.scope, pdf.sourceId, 1);
+      const searched = await pdf.repository.search(f.scope, { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] });
+
+      expect(atVersion).toEqual(listed);
+      expect(snap?.chunks).toEqual(listed);
+      // Page 3's whitespace-only chunk ("00000000-0000-4000-8000-000000006504") has its image suppressed, so listForSources omits it!
+      expect(forSources.map(c => c.id)).toEqual(listed.filter(c => c.id !== "00000000-0000-4000-8000-000000006504").map(c => c.id));
+      expect(forSources.some(c => !c.text.trim() && c.imageObjectKey === null)).toBe(false);
+
+      // Page 2 has no sealed siblings -> retains imageObjectKey; Pages 3, 4, 5, 7, 8 have sealed siblings -> imageObjectKey suppressed to null!
+      expect(listed.filter(c => c.page === 2).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["Solution:", "scan/p2-sol.png"],
+        ["(x - 1)(x + 1).", "scan/p2-body.png"],
+      ]);
+      expect(listed.filter(c => c.page === 3).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["1. Find x.", null],
+        ["   ", null],
+      ]);
+      expect(listed.filter(c => c.page === 4).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["1. Find x.", null],
+        ["Chapter 2: Groups", null],
+      ]);
+      expect(listed.filter(c => c.page === 5).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["1. Prove associativity.", null],
+      ]);
+      expect(listed.filter(c => c.page === 6)).toEqual([]);
+      expect(listed.filter(c => c.page === 7).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["Chapter 3: Rings", null],
+      ]);
+      expect(listed.filter(c => c.page === 8).map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["2. Find y.", null],
+      ]);
+      expect(listed.filter(c => c.page === 9).map(c => c.text)).toEqual([
+        "Public prose after isolated auxiliary block.",
+      ]);
+      expect(listed.filter(c => c.page === 10).map(c => c.text)).toEqual([
+        "1. Find x.", "Proof: Another theorem.",
+      ]);
+      expect(listed.filter(c => c.page === 11).map(c => c.text)).toEqual([
+        "Public continuation of that theorem proof.",
+      ]);
+
+      // Recovery mode still preserves raw imageObjectKey on Page 3.
+      const recoveryPage3 = await chunksRepo.listChunksAtVersion(f.scope, pdf.sourceId, 1, [3], { unpublishedPdfForRecovery: true });
+      expect(recoveryPage3.map(c => [c.text, c.imageObjectKey])).toEqual([
+        ["1. Find x.", "scan/p3-q.png"],
+        ["   ", "scan/p3-blank.png"],
+        ["答案 1：", "scan/p3-lbl.png"],
+        ["x = 2.", "scan/p3-ans.png"],
+      ]);
+
+      // search and authorizeChunks also suppress imageObjectKey on pages with sealed siblings while keeping clean pages intact.
+      const searchedById = new Map(searched.map(s => [s.chunk.id, s.chunk]));
+      expect(searchedById.get("00000000-0000-4000-8000-000000006501")?.imageObjectKey).toBe("scan/p2-sol.png");
+      expect(searchedById.get("00000000-0000-4000-8000-000000006503")?.imageObjectKey).toBeNull();
+      expect(searchedById.get("00000000-0000-4000-8000-000000006514")?.imageObjectKey).toBeNull();
+      expect(searchedById.get("00000000-0000-4000-8000-000000006516")?.imageObjectKey).toBeNull();
+      expect(searchedById.has("00000000-0000-4000-8000-000000006506")).toBe(false);
+      expect(searchedById.has("00000000-0000-4000-8000-000000006519")).toBe(false);
+      expect(searchedById.has("00000000-0000-4000-8000-000000006520")).toBe(true);
+
+      const staleCallerChunk = { ...listed.find(c => c.id === "00000000-0000-4000-8000-000000006503")!, imageObjectKey: "scan/p3-q.png" };
+      const cleanCallerChunk = listed.find(c => c.id === "00000000-0000-4000-8000-000000006501")!;
+      const sealedCallerChunk = { ...staleCallerChunk, id: "00000000-0000-4000-8000-000000006506", text: "x = 2" };
+      const authorized = await pdf.repository.authorizeChunks(f.scope, [staleCallerChunk, cleanCallerChunk, sealedCallerChunk]);
+      expect(authorized.chunks).toEqual([
+        { ...staleCallerChunk, imageObjectKey: null },
+        cleanCallerChunk,
+      ]);
+
+      // readOpeningSourceContent matches SQL across cross-page worked examples, proof windows, auxiliary isolation, and post-Q.E.D. Proof.
+      const expectedPages = [1, 2, 3, 4, 5, 7, 8, 9, 10, 11];
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 2 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "Solution:\n\n(x - 1)(x + 1)." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 3 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x.\n\n   " });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 4 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x.\n\nChapter 2: Groups" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 6 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 7 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "Chapter 3: Rings" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 8 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "2. Find y." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 10 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x.\n\nProof: Another theorem." });
+
+      // readCitedChunk & preserveOpeningKnowledgeDefinitions suppress imageObjectKey on Page 3 while retaining "1. Find x." definition, and drop sealed sibling "x = 2".
+      const courseId = randomUUID();
+      const publicNodeId = randomUUID();
+      const sealedNodeId = randomUUID();
+      await f.sql.begin(async tx => {
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${pdf.sourceId} ON CONFLICT DO NOTHING`;
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${f.scope.workspaceId},'R65 cited',${courseId})`;
+        await tx`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,sort_order,visibility)
+          VALUES(${randomUUID()},${f.scope.workspaceId},${courseId},'source',${pdf.sourceId},'core',0,'course')`;
+        await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+          VALUES(${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},1,${tx.json({
+            courseId, version: 1,
+            nodes: [
+              { id: publicNodeId, courseId, label: "Question 1", kind: "concept", evidenceChunkIds: ["00000000-0000-4000-8000-000000006503"], status: "supported" },
+              { id: sealedNodeId, courseId, label: "Answer 1", kind: "concept", evidenceChunkIds: ["00000000-0000-4000-8000-000000006506"], status: "supported" },
+            ],
+            edges: [],
+          })},${tx.json({ [pdf.sourceId]: 1 })})`;
+        const spans = new Map();
+        const citedPublic = await readCitedChunk(tx, f.scope, courseId, "00000000-0000-4000-8000-000000006503", spans);
+        const citedClean = await readCitedChunk(tx, f.scope, courseId, "00000000-0000-4000-8000-000000006501", spans);
+        const citedSealed = await readCitedChunk(tx, f.scope, courseId, "00000000-0000-4000-8000-000000006506", spans);
+        expect(citedPublic).toMatchObject({ id: "00000000-0000-4000-8000-000000006503", text: "1. Find x.", imageObjectKey: null });
+        expect(citedClean).toMatchObject({ id: "00000000-0000-4000-8000-000000006501", text: "Solution:", imageObjectKey: "scan/p2-sol.png" });
+        expect(citedSealed).toBeUndefined();
+        await preserveOpeningKnowledgeDefinitions(tx, f.scope, pdf.sourceId, 1);
+        const [graphRow] = await tx<{ node_definitions: Record<string, string> }[]>`
+          SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+        expect(graphRow?.node_definitions[publicNodeId]).toContain("1. Find x.");
+        expect(graphRow?.node_definitions[sealedNodeId]).toBeUndefined();
+        await tx`DELETE FROM opening_course_knowledge WHERE course_id=${courseId}`;
+        await tx`DELETE FROM course_asset_memberships WHERE course_id=${courseId}`;
+        await tx`DELETE FROM courses WHERE id=${courseId}`;
+      });
+    } finally {
+      await f.sql`DELETE FROM opening_source_embeddings WHERE source_id=${pdf.sourceId} AND chunk_id IN (
+        SELECT id FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=2)`;
+      await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=2`;
       await f.sql`ALTER TABLE opening_source_chunks ADD CONSTRAINT opening_source_chunks_source_id_source_version_page_key UNIQUE (source_id, source_version, page)`;
     }
   });

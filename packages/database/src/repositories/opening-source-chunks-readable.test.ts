@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { containsPdfAnswerLabel, filterPublicSamePagePdfChunks, isPublicSourceChunk, preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { containsPdfAnswerLabel, filterPublicSamePagePdfChunks, isPublicSourceChunk, preserveOpeningKnowledgeDefinitions, readCitedChunk, type ArchivePdfCursorState, type ArchivedSealSpan } from "./opening-knowledge-definitions";
 import { chunksHaveReadableContent, createOpeningSourceChunksRepository, type NewSourceChunk } from "./opening-source-chunks";
 
 const base = { page: 1, slideLabel: null, startMs: null, endMs: null };
@@ -388,6 +388,67 @@ describe("page-less archived PDF chunks", () => {
       .toEqual(["1. Find x."]);
     expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", "Solution: x = 2.\n\n2. Find y.", "Public follow-up."])).map(c => c.text))
       .toEqual(["1. Find x.", "Public follow-up."]);
+    for (const label of ["答案 1：", "答案 1、", "答案 1。", "Answer to Exercise 1:", "Key 1:", "Solution to Exercise 1:", "解 1：", "【解析】", "Official Answer 1", "Official Solution 1."]) {
+      expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", label, "x = 2"])).map(c => c.text), label)
+        .toEqual(["1. Find x."]);
+    }
+    expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", "Solution: Proof. Substitution gives x = 2. ∎", "Chapter 2: Groups"])).map(c => c.text))
+      .toEqual(["1. Find x.", "Chapter 2: Groups"]);
+    expect(filterPublicSamePagePdfChunks(chunks(["1. Find x.", "Solution: Q.E.D.", "Proof: Another theorem."])).map(c => c.text))
+      .toEqual(["1. Find x.", "Proof: Another theorem."]);
+    const cursor: ArchivePdfCursorState = { inWorkedExample: false, inExercise: false, previousNumberedQuestion: false };
+    expect(filterPublicSamePagePdfChunks(chunks(["Worked Example 1: Solve x = 2."], 1), cursor).map(c => c.text))
+      .toEqual(["Worked Example 1: Solve x = 2."]);
+    expect(cursor.inWorkedExample).toBe(true);
+    expect(filterPublicSamePagePdfChunks(chunks(["Solution:", "Substitution gives x = 2."], 2), cursor).map(c => c.text))
+      .toEqual(["Solution:", "Substitution gives x = 2."]);
+  });
+
+  it("suppresses public sibling imageObjectKey when a same-page sibling is sealed and drops empty suppressed rows in listForSources", async () => {
+    const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+    const mkRow = (id: string, page: number, text: string, image_object_key: string | null) => ({
+      id, source_id: "pdf", source_version: 4, page, slide_label: null, start_ms: null, end_ms: null,
+      text, mime: "application/pdf", image_object_key,
+    });
+    const publicQuestion = mkRow("q1", 1, "1. Find x.", "scan/p1.png");
+    const emptyImageOnly = mkRow("img1", 1, "   ", "scan/p1-blank.png");
+    const sealedAnswer = mkRow("a1", 1, "Answer 1: x = 2.", "scan/p1-ans.png");
+    const cleanPage = mkRow("p2", 2, "Chapter 2: Groups", "scan/p2.png");
+    const sql = (strings: TemplateStringsArray | string[], ...values: unknown[]) => {
+      if (!("raw" in strings)) return { sqlFragment: "(?)" };
+      const query = mockQueryText(strings, values);
+      if (!query.includes("SELECT c.*")) return { sqlFragment: query };
+      return [publicQuestion, emptyImageOnly, sealedAnswer, cleanPage];
+    };
+    const repo = createOpeningSourceChunksRepository(sql as unknown as Sql);
+    await expect(repo.listChunksAtVersion(scope, "pdf", 4)).resolves.toMatchObject([
+      { id: "q1", text: "1. Find x.", imageObjectKey: null },
+      { id: "img1", text: "   ", imageObjectKey: null },
+      { id: "p2", text: "Chapter 2: Groups", imageObjectKey: "scan/p2.png" },
+    ]);
+    await expect(repo.listForSources(scope, ["pdf"])).resolves.toMatchObject([
+      { id: "q1", text: "1. Find x.", imageObjectKey: null },
+      { id: "p2", text: "Chapter 2: Groups", imageObjectKey: "scan/p2.png" },
+    ]);
+    await expect(repo.listChunksAtVersion(scope, "pdf", 4, [1], { unpublishedPdfForRecovery: true })).resolves.toMatchObject([
+      { id: "q1", imageObjectKey: "scan/p1.png" },
+      { id: "img1", imageObjectKey: "scan/p1-blank.png" },
+      { id: "a1", imageObjectKey: "scan/p1-ans.png" },
+      { id: "p2", imageObjectKey: "scan/p2.png" },
+    ]);
+
+    const spans = new Map<string, ArchivedSealSpan[]>([
+      ["pdf:4", [{ first_page: 1, reopen_page: 2, chunk_id: "a1" }]],
+    ]);
+    const tx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = mockQueryText(strings, values);
+      if (!query.includes('SELECT c.id,c.source_id AS "sourceId"')) return { sqlFragment: query };
+      return [{ id: "q1", sourceId: "pdf", sourceVersion: 4, mime: "application/pdf", page: 1,
+        slideLabel: null, startMs: null, endMs: null, text: "1. Find x.", imageObjectKey: "scan/p1.png" }];
+    }) as unknown as TransactionSql;
+    await expect(readCitedChunk(tx, scope, "course", "q1", spans)).resolves.toMatchObject({
+      id: "q1", text: "1. Find x.", imageObjectKey: null,
+    });
   });
 });
 
