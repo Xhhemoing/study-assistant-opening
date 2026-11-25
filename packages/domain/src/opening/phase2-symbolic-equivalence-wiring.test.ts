@@ -40,6 +40,18 @@ describe("symbolic teaching choice", () => {
     expect(check(algebra, interaction, "Answer: 1/0", "A. " + quadratic)).toBeNull();
   });
 
+  it.each(["A. 3x", "A. 2x = 3x", "(A) 2x = 3x", "（A）： 3x"])(
+    "rejects an otherwise matching saved ID with a contradictory suffix %s", key => {
+      expect(check("Simplify $x+x$", choice("2x", "3x"), key, "A. 2x")).toBeNull();
+    },
+  );
+
+  it.each(["A", "A． $2x$", "A. $x+x$ = $2x$", "（A）： 2x", "(A). $$x+x=2x$$"])(
+    "corroborates a symbolic key suffix after a matching ID %s", key => {
+      expect(check("Simplify $x+x$", choice("2x", "3x"), key, "A. 2x")).toBe("correct");
+    },
+  );
+
   it.each([["B", "B.1", "B.1"], ["A", "A)", "(A)"]])("rejects overlapping saved IDs %s and %s", (first, second, key) => {
     const options = [{ id: first, label: quadratic }, { id: second, label: "x^2+1" }];
     for (const ordered of [options, [...options].reverse()]) {
@@ -63,6 +75,23 @@ describe("symbolic teaching choice", () => {
 
   it("preserves the source domain when differentiating a logarithm", () => {
     expect(check("Differentiate $ln(x)$", choice("1/x", "2/x"), "A", "A. 1/x")).toBeNull();
+    const interaction = choice("$1/x + 0*ln(x)$", "$2/x + 0*ln(x)$");
+    expect(check("Differentiate $ln(x)$", interaction, "A", "A. $1/x + 0*ln(x)$")).toBe("correct");
+    expect(check("Differentiate $1/x$", choice("-1/x^2", "1/x^2"), "A", "A. -1/x^2")).toBe("correct");
+  });
+
+  it("abstains when a formal derivative would discard points of the source domain", () => {
+    const interaction = choice("2x^3/sqrt(x^4)", "2x");
+    expect(check("Differentiate $sqrt(x^4)$", interaction, "A", "A. 2x^3/sqrt(x^4)")).toBeNull();
+    expect(check("Differentiate $sqrt(x^4)$", interaction, "B", "B. 2x")).toBeNull();
+    expect(check("Differentiate $sqrt(x^4)$ at $x=0$", numeric, "0", "0")).toBeNull();
+    expect(check("Differentiate $1/x$ at $x=1$", numeric, "-1", "-1")).toBe("correct");
+    const excludedRoot = choice("2x^3/sqrt(x^4)", "4x^3/sqrt(x^4)");
+    expect(check("Differentiate $sqrt(x^4)$ for $x != 0$", excludedRoot, "A", "A. 2x^3/sqrt(x^4)")).toBe("correct");
+    expect(verifySymbolicStepEquivalence({ kind: "derivative", reference: "abs(x)^2", student: "2x" })).toBe("unverified");
+    const claim = "\\frac{d}{dx}(\\sqrt{x^4}) = 2x";
+    expect(verifyStandaloneProofEquationClaim(claim).status).toBe("unverified");
+    expect(adjudicate("correct", proof(claim, "correct"))).toBe("correct");
   });
 
   it.each([String.raw`求不定积分 $\int 2x$`, String.raw`求不定积分 $\int 2x\,dt$`, String.raw`Evaluate $\int_0^1 2x\,dx$`])(
@@ -74,6 +103,23 @@ describe("symbolic teaching choice", () => {
   it("requires an integral expression key to match the selected form", () => {
     const stem = String.raw`求不定积分 $\int 2x\,dx$`;
     expect(check(stem, choice("x^2+C", "x^3+C"), "x^2+1+C", "A. x^2+C")).toBeNull();
+  });
+
+  it.each(["x^2", "x^2 + C - C", "x^2 + 0*C", "x^2 + C - 2*C + C"])(
+    "distinguishes an antiderivative family from %s", particular => {
+      const stem = "\\int 2x\\,dx";
+      const interaction = choice("x^2 + C", "$" + particular + "$");
+      expect(check("Evaluate $" + stem + "$", interaction, "A", "A. x^2 + C")).toBe("correct");
+      expect(check("Evaluate $" + stem + "$", interaction, "B", "B. $" + particular + "$")).toBeNull();
+      expect(verifyStandaloneProofEquationClaim(stem + " = $" + particular + "$")).toEqual({
+        status: "inequivalent", unconditional: false,
+      });
+      expect(verifySymbolicStepEquivalence({ kind: "indefinite-integral", reference: "2x", student: particular })).toBe("inequivalent");
+    },
+  );
+
+  it("permits a nonzero rescaling of the arbitrary integration constant", () => {
+    expect(verifySymbolicStepEquivalence({ kind: "indefinite-integral", reference: "2x", student: "x^2+C/2-C" })).toBe("equivalent");
   });
 });
 
@@ -91,9 +137,24 @@ describe("symbolic teaching numeric", () => {
   it.each([
     [String.raw`计算 $\sqrt{4}/6$`, "1/3"],
     ["Evaluate $cos(0)/3$", "cos(0)/3"],
+    ["Evaluate $ln(exp(2))/6$", "ln(exp(2))/6"],
+    ["Evaluate $abs(exp(ln(1/3)))$", "abs(exp(ln(1/3)))"],
+    ["Evaluate $(sin(1)-sin(1)) + 1/3$", "(sin(1)-sin(1)) + 1/3"],
   ])("keeps the decimal rule for nonterminating exact results from %s", (stem, key) => {
     expect(check(stem, numeric, key, "0.3333")).toBe("unparseable");
     expect(check(stem, numeric, key, "2/6")).toBe("correct");
+  });
+
+  it("abstains on a decimal mismatch when the exact rational denominator is unresolved", () => {
+    expect(check("Evaluate $exp(2)$", numeric, "exp(2)", "7.0")).toBeNull();
+    expect(check("Evaluate $exp(2)$", numeric, "exp(2)", "exp(2.0)")).toBe("correct");
+    expect(check(radical, numeric, sqrtTwo, "2.0")).toBe("incorrect");
+    expect(check("Evaluate $sqrt(2)+sqrt(3)$", numeric, "sqrt(2)+sqrt(3)", "3.0")).toBe("incorrect");
+  });
+
+  it.each(["4.0.5", ".5.5", "1..2", "1.2.3"])("rejects malformed decimal tokens %s", token => {
+    expect(check("Evaluate $sqrt(4)$", numeric, "2", token)).toBe("unparseable");
+    expect(check("Evaluate $sqrt(4)$", numeric, token, "2")).toBeNull();
   });
 
   it.each(["Evaluate $ln(1) + exp(0)$", "Evaluate $cos(0) + sin(0)$"])(
@@ -131,6 +192,17 @@ describe("symbolic Markdown boundaries", () => {
     expect(check("Simplify x\\*x", choice("x\\*x", "x+1"), "A", "A. x\\*x")).toBe("correct");
   });
 
+  it("rejects ambiguous TeX arguments and accepts explicitly braced forms", () => {
+    expect(check("Evaluate $\\sqrt12+1$", numeric, "sqrt(12)+1", "3")).toBeNull();
+    expect(check("Evaluate $\\sqrt x+1$", choice("sqrt(x)+1", "sqrt(x)"), "A", "A. sqrt(x)+1")).toBeNull();
+    expect(check("Simplify $\\frac123+x$", choice("x+4", "x"), "A", "A. x+4")).toBeNull();
+    expect(check("Evaluate $sqrt(4)$", numeric, "2", "\\frac42")).toBe("unparseable");
+    expect(check("Simplify $x^12+x$", choice("x^12+x", "x^12"), "A", "A. x^12+x")).toBeNull();
+    expect(check("Differentiate $\\frac{d}{dx}(x^12)$", choice("12x^11", "x^12"), "A", "A. 12x^11")).toBeNull();
+    expect(check("Evaluate $\\sqrt{4}+\\frac{2}{1}$", numeric, "4", "\\frac{8}{2}")).toBe("correct");
+    expect(check("Simplify $x^{12}+x$", choice("x^12+x", "x^12"), "A", "A. x^12+x")).toBe("correct");
+  });
+
   it.each(["$x$ * $x$", "x*x", "$x*x", "$x*\nx$", "$$x*\n\nx$$", "$$x*x$", "- $x^2$", "# $x^2$",
     "1. $x^2$", "---\n$x^2$", "- - -\n$x^2$"])("rejects ambiguous math markup %j", label => {
     expect(check("Simplify\n" + label, choice("x^2", "x+1"), "A", "A. x^2")).toBeNull();
@@ -156,10 +228,34 @@ function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedba
 describe("symbolic proof feedback", () => {
   it.each([
     "(x+1)^2 = x^2 + 1", "Step 1: $$(x+1)^2 = x^2 + 2x + 1 = x^2 + 1$$",
-    String.raw`(1) $\frac{d}{dx}(x^3) = x^2$`, String.raw`1. \int 2x\,dx = x^3 + C`,
+    String.raw`Step 1: $\frac{d}{dx}(x^3) = x^2$`, String.raw`1. \int 2x\,dx = x^3 + C`,
   ])("vetoes a positive verdict on a refuted required claim %s", claim => {
     expect(proofFeedbackAllowsOutcome("correct", proof(claim, "correct"))).toBe(false);
     expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+  });
+
+  it.each([
+    ["(2)+3=5", "equivalent"],
+    ["(2)+3=3", "inequivalent"],
+    ["(2) x = 2x", "equivalent"],
+    ["1. +3=3", "unverified"],
+    ["第 2 步： $1$ = $2$", "inequivalent"],
+  ])("keeps mathematical operands when checking %s", (claim, status) => {
+    expect(verifyStandaloneProofEquationClaim(claim).status).toBe(status);
+  });
+
+  it.each([
+    ["$1$ = $2$", "inequivalent"],
+    ["$$x+x$$ = $2x$", "equivalent"],
+    ["$x+x=2x$ = $2x$", "unverified"],
+    ["$1$ != $2$", "unverified"],
+    ["$1$ <= $2$", "unverified"],
+    ["$1$ = $2", "unverified"],
+    ["$x^12 = x^{12}$", "unverified"],
+  ])("checks equality boundaries in %s", (claim, status) => {
+    expect(verifyStandaloneProofEquationClaim(claim).status).toBe(status);
+    if (status === "inequivalent") expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+    if (status === "equivalent") expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("unverified");
   });
 
   it.each([
