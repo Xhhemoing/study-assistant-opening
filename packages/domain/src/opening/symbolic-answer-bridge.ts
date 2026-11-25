@@ -983,11 +983,22 @@ const DERIVED_CONTRADICTION = new RegExp([
   /^\s*(?:矛盾|归谬|荒谬)[。！!\s]*$|(?:导出|推出|得到|得出|产生|出现|构成|造成|发现|导致|由此(?:可知|可见)?|自相)\s*矛盾(?!\s*的)|(?:这|此结论|此结果)(?:显然|实在|确实)?(?:是|很|太)?(?:荒谬|不可能)(?:(?!的)|的(?=[。！!\s]*$))|与[^，。！？；：,.!?;:\r\n]+矛盾(?=\s*(?:$|[，。！？；：,.!?;:]|因此|所以|从而|故))|(?:由此|从而|据此)归谬(?!\s*的)/u.source,
 ].join("|"), "iu");
 const LEXICAL_PROOF_SUBJECT = /^(?:(?:the|a|an|this|that|our)\s+)?(?:(?:technical|ordinary|english|chinese|relevant|quoted|following|new|mathematical|logical|current|next|first|second|stated|purported|known|chosen)\s+)*(?:word|term|terminology|vocabulary|topic|subject|theme|title|name|label|concept|notion|definition|meaning|section|chapter|lesson|example|exercise|question|sense|spelling)s?\b|(?:介绍|讨论|讲解|解释|定义).*(?:术语|概念)|^(?:本|这一|该)(?:节|章|课|例|题)(?:介绍|讨论|讲解|解释|定义)/iu;
-const PROOF_QUOTATION = /\$\$[^\r\n]+?\$\$|\$[^$\r\n]+\$|"[^"\r\n]+"|“[^”\r\n]+”|(?:(?<![\p{L}\p{N}])|(?<=\p{Script=Han}))‘(?:[^‘’\r\n]|(?<=[\p{L}\p{N}])’(?=[\p{L}\p{N}])|(?<![\p{L}\p{N}])’(?=\p{L})|(?<=s)’(?=[^\S\r\n]+\p{Ll}[^‘’\r\n]*’))+(?:’(?![\p{L}\p{N}])|’(?=\p{Script=Han}))|(?<![\p{L}\p{N}])'(?:[^'\r\n]|(?<=[\p{L}])'(?=[\p{L}]))+'(?![\p{L}\p{N}])|「[^」\r\n]+」|『[^』\r\n]+』|《[^》\r\n]+》/gu;
+const PROOF_QUOTATION = /(?<!\x60)(\x60{1,3})(?!\x60)[^\r\n]+?(?<!\x60)\1(?!\x60)|\$\$[^\r\n]+?\$\$|\$[^$\r\n]+\$|"[^"\r\n]+"|“[^”\r\n]+”|(?:(?<![\p{L}\p{N}])|(?<=\p{Script=Han}))‘(?:[^‘’\r\n]|(?<=[\p{L}\p{N}])’(?=[\p{L}\p{N}])|(?<![\p{L}\p{N}])’(?=\p{L})|(?<=s)’(?=[^\S\r\n]+\p{Ll}[^‘’\r\n]*’))+(?:’(?![\p{L}\p{N}])|’(?=\p{Script=Han}))|(?<![\p{L}\p{N}])'(?:[^'\r\n]|(?<=[\p{L}])'(?=[\p{L}]))+'(?![\p{L}\p{N}])|「[^」\r\n]+」|『[^』\r\n]+』|《[^》\r\n]+》/gu;
 export const ILLUSTRATIVE_PROOF_ROLE = /\bas\s+an?\s+(?:example|illustration|template|sample|model|instance|phrase|wording)\b|作为[^，。；！？,;.!?\r\n]{0,24}(?:例子|示例|示范|样例)|举例(?:说明|而言)/iu;
 
-export function maskProofQuotations(text: string): string {
-  return text.replace(PROOF_QUOTATION, span => span.startsWith("$") ? span : " ".repeat(span.length));
+export function maskProofQuotations(text: string, preserveCodeEquations = false): string {
+  return text.replace(PROOF_QUOTATION, (span, codeFence: string | undefined) => {
+    if (span.startsWith("$")) return span;
+    if (preserveCodeEquations && codeFence && span.length <= MAX_EXPRESSION_LENGTH) {
+      const body = span.slice(codeFence.length, -codeFence.length);
+      const terms = equalityTerms(body);
+      if (terms && terms.length > 1 && terms.every(term => parseExpression(term))) {
+        const padding = " ".repeat(codeFence.length - 1);
+        return padding + "$" + body + "$" + padding;
+      }
+    }
+    return " ".repeat(span.length);
+  });
 }
 const INDIRECT_QUESTION = /\b(?:whether|(?:wonder|ask|check|test|see|question|consider)\w*\s+(?:if|whether|what)|what\s+if)\b|是否|能否/iu;
 const CONDITIONAL_DOMAIN = /\b(?:if|whether|suppose|supposing|assuming|unless|imagine|in\s+case)\b|(?:如果|假若|若是?|倘若|要是|一旦)\s*(?=在|改在|换成|切换到)/iu;
@@ -1087,23 +1098,44 @@ export function assertiveProseSentences(text: string): string[] {
   return splitProseSentences(text).filter(sentence => !endsInQuestion(sentence));
 }
 
-function* proofDomainChanges(texts: readonly string[]) {
-  for (const text of texts) {
+type ScopedDomainText = { text: string; temporary?: boolean };
+type DomainScope = { stepIndex: number; temporary: boolean };
+type CriterionDomainText = { label: string; feedback: string };
+
+function* proofDomainChanges(texts: readonly ScopedDomainText[]) {
+  for (const { text, temporary: inheritedTemporary } of texts) {
     // Keep characteristic and field notation intact when splitting clauses.
     const clauses = assertiveProseSentences(text).flatMap(sentence => {
       const question = INDIRECT_QUESTION.exec(sentence);
       const conditional = CONDITIONAL_DOMAIN.exec(sentence);
       const end = Math.min(question?.index ?? sentence.length, conditional?.index ?? sentence.length);
-      const clauses = sentence.slice(0, end)
-        .replace(DOMAIN_CLAUSE_TOKEN, (token, boundary) => boundary ? "\n" : token).split("\n");
-      return clauses.filter((clause, index) => {
+      const assertion = sentence.slice(0, end);
+      const clauses: { text: string; separator: string }[] = [];
+      let start = 0;
+      for (const token of assertion.matchAll(DOMAIN_CLAUSE_TOKEN)) {
+        if (!token[1]) continue;
+        clauses.push({ text: assertion.slice(start, token.index), separator: token[1] });
+        start = token.index + token[0].length;
+      }
+      clauses.push({ text: assertion.slice(start), separator: "" });
+      return clauses.map((clause, index) => {
         const leadsIntoCondition = conditional?.index === end && index === clauses.length - 1;
-        return !CHINESE_DOMAIN_HYPOTHETICAL.test(clause) &&
-          !(DOMAIN_MODAL.test(clause) && (leadsIntoCondition || DOMAIN_MODAL_ACTION.test(clause)));
+        const { text } = clause;
+        const ignored = CHINESE_DOMAIN_HYPOTHETICAL.test(text) ||
+          (DOMAIN_MODAL.test(text) && (leadsIntoCondition || DOMAIN_MODAL_ACTION.test(text)));
+        if (ignored) return { text: "", separator: "" };
+        return clause;
       });
     });
-    const temporary = isTemporaryProofDomain(text);
-    for (const clause of clauses) {
+    const temporaryQualifier = (clause: string | undefined) =>
+      !!clause && isTemporaryProofDomain(clause) && !mentionsProofDomain(clause);
+    for (const [clauseIndex, { text: clause, separator }] of clauses.entries()) {
+      const previous = clauses[clauseIndex - 1];
+      const following = clauses[clauseIndex + 1];
+      const temporary = !PERMANENT_DOMAIN.test(clause) && !SEQUENTIAL_DOMAIN_TRANSITION.test(clause) &&
+        (inheritedTemporary || isTemporaryProofDomain(clause) ||
+          (isComma(previous?.separator) && temporaryQualifier(previous?.text)) ||
+          (isComma(separator) && temporaryQualifier(following?.text)));
       const mentions = new Map<number, { end: number; domain: ScalarDomain }>();
       for (const { pattern, domain } of DOMAIN_MENTIONS) {
         for (const match of clause.matchAll(pattern)) {
@@ -1130,7 +1162,7 @@ function* proofDomainChanges(texts: readonly string[]) {
 
 type ProofDomain = { persistent: ScalarDomain; effective: ScalarDomain };
 
-function advanceProofDomain(state: ProofDomain, texts: readonly string[], includeTemporary = true): boolean {
+function advanceProofDomain(state: ProofDomain, texts: readonly ScopedDomainText[], includeTemporary = true): boolean {
   let applied = false;
   for (const change of proofDomainChanges(texts)) {
     if (change.temporary && !includeTemporary) continue;
@@ -1151,9 +1183,10 @@ const PROSE_CALCULATION = /\b(?:equals?|is\s+equal\s+to|adds?\s+up\s+to|sums?\s+
 const PROOF_STEP_NOUN = /(?:steps?|lines?|parts?|cases?|calculations?|claims?|equalit(?:y|ies)|equations?|stages?)\b/u.source;
 const CURRENT_STEP_NOUN = String.raw`\bthis\s+(?:(?:current|present|single|particular)\s+)?${PROOF_STEP_NOUN}`;
 const CHINESE_CURRENT_STEP_NOUN = /(?:本|此|这一|当前)(?:步骤?|行|式|部分)(?:中|里|内|而言|来说)?/u.source;
+const TEMPORARY_STEP_END = /\buntil\s+(?:this\s+(?:(?:current|present)\s+)?(?:step|line|part|case|calculation|claim|equation|stage)\s+(?:is\s+(?:done|finished|complete(?:d)?)|ends?)|this\s+is\s+(?:done|finished|complete(?:d)?)|the\s+end\s+of\s+this\s+step)\b|(?:在本步结束前|直到本步完成)/iu;
 const DEFERRED_DOMAIN_TRANSITION = new RegExp([
-  String.raw`\b(?:after|following|once|beyond|until)\s+(?:[\p{L}]+\s+){0,4}${CURRENT_STEP_NOUN}`,
-  /\b(?:after|following|once|beyond|until)\s+this\b(?:\s+(?:is\s+(?:done|finished|complete(?:d)?)|ends?\b))?(?=\s*(?:$|[,.;:!?，。；：！？]|\b(?:we|you|use|work|switch|move|comput\w*|calculat\w*)\b))/iu.source,
+  String.raw`\b(?:after|following|once|beyond)\s+(?:[\p{L}]+\s+){0,4}${CURRENT_STEP_NOUN}`,
+  /\b(?:after|following|once|beyond)\s+this\b(?:\s+(?:is\s+(?:done|finished|complete(?:d)?)|ends?\b))?(?=\s*(?:$|[,.;:!?，。；：！？]|\b(?:we|you|use|work|switch|move|comput\w*|calculat\w*)\b))/iu.source,
   String.raw`(?:在|于)?(?:${CHINESE_CURRENT_STEP_NOUN}|此|这)(?:之后|以后|完成后)|从下一步(?:开始|起)`,
 ].join("|"), "iu");
 const BEFORE_RELATIVE_TRANSITION = /^(?:[\s.,，;；。]|(?:and|but)\b|并且|而后|且|但是?)*$/iu;
@@ -1163,18 +1196,25 @@ const TENS_ORDINALS = ENGLISH_TENS.map(word => word.slice(0, -1) + "ieth");
 const HAN_ORDINAL = /[一二三四五六七八九十百零两]+/u.source;
 const STEP_REFERENCE = new RegExp([
   String.raw`(?<deferred>${DEFERRED_DOMAIN_TRANSITION.source})`,
+  String.raw`(?<until>${TEMPORARY_STEP_END.source})`,
+  String.raw`\b(?<inclusive>(?:every|each|all|both)\s+${PROOF_STEP_NOUN})`,
   String.raw`(?<current>${CURRENT_STEP_NOUN}|(?:在|对|针对|就)?${CHINESE_CURRENT_STEP_NOUN})`,
   /\bsteps?\s+(?<index>\d+)\b/u.source,
-  String.raw`\b(?<numeric>\d+)\s*(?:st|nd|rd|th)\s+${PROOF_STEP_NOUN}`,
+  String.raw`\b(?:(?:the|this|that)\s+)?(?<numeric>\d+)\s*(?:st|nd|rd|th)\s+${PROOF_STEP_NOUN}`,
   String.raw`\b(?:(?:the|this)\s+)?(?<word>(?:${ENGLISH_TENS.join("|")})[- ](?:${ENGLISH_ORDINALS.slice(0, 9).join("|")})|${[...TENS_ORDINALS,
     ...ENGLISH_ORDINALS].join("|")})\s+${PROOF_STEP_NOUN}`,
   String.raw`\b(?:the|this)\s+(?<unmapped>[a-z]+th)\s+${PROOF_STEP_NOUN}`,
-  String.raw`\b(?<relative>next|following|subsequent|later|remaining|final|last|penultimate|prior|previous|earlier|preceding|other|another)\s+${PROOF_STEP_NOUN}`,
+  String.raw`\b(?:(?:the|this|that)\s+)?(?<relative>next|following|subsequent|later|remaining|final|last|penultimate|prior|previous|earlier|preceding|other|another)\s+${PROOF_STEP_NOUN}`,
   String.raw`(?:(?<fromEnd>倒数)\s*)?第\s*(?:(?<digits>\d+)|(?<han>${HAN_ORDINAL}))\s*(?:步骤?|行|部分|式|阶段)`,
   /(?<final>最后(?:一)?(?:步骤?|行|部分|式|阶段))|(?<previous>前一[步行]|上一[步行])|(?<other>其他步骤|其余步骤)|下一(?:步|行|部分)|后续步骤|接下来的步骤|后面的步骤|下式|后面/u.source,
 ].join("|"), "giu");
 const FUTURE_STEP = /^(?:next|following|subsequent|later|remaining)$/u;
 const LATER_DOMAIN_TRANSITION = /\b(?:now|then|next|after\s+which|whereupon|from\s+which\s+point|following\s+which|at\s+which\s+point|thereafter|subsequently|afterwards?|later|hereafter|from\s+now\s+on|for\s+the\s+rest)\b|随后|然后|接下来|此后|之后|接着|继而|下面/iu;
+const SEQUENTIAL_DOMAIN_TRANSITION = /\b(?:then|thereafter|hereafter|subsequently|afterwards?|from\s+now\s+on|for\s+the\s+rest)\b|随后|然后|接下来|此后|接着|继而/iu;
+const PERMANENT_DOMAIN = /\bpermanently\b|永久/iu;
+const DOMAIN_SEQUENCE_BREAK = new RegExp(
+  String.raw`[,，]\s*(?:and\s+)?(?=${SEQUENTIAL_DOMAIN_TRANSITION.source})|\s+(?:and\s+)?(?=\bthen\b)`, "giu",
+);
 const PREAMBLE_DOMAIN_SWITCH = /\b(?:switch\w*|shift\w*)\b|切换|改用|改在/iu;
 const DOMAIN_SWITCH_ACTION = /\b(?:switch\w*|shift\w*|chang\w*|mov\w*|pass\w*)\s+(?:to|into|over\s+to)\b|切换|改用|改为|改在|转到|转用|换到|换用|換到|換用/iu;
 const DOMAIN_TRANSITION_ACTION = /\b(?:work\w*|comput\w*|calculat\w*|operat\w*|reason\w*)\s+(?:in|over|within)\b/iu;
@@ -1182,14 +1222,16 @@ const DOMAIN_JUSTIFICATION = /\b(?:because|since|as|for|given\s+that|inasmuch\s+
 const POST_CLAIM_DOMAIN_BREAK = /[,，;；]|\b(?:and|but|yet|whereas|while)\b|并且|而后|且|但(?:是)?/giu;
 const STEP_SCOPE_QUALIFIER = /^\s*(?:(?:starting|beginning|commencing)\s+)?(?:in|for|at|on|from|after|following|once|beyond|until|during|within|throughout|only|solely|exclusively|just|merely)\b|^\s*(?:从|在|自|对|仅|只)/iu;
 const TEMPORARY_DOMAIN = /\btemporarily\b|暂时/iu;
-const SINGLE_STEP_PREFIX = /\b(?:only|solely|exclusively|just|merely)(?:\s+(?:for|in|at|on|during|within|throughout))?\s*$|(?:仅|只|单独)(?:在|对|针对|就)?\s*$/iu;
+const SINGLE_STEP_PREFIX = /\b(?:only|solely|exclusively|just|merely)(?:\s+(?:for|in|at|on|during|within|throughout))?(?:\s+(?:the|this|that|a|an|our|your))?\s*$|(?:仅|只|单独)(?:在|对|针对|就)?\s*$/iu;
 const SINGLE_STEP_SUFFIX = /^\s*(?:only|alone|solely|exclusively)\b|^\s*(?:仅限|为限|单独)/iu;
 const SINGLE_STEP_REFERENCE = /\bthis\s+single\b|仅此一步|只此一步/iu;
 const RUBRIC_WORDING = /\b(?:rubrics?|feedback|comments?|templates?|sample\s+wording)\b|评分(?:细则|标准)|评语|反馈/iu;
 const EXAMPLE_INTRO = /\bfor\s+example\b|\be\.\s*g\.|例如|举例(?:说明|而言)/iu;
+const EXAMPLE_ASIDE_START = /[,，(（]\s*(?:\b(?:using|taking|choosing|giving|considering|treating|for\s+example)\b|以)/giu;
+const CHINESE_EXAMPLE_ASIDE = /为例|作为(?:例子|示例|示范|样例)/u;
 
 function isTemporaryProofDomain(text: string): boolean {
-  if (TEMPORARY_DOMAIN.test(text)) return true;
+  if (TEMPORARY_DOMAIN.test(text) || TEMPORARY_STEP_END.test(text)) return true;
   for (const reference of text.matchAll(STEP_REFERENCE)) {
     if (SINGLE_STEP_REFERENCE.test(reference[0]) ||
       SINGLE_STEP_PREFIX.test(text.slice(0, reference.index)) ||
@@ -1206,8 +1248,12 @@ function mentionsProofDomain(clause: string): boolean {
   return DOMAIN_MENTIONS.some(({ pattern }) => !!clause.matchAll(pattern).next().value);
 }
 
+function isComma(separator: string | undefined): boolean {
+  return separator === "," || separator === "，";
+}
+
 function joinsTrailingStepQualifier(clause: string, boundary: string, tail: string): boolean {
-  return (boundary === "," || boundary === "，") && STEP_SCOPE_QUALIFIER.test(tail) &&
+  return isComma(boundary) && (STEP_SCOPE_QUALIFIER.test(tail) || TEMPORARY_STEP_END.test(tail)) &&
     hasStepScope(tail) && !mentionsProofDomain(tail) && mentionsProofDomain(clause);
 }
 
@@ -1228,8 +1274,8 @@ function postClaimDomainEnd(text: string): number {
     if (joinsTrailingStepQualifier(clause, boundary[0], tail)) continue;
     if (startsLaterDomain(clause, qualified)) return start;
     if (boundary[0] === ";" || boundary[0] === "；") return boundary.index;
-    qualified = (boundary[0] === "," || boundary[0] === "，") && hasStepScope(clause) &&
-      !mentionsProofDomain(clause);
+    qualified = isComma(boundary[0]) && hasStepScope(clause) &&
+      !mentionsProofDomain(clause) && !(TEMPORARY_STEP_END.test(clause) && SEQUENTIAL_DOMAIN_TRANSITION.test(tail));
     start = boundary.index;
     clauseStart = start + boundary[0].length;
   }
@@ -1597,9 +1643,9 @@ function locateTranscribedSteps(steps: readonly ProofStep[], transcription: Tran
 }
 
 function referencedStep(match: RegExpMatchArray, steps: readonly ProofStep[], current: number, nextStep: number): number {
-  const { index, numeric, word, unmapped, relative, digits, han, other, fromEnd, final, previous } = match.groups!;
+  const { index, numeric, word, unmapped, relative, digits, han, other, fromEnd, final, previous, inclusive } = match.groups!;
   if (match.groups!.deferred) return nextStep;
-  if (match.groups!.current) return current;
+  if (match.groups!.current || match.groups!.until || inclusive) return current;
   if (index || (!fromEnd && digits && match[0].includes("步"))) return Number(index ?? digits);
   if (other || unmapped) return -Infinity;
   if (final) return steps.at(-1)?.stepIndex ?? -Infinity;
@@ -1642,46 +1688,110 @@ function referencedStep(match: RegExpMatchArray, steps: readonly ProofStep[], cu
   return nextStep;
 }
 
-const AFTER_POSITIONED_STEP = /\b(?:after|following|beyond)\s+(?:this\s+)?$/iu;
-const INDEFINITE_STEP_REFERENCE = /^(?:another|other|remaining|subsequent|later)$/iu;
-const DISTRIBUTIVE_STEP_PREFIX = /\b(?:every|each|all|some|any|no|both|several|many)\s*$/iu;
+const AFTER_POSITIONED_STEP = /\b(?:after|following|beyond)\s+(?:(?:the|this|that)\s+)?$/iu;
+const CHINESE_AFTER_POSITIONED_STEP = /^(?:之后|以后|完成后)/u;
+const EXCLUSIVE_STEP_REFERENCE = /^(?:another|other|remaining|subsequent|later)$/iu;
+const PREVIOUS_STEP_REFERENCE = /^(?:prior|previous|earlier|preceding)$/iu;
+const CHINESE_EXCLUSIVE_STEP_REFERENCE = /^(?:后续步骤|接下来的步骤|后面的步骤)$/u;
+const INDEFINITE_STEP_PREFIX = /\b(?:some|any|no|several|many)\s*$/iu;
+const INCLUSIVE_STEP_PREFIX = /\b(?:every|each|all|both)\s*$/iu;
+const STEP_DEFECT_OBJECT = /\b(?:skip\w*|omit\w*|miss\w*|lack\w*(?:\s+of)?|without|no)\s+(?:(?:the|this|that|a|an|any|some|necessary|required|intermediate)\s+)*$|(?:跳过|遗漏|缺少|缺乏)(?:了)?\s*$/iu;
+const STEP_REFERENCE_NOUN = /\bsteps?$/iu;
 
 function* resolveProofStepReferences(
   text: string, steps: readonly ProofStep[], current: number, nextStep: number,
 ) {
   for (const reference of text.matchAll(STEP_REFERENCE)) {
     const start = reference.index;
-    const end = start + reference[0].length;
+    let end = start + reference[0].length;
     let stepIndex = referencedStep(reference, steps, current, nextStep);
-    const { index, numeric, word, digits, han, fromEnd, final, relative, other } = reference.groups!;
+    const { index, numeric, word, digits, han, final, relative, previous } = reference.groups!;
     const prefix = text.slice(0, start);
-    if ((index || numeric || word || digits || han || fromEnd || final) &&
-      AFTER_POSITIONED_STEP.test(prefix)) {
+    const after = (digits || han || final || previous || /^下一/u.test(reference[0])) &&
+      CHINESE_AFTER_POSITIONED_STEP.exec(text.slice(end));
+    if (after) end += after[0].length;
+    if (stepIndex !== -Infinity && (after || ((index || numeric || word || relative) && AFTER_POSITIONED_STEP.test(prefix)))) {
       stepIndex = steps.find(step => step.stepIndex > stepIndex)?.stepIndex ?? Infinity;
     }
-    const indefinite = !!other || !!(relative && (INDEFINITE_STEP_REFERENCE.test(relative) || DISTRIBUTIVE_STEP_PREFIX.test(prefix)));
-    yield { start, end, stepIndex, indefinite };
+    yield {
+      start, end, stepIndex, relative, inclusive: reference.groups!.inclusive,
+      other: reference.groups!.other, text: reference[0],
+    };
   }
 }
 
 export function* proofStepReferences(text: string, ordered: readonly ProofStep[], current: number) {
   const next = ordered.find(step => step.stepIndex > current)?.stepIndex ?? Infinity;
   for (const reference of resolveProofStepReferences(text, ordered, current, next)) {
-    if (!reference.indefinite) yield reference;
+    const prefix = text.slice(0, reference.start);
+    if (STEP_DEFECT_OBJECT.test(prefix) || (reference.relative && INDEFINITE_STEP_PREFIX.test(prefix))) continue;
+    const relative = reference.relative;
+    const indefinite = relative && EXCLUSIVE_STEP_REFERENCE.test(relative);
+    if (reference.other || CHINESE_EXCLUSIVE_STEP_REFERENCE.test(reference.text) ||
+        (relative && STEP_REFERENCE_NOUN.test(reference.text) &&
+          (indefinite || PREVIOUS_STEP_REFERENCE.test(relative)))) {
+      yield { ...reference, stepIndex: -Infinity };
+    } else if (reference.inclusive || (relative && INCLUSIVE_STEP_PREFIX.test(prefix))) {
+      yield { ...reference, stepIndex: current };
+    } else if (!indefinite) {
+      yield reference;
+    }
+  }
+}
+
+function* scopedDomainAssertions(text: string, inheritedTemporary = false) {
+  let followsTemporaryScope = false;
+  for (const assertion of assertiveProseSentences(maskProofQuotations(text)).flatMap(independentProseClauses)) {
+    let start = 0;
+    for (const boundary of assertion.matchAll(DOMAIN_SEQUENCE_BREAK)) {
+      const prefix = assertion.slice(start, boundary.index);
+      if (!isTemporaryProofDomain(prefix) && !(inheritedTemporary && !hasStepScope(prefix))) continue;
+      yield { text: prefix, deferred: followsTemporaryScope && SEQUENTIAL_DOMAIN_TRANSITION.test(prefix) };
+      inheritedTemporary = false;
+      followsTemporaryScope = true;
+      start = boundary.index + boundary[0].length;
+    }
+    const tail = assertion.slice(start);
+    const deferred = followsTemporaryScope &&
+      (SEQUENTIAL_DOMAIN_TRANSITION.test(tail) || PERMANENT_DOMAIN.test(tail));
+    yield { text: tail, deferred };
+    if (tail.trim()) followsTemporaryScope = isTemporaryProofDomain(tail) || (inheritedTemporary && !hasStepScope(tail));
+    inheritedTemporary = false;
   }
 }
 
 function collectDomainContext(
-  text: string, local: string[], anchored: Map<number, string[]>,
-  steps: readonly ProofStep[], current: number, nextStep: number,
+  text: string, local: ScopedDomainText[], anchored: Map<number, ScopedDomainText[]>,
+  steps: readonly ProofStep[], current: number, nextStep: number, initialScope?: DomainScope,
 ): void {
-  const assertions = assertiveProseSentences(maskProofQuotations(text)).flatMap(independentProseClauses);
-  for (const assertion of assertions) {
-    if (ILLUSTRATIVE_PROOF_ROLE.test(assertion)) continue;
-    const example = RUBRIC_WORDING.test(assertion) ? EXAMPLE_INTRO.exec(assertion) : null;
-    const sentence = example ? assertion.slice(0, example.index) : assertion;
+  function targetFor(stepIndex: number): ScopedDomainText[] | undefined {
+    if (stepIndex === current) return local;
+    if (stepIndex < current || !Number.isFinite(stepIndex)) return undefined;
+    const target = anchored.get(stepIndex) ?? [];
+    anchored.set(stepIndex, target);
+    return target;
+  }
+  let temporaryStep = current;
+  for (const { text: assertion, deferred } of scopedDomainAssertions(text, initialScope?.temporary)) {
+    const scope = initialScope;
+    initialScope = undefined;
+    let sentence = assertion;
+    for (const aside of sentence.matchAll(EXAMPLE_ASIDE_START)) {
+      const tail = sentence.slice(aside.index + 1);
+      if ((!ILLUSTRATIVE_PROOF_ROLE.test(tail) && !EXAMPLE_INTRO.test(tail) && !CHINESE_EXAMPLE_ASIDE.test(tail)) ||
+          mentionsProofDomain(tail)) continue;
+      sentence = sentence.slice(0, aside.index);
+      break;
+    }
+    if (ILLUSTRATIVE_PROOF_ROLE.test(sentence)) continue;
+    const example = RUBRIC_WORDING.test(sentence) ? EXAMPLE_INTRO.exec(sentence) : null;
+    sentence = example ? sentence.slice(0, example.index) : sentence;
     let start = 0;
-    let target: string[] | undefined = local;
+    let temporary = scope?.temporary;
+    let stepIndex = deferred
+      ? steps.find(step => step.stepIndex > temporaryStep)?.stepIndex ?? Infinity
+      : scope?.stepIndex ?? current;
+    let target = targetFor(stepIndex);
     const boundaries = [...sentence.matchAll(POST_CLAIM_DOMAIN_BREAK)];
     let boundaryIndex = 0;
     let previousReferenceEnd = 0;
@@ -1697,32 +1807,30 @@ function collectDomainContext(
           clauseStart = end;
         }
       }
-      target?.push(sentence.slice(start, clauseStart));
-      const stepNumber = reference.stepIndex;
-      if (stepNumber === current) target = local;
-      else if (stepNumber < current || !Number.isFinite(stepNumber)) target = undefined;
-      else {
-        target = anchored.get(stepNumber) ?? [];
-        anchored.set(stepNumber, target);
-      }
+      target?.push({ text: sentence.slice(start, clauseStart), temporary });
+      stepIndex = reference.stepIndex;
+      target = targetFor(stepIndex);
+      temporary = undefined;
       previousReferenceEnd = reference.end;
       start = clauseStart;
     }
-    target?.push(sentence.slice(start));
+    target?.push({ text: sentence.slice(start), temporary });
+    if (temporary || isTemporaryProofDomain(sentence)) temporaryStep = stepIndex;
   }
 }
 
 export function proofStepUsesRealScalar(
-  steps: readonly ProofStep[], transcription: string | undefined, proposalContext: readonly (string | undefined)[],
+  steps: readonly ProofStep[], transcription: string | undefined,
+  proposalContext: readonly (string | CriterionDomainText | undefined)[],
 ): ReadonlyMap<ProofStep, boolean> {
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
-  const transcribed = prepareTranscription(maskProofQuotations(transcription ?? ""));
+  const transcribed = prepareTranscription(maskProofQuotations(transcription ?? "", true));
   const locations = locateTranscribedSteps(ordered, transcribed);
-  const global: string[] = [];
-  const anchored = new Map<number, string[]>();
+  const global: ScopedDomainText[] = [];
+  const anchored = new Map<number, ScopedDomainText[]>();
   const firstStep = ordered[0]?.stepIndex ?? Infinity;
   const secondStep = ordered[1]?.stepIndex ?? Infinity;
-  const remainder: string[] = [];
+  const remainder: ScopedDomainText[] = [];
   if (!locations.size) {
     const { context, preambleEnd, firstProseClaim } = transcribed;
     const end = firstProseClaim
@@ -1731,8 +1839,21 @@ export function proofStepUsesRealScalar(
     collectDomainContext(context.slice(0, end), global, anchored, ordered, firstStep, secondStep);
     collectDomainContext(context.slice(end), remainder, anchored, ordered, firstStep, secondStep);
   }
-  for (const text of proposalContext) {
-    if (text) collectDomainContext(text, global, anchored, ordered, firstStep, secondStep);
+  for (const context of proposalContext) {
+    if (!context) continue;
+    if (typeof context === "string") {
+      collectDomainContext(context, global, anchored, ordered, firstStep, secondStep);
+      continue;
+    }
+    const { label, feedback } = context;
+    collectDomainContext(label, global, anchored, ordered, firstStep, secondStep);
+    let scope: DomainScope | undefined;
+    for (const assertion of assertiveProseSentences(maskProofQuotations(label))) {
+      for (const reference of resolveProofStepReferences(assertion, ordered, firstStep, secondStep)) {
+        scope = { stepIndex: reference.stepIndex, temporary: isTemporaryProofDomain(assertion) };
+      }
+    }
+    collectDomainContext(feedback, global, anchored, ordered, firstStep, secondStep, scope);
   }
   const domain: ProofDomain = { persistent: "real", effective: "real" };
   advanceProofDomain(domain, global);
@@ -1772,7 +1893,7 @@ export function proofStepUsesRealScalar(
       if (relative && BEFORE_RELATIVE_TRANSITION.test(candidate.slice(0, relative.index))) end = boundary;
     }
     if (end > cursor) {
-      const immediate: string[] = [];
+      const immediate: ScopedDomainText[] = [];
       const relativeStep = cursor > 0 ? step.stepIndex : followingStep;
       const tailStart = location?.end ?? end;
       collectDomainContext(transcribed.context.slice(cursor, tailStart), immediate, anchored, ordered, step.stepIndex, relativeStep);
@@ -1786,7 +1907,7 @@ export function proofStepUsesRealScalar(
       scopedDomain = advanceProofDomain(domain, deferred, stepNumber === step.stepIndex) || scopedDomain;
       anchored.delete(stepNumber);
     }
-    const local: string[] = [];
+    const local: ScopedDomainText[] = [];
     for (const text of [step.claim, step.feedback, step.repairPrompt]) {
       if (text) collectDomainContext(text, local, anchored, ordered, step.stepIndex, followingStep);
     }
@@ -1796,11 +1917,12 @@ export function proofStepUsesRealScalar(
   return result;
 }
 
-const EXPLICIT_CLAUSE_SUBJECT = /(?:the|this|that|these|those|a|an|we|you|it|they|he|she|there|my|your|his|her|its|our|their|whose|such|which|what|every|each|all|both|some|any|no|neither|either|another|other|one|first|second|third|next|later|earlier|previous|subsequent|final|last|remaining|following|overall|entire|whole|steps?|lines?|parts?|equations?|equalit(?:y|ies)|identit(?:y|ies)|claims?|proofs?|arguments?|derivations?|inferences?|reasoning|calculations?|expansions?|here|now)\b/u.source;
+const CARDINAL_SUBJECT = String.raw`(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|${ENGLISH_TENS.join("|")}|hundred|thousand|million|billion|\d+)`;
+const EXPLICIT_CLAUSE_SUBJECT = String.raw`(?:${CARDINAL_SUBJECT}|the|this|that|these|those|a|an|we|you|it|they|he|she|there|my|your|his|her|its|our|their|whose|such|which|what|every|each|all|both|some|any|no|neither|either|another|other|first|second|third|next|later|earlier|previous|subsequent|final|last|remaining|following|overall|entire|whole|steps?|lines?|parts?|equations?|equalit(?:y|ies)|identit(?:y|ies)|claims?|proofs?|arguments?|derivations?|inferences?|reasoning|calculations?|expansions?|here|now)\b`;
 const PLURAL_PROOF_SUBJECT = /(?:steps|lines|parts|equations|equalities|identities|claims|proofs|arguments|derivations|inferences|calculations|expansions|sides)\b/u.source;
 const POSITIONAL_SUBJECT_MODIFIER = /(?:other|first|second|third|next|later|earlier|previous|subsequent|final|last|remaining|following)/u.source;
-const COMPLEMENT_SUBJECT = String.raw`(?:(?:the|this|that|these|those|a|an|we|you|it|they|he|she|there|my|your|his|her|its|our|their|every|each|all|no|any|some|both|neither|either|another|many|several|few|most|one|two|three|\d+|step\s+\d+)\b|(?:${POSITIONAL_SUBJECT_MODIFIER}\s+)?${PLURAL_PROOF_SUBJECT})`;
 const COMPLEMENT_VERB = /(?:is|are|was|were|has|have|had|do|does|did|can|could|will|would|should|may|might|must|lacks?|misses?|skips?|omits?|assumes?|restates?|divides?|begs?|fails?|follows?|gives?|yields?|needs?|requires?)\b/u.source;
+const COMPLEMENT_SUBJECT = String.raw`(?:(?:${CARDINAL_SUBJECT}|the|this|that|these|those|a|an|we|you|it|they|he|she|there|my|your|his|her|its|our|their|every|each|all|no|any|some|both|neither|either|another|many|several|few|most|step\s+\d+)\b|(?:(?!${COMPLEMENT_VERB})[\p{L}\p{N}'’-]+\s+){0,4}${PLURAL_PROOF_SUBJECT})`;
 const DEMONSTRATIVE_NOUN = String.raw`(?:${POSITIONAL_SUBJECT_MODIFIER}\s+)?(?:step|line|part|equation|equality|identity|claim|proof|argument|derivation|inference|reasoning|calculation|expansion|side)\b`;
 const COORDINATED_COMPLEMENT = String.raw`(?:whether\b|if\b|to\s+\w|that\s+(?:${COMPLEMENT_SUBJECT}|(?!${DEMONSTRATIVE_NOUN})[\p{L}]+\s+${COMPLEMENT_VERB}))`;
 const INDEPENDENT_PROSE_CLAUSE = new RegExp([

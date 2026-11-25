@@ -32,7 +32,7 @@ const RESTRICTED_EQUALITY = [
 ];
 const RESTRICTED_CHINESE_CLAUSE = /[。！？；\r\n]/u;
 const CHINESE_MISSING_JUSTIFICATION = /(?:缺少|缺乏|跳过|遗漏|(?:没有|未)(?:给出|提供)?)(?:了|的)?(?:必要|中间|关键)?(?:证明|推导|理由|依据|步骤)/u.source;
-const MISSING_JUSTIFICATION = /(?:(?:miss(?:ing|es)?|lack(?:s|ing)?(?:\s+of)?|without|no|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|reasoning|proof|derivation|steps?))/u.source;
+const MISSING_JUSTIFICATION = /(?:(?:miss(?:ing|es)?|lack(?:s|ing)?(?:\s+of)?|without|no|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|reasoning|proof|derivation|(?:(?:another|other|next|remaining|previous|subsequent|later)\s+)?steps?))/u.source;
 const DISALLOWED_THEOREM = /(?:disallowed|forbidden|unauthori[sz]ed|not\s+allowed\s+to\s+use)\s+(?:the\s+)?(?:theorem|method|rule)/u.source;
 const CHINESE_INFERENCE_DEFECT = String.raw`(?:循环论证|未证先用|直接假设|重述结论|${CHINESE_MISSING_JUSTIFICATION}|未经证明|跳步|除以(?:零|0)|(?:禁止|不能|不得)(?:使用|采用)(?:该|此)?(?:定理|方法))`;
 const CIRCULAR_INFERENCE = /(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\s+(?:(?:was|is)\s+to\s+be\s+proved|you\s+(?:had|were\s+asked|need(?:ed)?)\s+to\s+prove))|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result))/u.source;
@@ -155,7 +155,7 @@ export function proofFeedbackAllowsOutcome(
   const required = proof.steps.filter(step => step.required);
   const stepUsesRealScalar = proofStepUsesRealScalar(proof.steps, context?.transcription, [
     context?.feedback,
-    ...context?.criteria?.flatMap(criterion => [criterion.label, criterion.feedback]) ?? [],
+    ...context?.criteria ?? [],
   ]);
   if (outcome === "correct") {
     if (proof.coverage !== "complete" || !required.length || required.some(step => step.verdict !== "correct")) return false;

@@ -463,6 +463,153 @@ function expectOutcome(
     ] });
 }
 
+describe("symbolic proof feedback Round 19", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each(["Step 2", "Step 2.", "Step 2:", "Step 2. Algebra", "The second step", "第二步"])(
+    "keeps the domain feedback under criterion label %s", label => {
+      const criteria: AiGradingProposal["criteria"] = [{ label, verdict: "correct", feedback: "Work over F₂." }];
+      expectOutcome("correct", sequence("1+1=2", "1+1=0"), "correct", { criteria });
+      expectOutcome("correct", sequence("1+1=0", "1+1=2"), "unverified", { criteria });
+    },
+  );
+
+  it("uses a temporary criterion scope until feedback specifies another step", () => {
+    const steps = sequence("1+1=2", "1+1=0", "2+2=4");
+    const label = "Step 2 only:";
+    const criteria = (feedback: string): AiGradingProposal["criteria"] => [{ label, verdict: "correct", feedback }];
+    expectOutcome("correct", steps, "correct", {
+      criteria: criteria("Work over F₂."),
+    });
+    expectOutcome("correct", sequence("1+1=2", "1+1=0", "1+1=0"), "unverified", {
+      criteria: criteria("Work over F₂."),
+    });
+    expectOutcome("correct", steps, "unverified", {
+      criteria: criteria("In Step 3, work over F₂."),
+    });
+    expectOutcome("correct", steps, "correct", {
+      criteria: criteria("Work over F₂, then switch permanently to ℝ."),
+    });
+  });
+
+  it("keeps a criterion's asserted feedback when its label describes a rubric example", () => {
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      feedback: "Work over F₂.",
+      criteria: [{ label: "Work over F₂ as an example", verdict: "correct", feedback: "Work over ℝ." }],
+    });
+  });
+
+  it.each([
+    "Only in the next step, use F₂.", "Solely for the final step, use F₂.",
+    "Only at the 2nd step, use F₂.", "Just in the second step, use F₂.",
+    "仅在下一步，使用 F₂。", "只在最后一步，使用 F₂。",
+  ])("binds a temporary domain after a determiner in %s", feedback => {
+    const final = /final|最后/u.test(feedback);
+    const steps = final ? sequence("1+1=2", "2+2=4", "1+1=0") : sequence("1+1=2", "1+1=0", "2+2=4");
+    steps.steps[0]!.feedback = feedback;
+    const transcription = "Work over ℝ. " + steps.steps.map(step => step.claim).join(". ") + ".";
+    const expected = final ? [true, true, false] : [true, false, true];
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual(expected);
+    expectOutcome("correct", steps, "correct", { transcription });
+  });
+
+  it.each([
+    "For this step only, use F₂, then switch permanently to ℝ.",
+    "Only in this step use F₂; afterwards work over ℝ.",
+    "For this step only, use F₂, and thereafter work over ℝ.",
+    "Use F₂ for this step only; work over ℝ from now on.",
+    "仅在本步使用 F₂，随后永久改用 ℝ。",
+  ])("makes persistence a property of each domain clause in %s", transition => {
+    const steps = sequence("1+1=0", "1+1=0", "1+1=0");
+    steps.steps[0]!.feedback = transition;
+    const transcription = "Work over F₂. 1+1=0. 1+1=0. 1+1=0.";
+    expectOutcome("correct", steps, "unverified", { transcription });
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual([false, true, true]);
+    const transcribed = "Work over F₂. " + transition + " 1+1=0. 1+1=0. 1+1=0.";
+    const transcribedSteps = sequence("1+1=0", "1+1=0", "1+1=0");
+    expectOutcome("correct", transcribedSteps, "unverified", { transcription: transcribed });
+    expect([...proofStepUsesRealScalar(transcribedSteps.steps, transcribed, []).values()]).toEqual([false, true, true]);
+  });
+
+  it.each([
+    ["After the final step, use F₂.", true], ["Following the last step, use F₂.", true],
+    ["After the next step, use F₂.", true], ["最后一步之后使用 F₂。", true],
+    ["第二步之后使用 F₂。", true], ["After the penultimate step, use F₂.", false],
+    ["After the first step, use F₂.", false], ["第一步完成后使用 F₂。", false],
+  ] as const)("resolves %s relative to the referenced position", (feedback, finalIsReal) => {
+    const steps = sequence("1+1=2", "1+1=0");
+    expectOutcome("correct", steps, finalIsReal ? "unverified" : "correct", { feedback });
+    expect([...proofStepUsesRealScalar(steps.steps, undefined, [feedback]).values()]).toEqual([true, finalIsReal]);
+  });
+
+  it.each([
+    "Until this is done, stay in ℝ.", "Until this step is finished, work over ℝ.",
+    "Stay in ℝ until this step ends.", "Until the end of this step, use ℝ.",
+    "在本步结束前，使用 ℝ。", "保持在 ℝ 中，直到本步完成。",
+  ])("applies %s locally and restores the prior domain", feedback => {
+    const steps = sequence("1+1=0", "1+1=0");
+    steps.steps[0]!.feedback = feedback;
+    const transcription = "Work over F₂. 1+1=0. 1+1=0.";
+    expectOutcome("correct", steps, "unverified", { transcription });
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual([true, false]);
+  });
+
+  it.each([
+    "Now work over ℝ, using addition as an example.",
+    "Now work over ℝ (taking addition as an example).",
+    "Now work over ℝ, for example by adding.",
+    "现在在 ℝ 中计算（以加法为例）。", "现在在 ℝ 中计算，以加法作为例子。",
+  ])("retains the domain before the illustrative aside in %s", feedback => {
+    const steps = sequence("1+1=0", "Continue.");
+    steps.steps[0]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified", { transcription: "Work over F₂. 1+1=0." });
+  });
+
+  it.each(["`", "``", "```"])("masks rubric prose quoted with %s while locating transcribed equations", mark => {
+    const feedback = "The rubric gives " + mark + "work over F₂" + mark + " as feedback.";
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      transcription: "Work over ℝ. 1+1=0.", feedback,
+    });
+    const transcription = "Work over ℝ. " + mark + "1+1=0" + mark + ". Work over F₂. 1+1=0.";
+    const steps = sequence("1+1=0", "1+1=0");
+    expectOutcome("correct", steps, "unverified", { transcription });
+    expect([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual([true, false]);
+  });
+
+  it.each([
+    "The other step", "Other steps", "Another step", "The remaining steps", "Subsequent steps", "Later steps",
+    "Previous steps", "Prior steps", "Earlier steps", "Preceding steps", "其他步骤", "其余步骤", "后续步骤", "后面的步骤",
+  ])("does not apply critique of %s to the current step", label => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", {
+      feedback: label + " skips a necessary step.",
+    });
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", {
+      criteria: [{ label, verdict: "incorrect", feedback: "Skips a necessary step." }],
+    });
+  });
+
+  it.each([
+    "Step 1 skips another step.", "Step 1 omits the other step.", "Step 1 is missing the next step.",
+    "Step 1 omits an intermediate step.", "Step 1 skips a necessary step.", "The proof lacks a step.",
+    "Each step skips a necessary step.", "Every step skips a necessary step.",
+    "All steps lack justification.", "Both steps lack justification.",
+  ])("retains a current-step inference critique in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback });
+  });
+
+  it.each([
+    "four derivations", "nineteen steps", "twenty-one steps", "two intermediate derivations",
+    "several earlier claims", "all three equations", "fourteen thousand lines", "critical intermediate derivations",
+    "first two steps", "unjustified algebraic calculations",
+  ])("keeps %s inside a coordinated denial", subject => {
+    const feedback = "It is false that the proof lacks justification, and that " + subject + " skip a necessary step.";
+    expectOutcome("incorrect", incorrectEquality(identity, feedback), "unverified", {
+      feedback: "The equality is incorrect.",
+    });
+    expect(independentProseClauses(feedback)).toEqual([feedback]);
+  });
+});
+
 describe("symbolic proof feedback Round 18", () => {
   const real = { transcription: "Work over ℝ. 1+1=0." };
   const identity = "(x+1)^2=x^2+2x+1";
