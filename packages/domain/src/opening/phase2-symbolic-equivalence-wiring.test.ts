@@ -1016,6 +1016,202 @@ describe("symbolic proof feedback Round 14", () => {
   });
 });
 
+describe("symbolic proof feedback Round 15", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    ...["if", "only if", "unless", "in case", "whenever", "provided", "assuming", "supposing", "on condition that"].flatMap(
+      word => [`The assumption is false ${word} the last equality holds.`, `${word} the last equality holds, the assumption is false.`],
+    ),
+    ...["如果", "若", "倘若", "要是", "一旦", "除非", "只有", "只要", "前提是", "当且仅当"].flatMap(
+      word => [`原假设不成立${word}末式成立。`, `${word}末式成立，原假设不成立。`],
+    ),
+    ...["unproved", "unproven", "unverified", "open", "pending", "doubtful"].map(word => `The assumption is false remains ${word}.`),
+    ...["claim", "assertion", "statement", "conclusion", "idea"].map(word => `The ${word} that the assumption is false remains unproved.`),
+    ...["unjustified", "unsupported", "unestablished", "questionable", "uncertain", "disputed", "premature", "false", "wrong", "incorrect", "invalid", "mistaken"].map(
+      word => `The claim that the assumption is false is ${word}.`,
+    ),
+    "The assertion that we reject the assumption has not been shown.",
+    "Consider the assertion that the assumption is false.",
+    "The claim that the assumption is false, even in its weakest form, remains unproved.",
+    "原假设不成立的说法有待证明。", "原假设不成立这一断言存疑。", "原假设不成立这一观点站不住脚。",
+    "原假设不成立这一结论错误。", "原假设不成立该判断未经证实。",
+  ])("1. leaves the supposition open when the rejection is conditional or pending in %s", rejection => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", rejection), "unverified");
+  });
+
+  it.each([
+    "Since x=0 gives 1=0, the assumption is false.",
+    "When we substitute x=0, we obtain 1=0, so the assumption is false.",
+    "This refutes the hypothesis, so the assumption is false.",
+    "We conclude that the assumption is false.",
+    "当我们代入 x=0，得到 1=0，因此原假设不成立。",
+  ])("1. preserves an independently asserted deduction in %s", rejection => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", rejection), "correct");
+  });
+
+  it.each([
+    ...["after which", "whereupon", "from which point", "following which", "at which point"].map(word => `, ${word} we switch to F₂.`),
+    ...["subsequently", "thereafter", "afterward", "later", "from now on", "hereafter", "in the next step", "for the rest"].map(word => ` and we will ${word} switch to F₂.`),
+    ...["随后", "然后", "接下来", "此后", "之后", "接着", "继而", "下面"].map(word => `，我们${word}在 F₂ 中计算。`),
+    ", we shall change to F₂.", ", she will move to F₂.", "；现在改为 F₂。",
+  ])("2. keeps a later field switch from applying retroactively in %s", transition => {
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      transcription: "Work over ℝ. 1+1=0" + transition,
+    });
+  });
+
+  it.each([" in F₂.", " over GF(2).", " (mod 2).", ", where char(F)=2.", "，其中特征为 2。"])(
+    "2. retains an attached field qualifier in %s", qualifier => {
+      expectOutcome("correct", sequence("1+1=0"), "correct", {
+        transcription: "Work over ℝ. 1+1=0" + qualifier,
+      });
+    });
+
+  it.each([
+    "The word of the day is contradiction.",
+    ...["term", "terminology", "vocabulary", "topic", "subject", "theme", "title", "name", "label", "concept", "notion", "definition", "meaning", "section", "chapter", "lesson", "example", "exercise", "question", "sense", "spelling"].map(
+      noun => `The ${noun} of this lesson is a contradiction.`,
+    ),
+    "The lesson gives a contradiction.", "For today, the word of the day is a contradiction.",
+    "The following technical term is a contradiction.",
+    'This is a "contradiction".', "'contradiction'.", '"contradiction".',
+    "“矛盾”。", "「矛盾」。", "本节介绍与逻辑矛盾有关的术语。", "这与逻辑矛盾相关。", "我们讨论导出矛盾的概念。",
+  ])("3. leaves a lexical contradiction mention non-assertive in %s", mention => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", mention), "unverified");
+  });
+
+  it.each(["contradiction", "矛盾"])("3. bounds whitespace passed to the %s assertion matcher", word => {
+    const originalTest = RegExp.prototype.test;
+    const whitespace = " ".repeat(4096);
+    let unnormalized = 0;
+    RegExp.prototype.test = function (this: RegExp, value: string) {
+      if (this.source.includes("归谬") && typeof value === "string" && value.includes(whitespace)) unnormalized++;
+      return Reflect.apply(originalTest, this, [value]) as boolean;
+    };
+    try {
+      expectOutcome("correct", sequence("Assume x=0.", "1=0", `The text,${whitespace}${word}${whitespace}is pending.`), "unverified");
+    } finally {
+      RegExp.prototype.test = originalTest;
+    }
+    expect(unnormalized).toBe(0);
+  });
+
+  it.each(["1+1=0!", "1+1=0! + 1", "1+1=0! = 1", "1+1=0!!", "1+1=0 x", "1+1=0 \\alpha", "1+1=0 (x+1)", "1+1=0 2"])(
+    "4. finds the later real claim instead of a prefix of %s", embedded => {
+      expectOutcome("correct", sequence("1+1=0"), "unverified", {
+        transcription: `Work over F₂. ${embedded}. Now work over ℝ. 1+1=0.`,
+      });
+    });
+
+  it.each([["x=0", "y x=0"], ["x=0", "(x+1) x=0"], ["x=0", "n! x=0"], ["x=0", "\\alpha x=0"],
+    ["1+1=0", "x 1+1=0"], ["(x+1)=0", "2 (x+1)=0"]])("4. does not find %s inside %s", (claim, embedded) => {
+    const steps = sequence(claim).steps;
+    const transcription = `Work over F₂. ${embedded}. Now work over ℝ. ${claim}.`;
+    expect(proofStepUsesRealScalar(steps, transcription, []).get(steps[0]!)).toBe(true);
+  });
+
+  it("4. keeps a bare factorial attached to an operand at the end of a line", () => {
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      transcription: "Work over F₂. 1+1=0!\nNow work over ℝ. 1+1=0.",
+    });
+  });
+
+  it.each([
+    ...["false", "wrong", "incorrect", "invalid", "mistaken", "untrue", "baseless", "groundless", "meritless", "erroneous", "bogus", "spurious", "misplaced", "inaccurate", "unproven", "unsubstantiated", "unsupported", "rejected", "refuted", "disproved"].map(
+      word => `The claim of missing justification is ${word}.`,
+    ),
+    "The charge of missing justification fails.", "The criticism of missing justification collapses.",
+    "The allegation of skipping a step is not justified.", "A false claim of missing justification.",
+    "An unfounded accusation of circular reasoning.", "A baseless criticism of using a forbidden method.",
+    "The claim of missing justification, however, is false.",
+    ...["错误的", "有误", "不正确", "不实", "失实", "虚假", "站不住脚", "无稽之谈", "毫无根据", "不成立"].map(
+      word => `关于缺少理由的断言完全是${word}。`,
+    ),
+    "关于缺少理由的说法是错误的。", "错误地指责论证跳步。", "错误地认为论证缺少理由。",
+    "错误地认为在第二遍讨论过后重新呈现的完整论证缺少理由。",
+  ])("5. treats the denied critique as unverified in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+
+  it("5. preserves an affirmed critique when the negative predicate itself is negated", () => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", {
+      feedback: "The claim of missing justification is not false.",
+    });
+  });
+
+  it.each([
+    ", but every subsequent line skips a necessary step.", ", yet each line skips a necessary step.",
+    ", whereas all steps lack justification.", ", while some steps lack justification.",
+    ", though another line skips a necessary step.", ", although the derivation lacks justification.",
+    ", however, both arguments lack justification.", " but step two skips a necessary step.",
+    " yet reasoning lacks justification.", " whereas here you skip a necessary step.",
+  ])("6. preserves an independent critique after an indirect question in %s", critique => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback: "Check whether the expansion is valid" + critique });
+  });
+
+  it.each([4, 8, 16])("7. retains at most one span per step for %s overlapping prose and math candidates", count => {
+    const proseClaims = Array.from({ length: count }, (_, index) => "word ".repeat(index + 1).trim());
+    const mathClaims = Array.from({ length: count }, (_, index) => "x+".repeat(index + 1) + "1=0");
+    const steps = sequence(...proseClaims, ...mathClaims).steps;
+    const transcription = ("word ".repeat(count * 2) + ". ").repeat(count) +
+      mathClaims.map(claim => `Work over F₂. $${claim}$. `).join("").repeat(count);
+    const originalPush = Array.prototype.push;
+    const originalSet = Map.prototype.set;
+    const originalCodePointAt = String.prototype.codePointAt;
+    let spans = 0;
+    let boundaryReads = 0;
+    function countSpan(value: unknown) {
+      if (value && typeof value === "object" && "start" in value && "end" in value) spans++;
+    }
+    Array.prototype.push = function (this: unknown[], ...values: unknown[]) {
+      for (const value of values) countSpan(value);
+      return Reflect.apply(originalPush, this, values) as number;
+    };
+    Map.prototype.set = function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
+      countSpan(value);
+      return Reflect.apply(originalSet, this, [key, value]) as Map<unknown, unknown>;
+    };
+    String.prototype.codePointAt = function (this: string, index: number) {
+      if (this === transcription) boundaryReads++;
+      return Reflect.apply(originalCodePointAt, this, [index]) as number | undefined;
+    };
+    let usesReal: ReadonlyMap<(typeof steps)[number], boolean>;
+    try {
+      usesReal = proofStepUsesRealScalar(steps, transcription, []);
+    } finally {
+      Array.prototype.push = originalPush;
+      Map.prototype.set = originalSet;
+      String.prototype.codePointAt = originalCodePointAt;
+    }
+    expect(steps.map(step => usesReal.get(step))).toEqual([...proseClaims.map(() => true), ...mathClaims.map(() => false)]);
+    expect(spans).toBe(steps.length);
+    const inputSize = transcription.length + steps.reduce((length, step) => length + step.claim.length, 0);
+    expect(boundaryReads).toBeGreaterThan(0);
+    expect(boundaryReads).toBeLessThanOrEqual(8 * inputSize);
+  });
+
+  it("7. skips overlapping suffixes whose ends always land inside a word", () => {
+    const claims = Array.from({ length: 16 }, (_, index) => "a".repeat(2 * index + 1));
+    const steps = sequence(...claims).steps;
+    const transcription = "aa ".repeat(3950);
+    const originalCodePointAt = String.prototype.codePointAt;
+    let boundaryReads = 0;
+    String.prototype.codePointAt = function (this: string, index: number) {
+      if (this === transcription) boundaryReads++;
+      return Reflect.apply(originalCodePointAt, this, [index]) as number | undefined;
+    };
+    let usesReal: ReadonlyMap<(typeof steps)[number], boolean>;
+    try {
+      usesReal = proofStepUsesRealScalar(steps, transcription, []);
+    } finally {
+      String.prototype.codePointAt = originalCodePointAt;
+    }
+    expect(steps.every(step => usesReal.get(step))).toBe(true);
+    expect(boundaryReads).toBeLessThanOrEqual(8 * (transcription.length + claims.join("").length));
+  });
+});
+
 describe("symbolic proof feedback", () => {
   it.each([
     "$1+1=0$.", "$$1+1=0$$.", "1+1=0。", "1+1=0.", "x+1=x+2;", "Step 1: $1=0$；：",

@@ -45,12 +45,16 @@ const VARIABLE_DIVISION = /\bdivid(?:e[sd]?|ing)\s+by\s+\$?(?:x|a\s+variable)\b/
 const DIVISION_DEFECT = /\b(?:without|before)\s+(?:first\s+)?(?:prov|show|establish|justify|check|verify|ensur)\w*\b|\bfails?\s+(?:when|if|for|at|outside)\b/iu;
 const NONASSERTED_INFERENCE = /\b(?:whether|(?:wonder|ask|check|verify|test|see|question|consider|determine|examine|inspect)\w*\s+(?:if|whether|for)|what\s+if|if|unless|in\s+case)\b|是否|能否|有无|有没有|如果|若|倘若|除非/iu;
 const INFERENCE_DEFECT_REFERENCE = String.raw`(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|${MISSING_JUSTIFICATION}|${DISALLOWED_THEOREM}|(?:divid(?:e[sd]?|ing)|division)\s+by\s+\$?(?:0|zero|x|a\s+variable))`;
-const INFERENCE_DEFECT_DENIAL = /(?:absent|none|nonexistent|lacking|missing|avoided|eliminated|ruled\s+out|unfounded|not\s+(?:present|found|used|detected|seen|observed|an?\s+(?:issue|concern|problem|defect)|occurring)|(?:(?:does|do|did)\s+not|never|didn['’]t|doesn['’]t)\s+(?:occur|appear|apply|exist|arise|happen)\w*)/u.source;
+const DEFECT_REFUTATION = /(?:false|wrong|incorrect|invalid|mistaken|untrue|baseless|groundless|unfounded|meritless|erroneous|bogus|spurious|misplaced|inaccurate|unproven|unsubstantiated|unsupported|rejected|refuted|disproved)/u.source;
+const INFERENCE_DEFECT_DENIAL = String.raw`(?:${DEFECT_REFUTATION}|fails?|collapses?|absent|none|nonexistent|lacking|missing|avoided|eliminated|ruled\s+out|not\s+(?:true|valid|correct|accurate|justified|supported|substantiated|present|found|used|detected|seen|observed|an?\s+(?:issue|concern|problem|defect)|occurring)|(?:(?:does|do|did)\s+not|never|didn['’]t|doesn['’]t)\s+(?:occur|appear|apply|exist|arise|happen)\w*)`;
+const CHINESE_DEFECT_DENIAL = /(?:错误的?|有误的?|不正确的?|不实的?|失实的?|虚假的?|站不住脚的?|无稽之谈|毫无根据的?|不成立的?)/u.source;
 const NEGATED_INFERENCE_CRITIQUE = [
-  new RegExp(String.raw`\b${INFERENCE_DEFECT_REFERENCE}\b\$?(?:[^\S\r\n]+(?!(?:and|or|but|yet|whereas|while)\b)[\w'’-]+){0,6}[^\S\r\n]+${INFERENCE_DEFECT_DENIAL}\b`, "giu"),
-  new RegExp(String.raw`(?:${CHINESE_INFERENCE_DEFECT}|除以(?:零|0))(?:的?(?:问题|情况|现象|说法|指责|指控|结论))?\s*(?:并|从来|从|其实|实际上)?(?:不存在|没有(?=\s*(?:$|[，。！？；：,.!?;:)）】]|出现|发生|存在))|未(?:出现|发生|见)|已避免|不成立)`, "gu"),
+  new RegExp(String.raw`\b${INFERENCE_DEFECT_REFERENCE}\b\$?(?:[\s,()"“”]+(?!(?:and|or|but|yet|whereas|while|not|never|neither|nor)\b)[\w'’-]+){0,6}[\s,()"“”]+${INFERENCE_DEFECT_DENIAL}\b`, "giu"),
+  new RegExp(String.raw`\b${DEFECT_REFUTATION}\s+(?:claims?|accusations?|allegations?|charges?|criticisms?)\s+(?:of|about|that)\s+(?:(?!\b(?:and|or|but|yet)\b)[\w'’-]+\s+){0,6}${INFERENCE_DEFECT_REFERENCE}\b`, "giu"),
+  new RegExp(String.raw`(?:${CHINESE_INFERENCE_DEFECT}|除以(?:零|0))(?:的?(?:问题|情况|现象|说法|指责|指控|结论|批评|质疑|判断|观点|断言))?\s*(?:并|从来|从|其实|实际上)?(?:不存在|没有(?=\s*(?:$|[，。！？；：,.!?;:)）】]|出现|发生|存在))|未(?:出现|发生|见)|已避免|(?:是|为|纯属|实属|完全是|显然是)?${CHINESE_DEFECT_DENIAL})`, "gu"),
   /\b(?:no|not|never|neither|nor|without|free\s+of|avoid\w*|[a-z]+n['’]t)\b(?:\s+[\w'’-]+){0,4}\s+(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\b)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|(?:miss(?:ing|es)?|lack(?:s|ing)?|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|proof|derivation|reasoning|steps?)|(?:disallowed|forbidden|unauthori[sz]ed)\s+(?:the\s+)?(?:theorem|method|rule)|(?:divid(?:e[sd]?|ing)|division)\s+by)\b/giu,
   new RegExp(String.raw`(?:无|没有|并未|并非|不存在|未见|避免(?:了)?|不曾)[^，。！？；：,.!?;:]{0,12}(?:${CHINESE_INFERENCE_DEFECT}|除以)`, "gu"),
+  new RegExp(String.raw`错误地(?:指责|认为|声称)[^，。！？；：,.!?;:]*?(?:${CHINESE_INFERENCE_DEFECT}|除以)`, "gu"),
 ];
 
 function positiveInferenceClauses(text: string): string[] {
