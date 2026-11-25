@@ -16,6 +16,16 @@ const radical = String.raw`计算 $\sqrt{8} - \sqrt{2}$`;
 const sqrtTwo = String.raw`\sqrt{2}`;
 
 describe("symbolic teaching choice", () => {
+  it.each(["A. 3", "A. 2 = 3", "A. 2x = 3x", "（A）：3"])(
+    "rejects a contradictory arithmetic key suffix %s", key => {
+      expect(check("Calculate 1+1", choice("2", "3"), key, "A. 2")).toBeNull();
+    },
+  );
+
+  it.each(["A", "A. 2", "A. 1+1 = 2", "(A)：2"])("checks an arithmetic key %s", key => {
+    expect(check("Calculate 1+1", choice("2", "3"), key, "A. 2")).toBe("correct");
+  });
+
   it.each([
     [algebra, quadratic, "x^2+1"],
     ["展开 $(x+1)(x-1)$", "x^2-1", "x^2+1"],
@@ -187,6 +197,38 @@ describe("symbolic teaching numeric", () => {
 });
 
 describe("symbolic Markdown boundaries", () => {
+  it.each([
+    [String.raw`1{0}+1`, "1"], ["{1+2}", "3"], ["{2}x+1", "2x+1"],
+    [String.raw`2\frac{1}{2}`, "1"], [String.raw`2 \dfrac{1}{2}`, "1"], [String.raw`2\,\tfrac{1}{2}`, "1"],
+    [String.raw`2\,000+1`, "2001"], [String.raw`4\,0.5+1`, "41.5"],
+    ["2^2^3", "256"], ["2^{2}^3", "256"], ["2^2^{3}", "256"], ["2^−2", "1/4"], ["2^(2+1)", "8"],
+    [String.raw`\left(2+1)`, "3"], [String.raw`(2+1\right)`, "3"], [String.raw`\left(2+1\right]`, "3"],
+    [String.raw`\textstyle 2+1`, "3"],
+  ])("abstains when TeX %s can be misread as %s", (expression, misleading) => {
+    const interaction = choice(misleading, "0");
+    expect(check(`Evaluate $${expression}$`, interaction, "A", "A. " + misleading)).toBeNull();
+    expect(verifyStandaloneProofEquationClaim(`$${expression} = ${misleading}$`).status).toBe("unverified");
+  });
+
+  it.each([" ", "\\ ", "\\,", "\\;", "\\:", "\\!", "\\quad ", "\\qquad ", "~"])(
+    "rejects spacing %j between digits or decimal points", space => {
+      expect(check("Evaluate $sqrt(4)$", numeric, "2", `$4${space}0.5$`)).toBe("unparseable");
+    },
+  );
+
+  it.each(["2^-2", "2^−2", "2^+2"])("rejects an ungrouped signed exponent without a math fence %s", expression => {
+    expect(check("Evaluate $sqrt(4)$", numeric, "2", expression)).toBe("unparseable");
+  });
+
+  it.each([
+    [String.raw`\left(2+\left[3\right]\right)`, "5"], [String.raw`\left\|2-3\right\|+1`, "2"],
+    [String.raw`\frac{\sqrt{4}}{2^{2}}`, "1/2"], [String.raw`\dfrac{\sqrt{4}}{3}`, "2/3"],
+    [String.raw`\tfrac{\sqrt{4}}{3}`, "2/3"], ["2^{-2}", "1/4"], ["2^(-2)", "1/4"],
+    ["(2^2)^3", "64"],
+  ])("keeps supported grouping in %s", (expression, result) => {
+    expect(check(`Evaluate $${expression}$`, numeric, result, result)).toBe("correct");
+  });
+
   it("recognizes display math as one span", () => {
     expect(check("Simplify $$x*x$$", choice("$$x*x$$", "x+1"), "A", "A. $$x*x$$")).toBe("correct");
     expect(check("Simplify x\\*x", choice("x\\*x", "x+1"), "A", "A. x\\*x")).toBe("correct");
@@ -227,11 +269,31 @@ function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedba
 
 describe("symbolic proof feedback", () => {
   it.each([
-    "(x+1)^2 = x^2 + 1", "Step 1: $$(x+1)^2 = x^2 + 2x + 1 = x^2 + 1$$",
+    "x + 1 = x + 2", "(x+1)^2 = x^2 + 2x + 2", "Step 1: $$(x+1)^2 = x^2 + 2x + 1 = x^2 + 2x + 2$$",
+    "1/x + 1 = 1/x + 2", "x^2 = x + 1 = x + 2", String.raw`x + \sqrt{2} = x`,
+    String.raw`\sin(x)^2 + \cos(x)^2 = 2`, "1/2 + 1/3 = 2/5", String.raw`\sqrt{4} = 3`,
     String.raw`Step 1: $\frac{d}{dx}(x^3) = x^2$`, String.raw`1. \int 2x\,dx = x^3 + C`,
   ])("vetoes a positive verdict on a refuted required claim %s", claim => {
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "inequivalent", unconditional: false });
     expect(proofFeedbackAllowsOutcome("correct", proof(claim, "correct"))).toBe(false);
     expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+  });
+
+  it("preserves a correct proof with an equation under an earlier assumption", () => {
+    const feedback = proof("Assume x = 2.", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "$x + 1 = 3$" });
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
+  it.each([
+    "x + 1 = 3", "(x+1)^2 = x^2 + 1", "x/x = 1", "sqrt(x)^2 = x",
+    String.raw`e^{\ln(x)} = x`, String.raw`\frac{d}{dx}(\ln(x)) = 1/x`,
+    String.raw`\frac{d}{dx}(x^2) = 2\sqrt{x^2}`, String.raw`\int 2x\,dx = x\sqrt{x^2} + C`,
+    String.raw`\frac{d}{dx}(x^2) = 2\sqrt{(x-1)^2} + 2`,
+    String.raw`\int 2x\,dx = (1+\sqrt{x})^0 + C`,
+  ])("abstains when the proof context could affect the claim %s", claim => {
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "unverified", unconditional: false });
+    expect(adjudicate("correct", proof(claim, "correct"))).toBe("correct");
   });
 
   it.each([
@@ -289,7 +351,7 @@ describe("symbolic proof feedback", () => {
 
   it("only uses required steps and abstains from proving beyond engine limits", () => {
     const feedback = proof("(x+1)^2 = x^2 + 2x + 1", "correct");
-    feedback.steps.push({ ...proof("(x+1)^2 = x^2 + 1", "correct", false).steps[0]!, stepIndex: 2 });
+    feedback.steps.push({ ...proof("x + 1 = x + 2", "correct", false).steps[0]!, stepIndex: 2 });
     expect(adjudicate("correct", feedback)).toBe("correct");
     const claim = "(x+1)^1000 = (x+1)^1000";
     expect(verifyStandaloneProofEquationClaim(claim).status).toBe("unverified");
@@ -299,6 +361,31 @@ describe("symbolic proof feedback", () => {
 });
 
 describe("structured symbolic steps", () => {
+  it("abstains when the integration variable is C", () => {
+    const integral = String.raw`\int 2C\,dC`;
+    expect(check(`Evaluate $${integral}$`, choice("C^2", "C^3"), "A", "A. C^2")).toBeNull();
+    expect(verifyStandaloneProofEquationClaim(`${integral} = C^2`)).toEqual({ status: "unverified", unconditional: false });
+    expect(verifySymbolicStepEquivalence({ kind: "indefinite-integral", reference: "2C", student: "C^2", variable: "C" }))
+      .toBe("unverified");
+  });
+
+  it.each([String.raw`(1+\sqrt{-x^2})^0`, "sqrt(-x^2)", "(1+sqrt(-x^2-1))^0"])(
+    "abstains on derivatives without an open source domain %s", source => {
+      expect(check(`Differentiate $${source}$ at $x=0$`, numeric, "0", "0")).toBeNull();
+      expect(verifySymbolicStepEquivalence({ kind: "derivative", reference: source, student: "0" })).toBe("unverified");
+    },
+  );
+
+  it("verifies a derivative at a strictly interior point with an irrational source value", () => {
+    expect(check("Differentiate $(1+sqrt(x))^0$ at $x=2$", numeric, "0", "0")).toBe("correct");
+    expect(check("Differentiate $(1+sqrt(x))^0$ at $x=0$", numeric, "0", "0")).toBeNull();
+  });
+
+  it("finds rational interior witnesses away from the origin", () => {
+    const reference = "(1+sqrt(x-100))^0";
+    expect(verifySymbolicStepEquivalence({ kind: "derivative", reference, student: `0*${reference}` })).toBe("equivalent");
+  });
+
   it("uses the declared variable and distinguishes invalid from inequivalent steps", () => {
     const derivative = { kind: "derivative" as const, reference: "t^3", variable: "t" };
     expect(verifySymbolicStepEquivalence({ ...derivative, student: "3t^2" })).toBe("equivalent");

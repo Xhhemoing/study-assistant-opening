@@ -1,6 +1,6 @@
 import type { TeachingQuestionInteraction } from "@aistudy/contracts";
 import { checkArithmeticAnswer, equalArithmeticValues, evaluateArithmeticQuestion, parseArithmeticLiteral } from "./arithmetic-check";
-import { evaluateSymbolicTeachingAnswer, matchSavedChoiceSubmission, savedChoiceKeyIds } from "./symbolic-answer-bridge";
+import { evaluateSymbolicTeachingAnswer, matchSavedChoiceSubmission, savedChoiceKeyIds, savedChoiceKeySuffix } from "./symbolic-answer-bridge";
 
 /** The client renders the stem and option labels as Markdown; only content whose meaning survives rendering can be graded. */
 function keepsMeaningWhenRendered(question: string, interaction: TeachingQuestionInteraction | undefined): boolean {
@@ -33,9 +33,13 @@ export function evaluateTeachingAnswer(question: string, interaction: TeachingQu
     const value = parseArithmeticLiteral(option.label);
     return value && equalArithmeticValues(expected, value);
   });
-  if (matches.length !== 1) return null;
+  const [match] = matches;
+  if (!match || matches.length !== 1) return null;
   const prefixIds = savedChoiceKeyIds(interaction.options, key);
   if (prefixIds.size > 1) return null;
-  if (prefixIds.size === 1 ? !prefixIds.has(matches[0]!.id) : checkArithmeticAnswer(question, key) !== "correct") return null;
-  return matchSavedChoiceSubmission(interaction.options, answer, matches[0]!.id);
+  if (prefixIds.size === 1) {
+    const suffix = savedChoiceKeySuffix(key, match.id);
+    if (suffix === null || (suffix && checkArithmeticAnswer(question, suffix) !== "correct")) return null;
+  } else if (checkArithmeticAnswer(question, key) !== "correct") return null;
+  return matchSavedChoiceSubmission(interaction.options, answer, match.id);
 }

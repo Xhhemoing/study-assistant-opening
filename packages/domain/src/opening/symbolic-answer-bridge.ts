@@ -25,9 +25,12 @@ const MAX_EQUALITY_TERMS = 12;
 // Keep individual powers within the engine's polynomial degree bound.
 const MAX_POWER = 64;
 const ZERO: ScalarExpr = { kind: "const", value: 0 };
+const UNIT: ScalarExpr = { kind: "const", value: 1 };
 const ORIGIN = { n: 0n, d: 1n };
 const ONE = { n: 1n, d: 1n };
 const SCALAR_FUNCTIONS = new Set(["sqrt", "abs", "ln", "sin", "cos", "exp"]);
+const TEX_SCALAR_COMMANDS = new Set(["\\sin", "\\cos", "\\ln", "\\exp", "\\cdot", "\\times", "\\div"]);
+const TEX_CLOSERS = new Map([["(", ")"], ["[", "]"], ["|", "|"], ["\\|", "\\|"]]);
 const KEY_PREFIX = /^(?:答案|答|answer)\s*[:：]\s*/i;
 
 type ChoiceOptions = Extract<TeachingQuestionInteraction, { kind: "choice" }>["options"];
@@ -38,6 +41,8 @@ type ParsedExpression = {
   variables: Set<string>;
   hasDenominator: boolean;
   mayRestrictDomain: boolean;
+  radicands: ScalarExpr[];
+  absoluteValues: ScalarExpr[];
 };
 type Target = {
   kind: SymbolicKind;
@@ -108,6 +113,8 @@ function domainZero(expr: ScalarExpr, variable: string): boolean {
 function inspectExpression(expr: ScalarExpr): ParsedExpression | null {
   const variables = new Set<string>();
   const denominators: ScalarExpr[] = [];
+  const radicands: ScalarExpr[] = [];
+  const absoluteValues: ScalarExpr[] = [];
   const pending = [expr];
   let mayRestrictDomain = false;
   while (pending.length) {
@@ -134,8 +141,16 @@ function inspectExpression(expr: ScalarExpr): ParsedExpression | null {
         pending.push(node.base);
         break;
       case "sqrt":
+        radicands.push(node.value);
+        mayRestrictDomain = true;
+        pending.push(node.value);
+        break;
       case "ln":
         mayRestrictDomain = true;
+        pending.push(node.value);
+        break;
+      case "abs":
+        absoluteValues.push(node.value);
         pending.push(node.value);
         break;
       default:
@@ -143,7 +158,8 @@ function inspectExpression(expr: ScalarExpr): ParsedExpression | null {
     }
   }
   if (denominators.some(denominator => domainZero(denominator, variables.values().next().value ?? "x"))) return null;
-  return { expr, variables, hasDenominator: denominators.length > 0, mayRestrictDomain: mayRestrictDomain || denominators.length > 0 };
+  return { expr, variables, hasDenominator: denominators.length > 0,
+    mayRestrictDomain: mayRestrictDomain || denominators.length > 0, radicands, absoluteValues };
 }
 
 function isSingleDerivativeOperand(normalized: string): boolean {
@@ -157,50 +173,135 @@ function isSingleDerivativeOperand(normalized: string): boolean {
   return false;
 }
 
-function afterBracedArgument(text: string, start: number): number | null {
-  while (start < text.length && /\s/.test(text[start]!)) start++;
+function bracedArgument(text: string, offset: number): { start: number; end: number } | null {
+  const start = offset + /^\s*/.exec(text.slice(offset))![0].length;
   if (text[start] !== "{") return null;
   let depth = 1;
   for (let index = start + 1; index < text.length; index++) {
     if (text[index] === "\\") index++;
     else if (text[index] === "{") depth++;
-    else if (text[index] === "}" && --depth === 0) return index + 1;
+    else if (text[index] === "}" && --depth === 0) return { start, end: index + 1 };
   }
   return null;
 }
 
-function hasAmbiguousTexArguments(body: string, texMode: boolean): boolean {
-  if ((texMode || /\\[A-Za-z]/.test(body)) &&
-      /[\^_]\s*(?:[A-Za-z0-9]{2,}|[+\-(]|\d\.\d)/.test(body)) return true;
-  for (const macro of body.matchAll(/\\(sqrt|dfrac|tfrac|frac)(?![A-Za-z])/g)) {
-    const firstEnd = afterBracedArgument(body, macro.index + macro[0].length);
-    if (firstEnd === null || (macro[1] !== "sqrt" && afterBracedArgument(body, firstEnd) === null)) return true;
+function validateTexExpression(body: string, texMode: boolean): string | null {
+  if (/[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)+[\d.]|\d\.\d*\.|\.\d+\./.test(body) ||
+      /[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\\[dt]?frac(?![A-Za-z])/.test(body)) return null;
+  const argumentGroups = new Set<number>();
+  const closers: string[] = [];
+  const tokens = /\\(?:[A-Za-z]+|[^\r\n])|[{}^]/g;
+  for (let match = tokens.exec(body); match; match = tokens.exec(body)) {
+    const token = match[0];
+    const after = tokens.lastIndex;
+    if (token === "{") {
+      if (!argumentGroups.has(match.index)) return null;
+      closers.push("}");
+    } else if (token === "}") {
+      if (closers.pop() !== "}") return null;
+    } else if (token === "^") {
+      const tail = body.slice(after);
+      if (/^\s*[+\-−]/.test(tail) ||
+          (texMode && /^\s*(?:\\|[A-Za-z0-9]{2,}|\d\.\d|\((?!\s*[+\-−]\s*\d+\s*\)))/.test(tail))) return null;
+      const braced = bracedArgument(body, after);
+      if (braced) argumentGroups.add(braced.start);
+      const unbraced = /^\s*(?:\(\s*[+\-−]?\s*\d+\s*\)|[+\-−]?\s*[A-Za-z0-9]+)/.exec(tail)?.[0];
+      const end = braced?.end ?? after + (unbraced?.length ?? 0);
+      if (/^(?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\^/.test(body.slice(end))) return null;
+    } else if (token === "\\sqrt" || /^\\[dt]?frac$/.test(token)) {
+      const first = bracedArgument(body, after);
+      if (!first) return null;
+      argumentGroups.add(first.start);
+      if (token !== "\\sqrt") {
+        const second = bracedArgument(body, first.end);
+        if (!second) return null;
+        argumentGroups.add(second.start);
+      }
+    } else if (token === "\\left" || token === "\\right") {
+      const delimiter = /^\s*(\\\||[()[\]|])/.exec(body.slice(after));
+      if (!delimiter) return null;
+      tokens.lastIndex += delimiter[0].length;
+      if (token === "\\left") {
+        const close = TEX_CLOSERS.get(delimiter[1]!);
+        if (!close) return null;
+        closers.push(close);
+      } else if (closers.pop() !== delimiter[1]) {
+        return null;
+      }
+    } else if (!TEX_SCALAR_COMMANDS.has(token) && !/^\\(?:[,;:! ]|quad|qquad)$/.test(token)) {
+      return null;
+    }
   }
-  return false;
+  if (closers.length) return null;
+  return body.replace(/\\[dt]frac(?![A-Za-z])/g, "\\frac")
+    .replace(/(\\left\s*)\[/g, "$1(").replace(/(\\right\s*)\]/g, "$1)");
 }
 
 function parseExpression(text: string, derivativeOperand = false, texOperand = false): ParsedExpression | null {
   if (text.length > MAX_EXPRESSION_LENGTH) return null;
   const body = unwrapMath(text);
   const wrapped = text.trim().startsWith("$");
-  if (!body || /[\d.]\s+[\d.]|\d\.\d*\.|\.\d+\./.test(body) ||
-      hasAmbiguousTexArguments(body, wrapped || texOperand)) return null;
-  // The engine allows adjacent identifiers as implicit products. Reject words before normalization.
-  const words = body.match(/\\[A-Za-z]+|[A-Za-z][A-Za-z0-9_]*/g) ?? [];
-  if (words.some(word => !word.startsWith("\\") && word.length > 1 && !SCALAR_FUNCTIONS.has(word))) return null;
+  if (!body) return null;
   const source = wrapped || texOperand ? body : body.replace(/\\\*/g, "*");
-  const normalized = normalizeLatexExpr(source);
+  const validated = validateTexExpression(source, wrapped || texOperand || /\\[A-Za-z]/.test(source));
+  if (!validated) return null;
+  // The engine allows adjacent identifiers as implicit products. Reject words before normalization.
+  const words = validated.match(/\\[A-Za-z]+|[A-Za-z][A-Za-z0-9_]*/g) ?? [];
+  if (words.some(word => !word.startsWith("\\") && word.length > 1 && !SCALAR_FUNCTIONS.has(word))) return null;
+  const normalized = normalizeLatexExpr(validated);
   if (!normalized || (derivativeOperand && !isSingleDerivativeOperand(normalized))) return null;
   const expr = parseScalarExpr(normalized);
   return expr && inspectExpression(expr);
 }
 
+function openDomainCarrier(expression: ParsedExpression, requireAnalytic = false): ScalarExpr {
+  let guarded = expression.expr;
+  // ln(u) has the strict domain u > 0, including for a radicand whose square root allows zero.
+  for (const value of expression.radicands) guarded = { kind: "add", left: guarded, right: { kind: "ln", value } };
+  if (requireAnalytic) {
+    for (const value of expression.absoluteValues) {
+      guarded = { kind: "add", left: guarded, right: { kind: "div", left: UNIT, right: value } };
+    }
+  }
+  return withZeroValue(guarded);
+}
+
+function hasDerivativeInterior(source: ParsedExpression, domain: Target["domain"]): boolean {
+  if (!source.mayRestrictDomain) return true;
+  const carrier = openDomainCarrier(source);
+  const point = domain.intervals?.[0]?.left;
+  if (point !== undefined) return verifyScalarEquivalence(carrier, ZERO, domain).status === "equivalent";
+
+  let remaining = 2;
+  const excluded = [...domain.excluded ?? []];
+  for (const sample of [0, 1, -1, 2, -2, "1/2", "-1/2"]) {
+    const at = { ...domain, intervals: [{ left: sample, right: sample }] };
+    if (verifyScalarEquivalence(carrier, ZERO, at).status !== "equivalent") continue;
+    if (--remaining === 0) return true;
+    excluded.push(sample);
+  }
+  // Ask the engine for points in a domain that may be narrow or far from the origin.
+  const shifted = { kind: "add", left: carrier, right: UNIT } as const;
+  for (; remaining > 0; remaining--) {
+    const search = { ...domain, excluded };
+    const result = verifyScalarEquivalence(shifted, carrier, search);
+    const witness = result.witness?.input;
+    if (result.status !== "inequivalent" || witness === undefined || !toRational(witness) ||
+        verifyScalarEquivalence(carrier, ZERO, { ...search, intervals: [{ left: witness, right: witness }] }).status !== "equivalent") {
+      return false;
+    }
+    excluded.push(witness);
+  }
+  return true;
+}
+
 function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: DomainSpec): Target | null {
   const variable = domain?.variable ?? source.variables.values().next().value ?? "x";
-  if ([...source.variables].some(name => name !== variable)) return null;
+  if ((kind === "indefinite-integral" && variable === "C") || [...source.variables].some(name => name !== variable)) return null;
   const targetDomain = { ...domain, variable };
   let expected = source.expr;
   if (kind === "derivative") {
+    if (!hasDerivativeInterior(source, targetDomain)) return null;
     const derivative = differentiate(source.expr, variable);
     if (!derivative) return null;
     // Differentiation can erase a restriction, such as ln(x) requiring x > 0.
@@ -270,19 +371,15 @@ function parseQuestion(question: string): Target | null {
 
 function compareToTarget(candidate: ParsedExpression, target: Target): VerificationResult {
   const { kind, expected, domain } = target;
-  if ((domain.intervals?.length && candidate.variables.size) ||
+  if ((domain.intervals?.some(({ left, right }) => left !== undefined && left === right) && candidate.variables.size) ||
       [...candidate.variables].some(name => name !== domain.variable && !(kind === "indefinite-integral" && name === "C"))) {
     return { status: "unverified" };
   }
   if (kind !== "indefinite-integral") return verifyScalarEquivalence(candidate.expr, expected, domain);
-  let student = candidate.expr;
-  if (domain.variable !== "C") {
-    const family = additiveConstant(student, domain.variable);
-    if (!family) return { status: "unverified" };
-    if (family.coefficient.n === 0n) return { status: "inequivalent" };
-    student = family.expr;
-  }
-  return verifyIndefiniteIntegral({ student, integrand: expected, domain });
+  const family = additiveConstant(candidate.expr, domain.variable);
+  if (!family) return { status: "unverified" };
+  if (family.coefficient.n === 0n) return { status: "inequivalent", reason: "missing_additive_constant" };
+  return verifyIndefiniteIntegral({ student: family.expr, integrand: expected, domain });
 }
 
 /** Compare structured scalar, derivative or indefinite-integral steps. The reference is the expression being operated on. */
@@ -334,6 +431,12 @@ function savedChoiceKeyTail(trimmed: string, id: string): string | null {
     if (!tail || /^[\s.．、:：,，]/u.test(tail)) return tail;
   }
   return null;
+}
+
+export function savedChoiceKeySuffix(key: string, id: string): string | null {
+  const tail = savedChoiceKeyTail(key.trim(), id);
+  // Preserve a decimal after a whitespace delimiter, as in "A .5".
+  return tail === null ? null : tail.replace(/^[.．、:：,，]|^\s+(?:[．、:：,，]|\.(?!\d))/, "").trim();
 }
 
 export function savedChoiceKeyIds(options: ChoiceOptions, key: string): Set<string> {
@@ -392,7 +495,7 @@ function additiveConstant(expr: ScalarExpr, variable: string): { expr: ScalarExp
 }
 
 function compareExpressions(student: ParsedExpression, reference: ParsedExpression, target: Target): EquivalenceStatus {
-  if (target.kind !== "indefinite-integral" || target.domain.variable === "C") {
+  if (target.kind !== "indefinite-integral") {
     return verifyScalarEquivalence(student.expr, reference.expr, target.domain).status;
   }
   const left = additiveConstant(student.expr, target.domain.variable);
@@ -427,10 +530,8 @@ function evaluateSymbolicChoice(options: ChoiceOptions, key: string, answer: str
   const prefixIds = savedChoiceKeyIds(options, key);
   if (prefixIds.size > 1) return null;
   if (prefixIds.size === 1) {
-    const tail = savedChoiceKeyTail(key.trim(), match.id);
-    if (tail === null) return null;
-    // Preserve a decimal after a whitespace delimiter, as in "A .5".
-    const remainder = tail.replace(/^[.．、:：,，]|^\s+(?:[．、:：,，]|\.(?!\d))/, "").trim();
+    const remainder = savedChoiceKeySuffix(key, match.id);
+    if (remainder === null) return null;
     if (remainder && !expressionKeyMatches(remainder, match.parsed, target)) return null;
   } else if (!expressionKeyMatches(key, match.parsed, target)) {
     return null;
@@ -564,6 +665,64 @@ export function evaluateSymbolicTeachingAnswer(
 
 type ProofClaimVerification = { status: EquivalenceStatus; unconditional: boolean };
 
+function isValueRefutation(result: VerificationResult): boolean {
+  return result.status === "inequivalent" && result.reason !== "natural_domain_mismatch";
+}
+
+function substitutePoint(expr: ScalarExpr, point: SpanRational): ScalarExpr {
+  if (expr.kind === "const") return expr;
+  if (expr.kind === "variable") return { kind: "const", value: point };
+  if ("left" in expr) return { ...expr, left: substitutePoint(expr.left, point), right: substitutePoint(expr.right, point) };
+  if (expr.kind === "pow") return { ...expr, base: substitutePoint(expr.base, point) };
+  return { ...expr, value: substitutePoint(expr.value, point) };
+}
+
+function scalarProofContradiction(left: ParsedExpression, right: ParsedExpression): boolean {
+  const variables = new Set([...left.variables, ...right.variables]);
+  if (variables.size > 1) return false;
+  const domain = { variable: variables.values().next().value ?? "x" };
+  const result = verifyScalarEquivalence(right.expr, left.expr, domain);
+  if (!isValueRefutation(result)) return false;
+  if (!variables.size) return true;
+
+  const difference = { kind: "sub", left: left.expr, right: right.expr } as const;
+  const mayRestrict = left.mayRestrictDomain || right.mayRestrictDomain;
+  if (mayRestrict && verifyScalarEquivalence(withZeroValue(left.expr), withZeroValue(right.expr), domain).status !== "equivalent") {
+    return false;
+  }
+  const point = toRational(result.witness?.input) ?? ORIGIN;
+  const value = substitutePoint(difference, point);
+  const rational = exactRationalValue(value, domain);
+  const constant: ScalarExpr = rational ? { kind: "const", value: rational } : value;
+  if (!isValueRefutation(verifyScalarEquivalence(constant, ZERO, domain))) return false;
+  if (!mayRestrict) return verifyScalarEquivalence(difference, constant, domain).status === "equivalent";
+  // Retain any holes in the common domain while proving the difference is constant.
+  const sameDomainConstant = { kind: "add", left: constant, right: withZeroValue(difference) } as const;
+  return verifyScalarEquivalence(difference, sameDomainConstant, domain).status === "equivalent";
+}
+
+function calculusProofContradiction(candidate: ParsedExpression, target: Target, result: VerificationResult): boolean {
+  if (!isValueRefutation(result)) return false;
+  if (result.reason === "missing_additive_constant") return true;
+  const { domain } = target;
+  const family = target.kind === "indefinite-integral" ? additiveConstant(candidate.expr, domain.variable) : undefined;
+  const compared = family ? { ...candidate, expr: family.expr } : candidate;
+  if ((target.source.mayRestrictDomain || candidate.mayRestrictDomain) &&
+      verifyScalarEquivalence(withZeroValue(compared.expr), withZeroValue(target.expected), domain).status !== "equivalent") {
+    return false;
+  }
+
+  return [{ left: 0, leftOpen: true }, { right: 0, rightOpen: true }].every(interval => {
+    const half = { ...domain, intervals: [interval] };
+    if (!isValueRefutation(compareToTarget(candidate, { ...target, domain: half }))) return false;
+    // A counterexample on a half-line rules out an identity on its subintervals only if
+    // the expressions are analytic throughout it. A shifted radical or absolute value can switch branches.
+    return [target.source, compared].every(expression =>
+      (!expression.mayRestrictDomain && !expression.absoluteValues.length) ||
+      verifyScalarEquivalence(openDomainCarrier(expression, true), ZERO, half).status === "equivalent");
+  });
+}
+
 /** Corroborate only standalone scalar identities and explicit calculus equations. */
 export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVerification {
   const unverified: ProofClaimVerification = { status: "unverified", unconditional: false };
@@ -585,12 +744,16 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
     const target = parseTargetExpression(first!, "scalar");
     if (!target) return unverified;
     if (target.kind === "scalar" && target.source.variables.size === 0 && variable) target.domain.variable = variable;
-    const results = candidates.map(candidate => compareToTarget(candidate, target).status);
-    if (target.kind === "indefinite-integral") {
-      for (const candidate of candidates.slice(1)) results.push(compareExpressions(candidate, candidates[0]!, target));
+    const results = candidates.map(candidate => compareToTarget(candidate, target));
+    if (results.some(result => result.status !== "equivalent")) {
+      const sides = [target.source, ...candidates];
+      const contradiction = target.kind === "scalar"
+        ? sides.some((left, index) => sides.slice(index + 1).some(right => scalarProofContradiction(left, right)))
+        : candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
+      return contradiction ? { status: "inequivalent", unconditional: false } : unverified;
     }
-    if (results.includes("inequivalent")) return { status: "inequivalent", unconditional: false };
-    if (results.includes("unverified")) return unverified;
+    if (target.kind === "indefinite-integral" &&
+        candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent")) return unverified;
     const unconditional = [target.source, ...candidates].every(expression => !expression.hasDenominator &&
       (!expression.mayRestrictDomain || verifyScalarEquivalence(
         withZeroValue(expression.expr), ZERO, target.domain,

@@ -4,7 +4,7 @@ import { verifyStandaloneProofEquationClaim } from "./symbolic-answer-bridge";
 export function proofFeedbackRequiredByQuestion(stem:string){
   return /(?:^|[，。；：:!?！？\s）).、])(?:请|试)?(?:证明|推导|求证)|\b(?:prove|show\s+that|derive)\b/iu.test(stem);
 }
-/** Step feedback stays model judgement; contradictory/partial proof claims cannot establish a positive total. */
+/** Positive proof verdicts require complete feedback and no context-independent contradiction. */
 export function proofFeedbackAllowsOutcome(outcome: AiGradingProposal["outcome"], proof: ProofFeedback | undefined) {
   if (!proof) return true;
   const required = proof.steps.filter(step => step.required);
