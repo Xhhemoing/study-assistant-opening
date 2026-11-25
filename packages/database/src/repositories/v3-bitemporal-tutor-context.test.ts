@@ -2,7 +2,7 @@ import type { Sql } from "postgres";
 import { expect, it, vi } from "vitest";
 import { createTutorMetadataHandler } from "../../../../apps/worker/src/jobs/tutor-metadata";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
-import { loadTutorHistoryContext, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
+import { loadTutorHistoryContext, readTutorHistoryAncestorAuthority, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
 import { createOpeningConversationRepository } from "./opening-conversations";
 import { createOpeningMemoryRepository } from "./opening-memory";
 import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "./opening-task-candidate-admission";
@@ -705,6 +705,164 @@ it("rechecks temporary expiry after waiting for the misconception snapshot at ev
   }
 });
 
+it("preserves multi-turn conv_misconception_hashes, jobless course scope, paired-user misconception course, and omitted exchange memory IDs", async () => {
+  const convId = "c1000000-0000-4000-8000-000000000001";
+  const u0 = "c1000000-0000-4000-8000-000000000010";
+  const a0 = "c1000000-0000-4000-8000-000000000011";
+  const u1 = "c1000000-0000-4000-8000-000000000012";
+  const a1 = "c1000000-0000-4000-8000-000000000013";
+  const u2 = "c1000000-0000-4000-8000-000000000014";
+  const a2 = "c1000000-0000-4000-8000-000000000015";
+  const memScopedA = "c1000000-0000-4000-8000-000000000020";
+  const memMiscA = "c1000000-0000-4000-8000-000000000021";
+  const courseALineage = { kind: "v3_misconception_lineage" as const, courseId, revisionIds: [candidate.revisionId] };
+
+  // 1) Step-2 P1 #0: conv_misconception_hashes attached only to u2's row must still invalidate hashless u1 when u2 is explicit.
+  {
+    const convHashes = [{ posUs: "100", posId: u0, assistantId: a0, hash: JSON.stringify(usedLineage) }];
+    const baseRow = {
+      conversation_id: convId, user_source_refs: [], assistant_source_refs: [],
+      assistant_direct_versioned: true, origin_allowed: true, current_allowed: true, current_course_id: null,
+    };
+    const { sql } = sqlSimulation(({ text, values }) => {
+      if (text.startsWith("WITH prior AS MATERIALIZED")) {
+        return [
+          // Only u2's rows carry conv_misconception_hashes; u1's prior row has conv_misconception_hashes: null.
+          { ...baseRow, current_id: u2, id: u2, assistant_id: a2, pos_us: "300", assistant_intent_hash: JSON.stringify(cleanLineage), conv_misconception_hashes: convHashes },
+          { ...baseRow, current_id: u2, id: u1, assistant_id: a1, pos_us: "200", assistant_intent_hash: null, conv_misconception_hashes: convHashes },
+          { ...baseRow, current_id: u1, id: u0, assistant_id: a0, pos_us: "150", assistant_intent_hash: null, conv_misconception_hashes: null },
+        ];
+      }
+      if (text.startsWith("WITH tick AS MATERIALIZED")) {
+        const bound = values[0] as Array<{ position: number; revision_ids: string[] }>;
+        // Withdraw usedLineage; keep cleanLineage active.
+        return bound.filter(l => l.revision_ids.length === 0);
+      }
+      return [];
+    });
+    const auth = await readTutorHistoryAncestorAuthority(sql, scope, [u1, u2]);
+    expect(auth.get(u2)).not.toBeNull();
+    expect(auth.get(u1)).toBeNull();
+  }
+
+  // 2) Step-1 P1 #1 & #3: Jobless Course-A ordinary memory blocks Course-B derivative reuse; omitted job-backed exchange preserves memoryIds.
+  {
+    let targetCourse: string | null = otherCourseId;
+    let exchangeQuestion = "Follow-up Q";
+    let priorHasJob = false;
+    const { sql } = sqlSimulation(({ text, values }) => {
+      if (text.startsWith("WITH prior AS MATERIALIZED")) {
+        const hashlessRow = {
+          conversation_id: convId, current_id: u2, id: u1, assistant_id: a1, pos_us: "200",
+          question: exchangeQuestion, answer: "Hashless derivative",
+          prior_course_id: courseId, assistant_course_id: courseId, current_course_id: targetCourse,
+          material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+          assistant_intent_hash: null, inherits_memory: !priorHasJob,
+          user_source_refs: [], assistant_source_refs: [], user_direct_ids: [], assistant_direct_ids: [],
+          memory_backing_ids: [], user_memory_backing_ids: [],
+          assistant_direct_versioned: true, origin_allowed: true, current_allowed: true,
+          conv_misconception_hashes: [],
+        };
+        if (!priorHasJob) return [hashlessRow];
+        return [
+          hashlessRow,
+          {
+            ...hashlessRow, id: u0, assistant_id: a0, pos_us: "100",
+            question: "x".repeat(12_000), answer: "Older job-backed memory answer",
+            assistant_source_refs: [{ memoryDependencyIds: [memScopedA] }],
+            inherits_memory: false,
+          },
+        ];
+      }
+      if (text.startsWith("SELECT t.id, ARRAY(")) {
+        return [{
+          id: a1, origins: [], conversation_id: convId, consumer_course_id: courseId,
+          pos_us: "200", pos_id: u1, inherits_prefix: true,
+          conv_origins: [{
+            posUs: "100", posId: a0,
+            origin: {
+              id: a0, assistantTurnId: a0, courseId, consumerCourseId: null, materialUse: "citation",
+              refs: [{ memoryDependencyIds: [memScopedA] }], standalone: false, historical: true, jobBacked: false,
+            },
+          }],
+        }];
+      }
+      if (text.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        return [{ id: memScopedA, course_id: courseId, source_turn_ids: [], expires_at: null }];
+      }
+      if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }, { id: otherCourseId }];
+      if (text.startsWith("SELECT id FROM opening_memories")) {
+        return [{ id: { memoryId: memScopedA, hashes: [], courseId, active: true, origins: [] } }];
+      }
+      if (text.startsWith("WITH tick AS MATERIALIZED")) return values[0] as unknown[];
+      return [];
+    });
+    expect((await loadTutorHistoryContext(sql, scope, u2)).history).toEqual([]);
+    targetCourse = null;
+    expect((await loadTutorHistoryContext(sql, scope, u2)).history).toEqual([]);
+    targetCourse = courseId;
+    const validCourseA = await loadTutorHistoryContext(sql, scope, u2);
+    expect(validCourseA.history).toHaveLength(2);
+    expect(validCourseA.memoryIds).toEqual([memScopedA]);
+
+    // Step-1 P1 #3: When older job-backed exchange is omitted by 12,000-character budget, retained hashless exchange keeps memScopedA.
+    priorHasJob = true;
+    exchangeQuestion = "Short follow-up";
+    const omittedJobBacked = await loadTutorHistoryContext(sql, scope, u2);
+    expect(omittedJobBacked.history.map(t => t.text)).toEqual(["Short follow-up", "Hashless derivative"]);
+    expect(omittedJobBacked.memoryIds).toEqual([memScopedA]);
+  }
+
+  // 3) Step-1 P1 #2: Paired user memory with Course-A misconception + Course-B assistant is rejected in own & ancestor checks.
+  {
+    let useMisconceptionMemory = true;
+    const { sql } = sqlSimulation(({ text, values }) => {
+      const memId = useMisconceptionMemory ? memMiscA : memScopedA;
+      if (text.startsWith("WITH prior AS MATERIALIZED")) {
+        return [{
+          conversation_id: convId, current_id: u2, id: u1, assistant_id: a1, pos_us: "100",
+          question: "Course A user Q", answer: "Course B assistant A",
+          prior_course_id: courseId, assistant_course_id: otherCourseId, current_course_id: courseId,
+          material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+          assistant_intent_hash: JSON.stringify(cleanLineage), inherits_memory: false,
+          user_source_refs: [{ memoryDependencyIds: [memId] }], assistant_source_refs: [],
+          user_direct_ids: [], assistant_direct_ids: [],
+          memory_backing_ids: [], user_memory_backing_ids: [],
+          assistant_direct_versioned: true, origin_allowed: true, current_allowed: true,
+          conv_misconception_hashes: [],
+        }];
+      }
+      if (text.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        return [{ id: memId, course_id: courseId, source_turn_ids: [], expires_at: null }];
+      }
+      if (text.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (text.startsWith("SELECT id FROM courses")) return [{ id: courseId }, { id: otherCourseId }];
+      if (text.startsWith("SELECT id FROM opening_memories")) {
+        return [{
+          id: {
+            memoryId: memId,
+            hashes: useMisconceptionMemory ? [JSON.stringify(courseALineage)] : [],
+            courseId,
+            active: true,
+            origins: [],
+          },
+        }];
+      }
+      if (text.startsWith("WITH tick AS MATERIALIZED")) return values[0] as unknown[];
+      return [];
+    });
+    expect((await loadTutorHistoryContext(sql, scope, u2)).history).toEqual([]);
+    expect((await readTutorHistoryAncestorStatus(sql, scope, u2)).valid).toBe(false);
+    expect((await readTutorHistoryAncestorStatus(sql, scope, u2, { skipPriorMisconceptions: true })).valid).toBe(false);
+
+    // Ordinary Course-A user memory (no misconception) remains valid when paired user turn was in Course A.
+    useMisconceptionMemory = false;
+    expect((await loadTutorHistoryContext(sql, scope, u2)).history).toHaveLength(2);
+    expect((await readTutorHistoryAncestorStatus(sql, scope, u2)).valid).toBe(true);
+  }
+});
+
 it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception lineage validation on PostgreSQL 16", async () => {
   // PGlite is provisioned locally for this optional real-SQL test so the workspace lockfile stays unchanged.
   const packageName = "@electric-sql/pglite";
@@ -1166,6 +1324,9 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       "Actual Loops"?: number;
       "Actual Rows"?: number;
       "Relation Name"?: string;
+      Filter?: string;
+      "Join Filter"?: string;
+      "Hash Cond"?: string;
       Plans?: ExplainPlanNode[];
     };
     const collectNodes = (node: ExplainPlanNode): ExplainPlanNode[] => [
@@ -1301,23 +1462,54 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       });
       expect(batchedMap.get(bulkTurnIds[earlyIdx + 1]!)?.some(o => o?.id === earlyTurnId && o.historical === true)).toBe(true);
 
-      // 3) Round-10 P2 #3: 32 job-backed answers with valid empty lineage hashes followed by 32 job-backed hashless answers
-      // (64 exchanges total, zero memory refs): single-pass conv_scan (Actual Loops = 1), < 20,000 plan cost, and 1 deduplicated lineage check.
+      // 3) Round-10 P2 #3 + Round-11 P2 #4/#5/#6/#7:
+      // 32 jobless memory-bearing origins + 32 job-backed hashed exchanges (each introducing a distinct active revision
+      // plus a shared revision) + 32 job-backed hashless exchanges (each carrying a distinct temporary memory deadline):
+      // single-pass conv_scan (Actual Loops = 1), < 20,000 plan cost, O(K) revision/deadline/sweep handling, and zero `= ANY`
+      // array scan on invalid_assistant_ids before and after withdrawing the shared revision across all 32 hashed answers.
       const histPerfConv = "af000000-0000-4000-8000-000000000001";
       const histPerfCurrent = "af000000-0000-4000-8000-000000000002";
+      const sharedPerfRev = "af000010-0000-4000-8000-000000000099";
+      const joblessPerfMem = "af000020-0000-4000-8000-000000000099";
+      const distinctPerfRevs = Array.from({ length: 32 }, (_, idx) =>
+        `af000010-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`);
+      const distinctPerfMems = Array.from({ length: 32 }, (_, idx) =>
+        `af000020-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`);
+      const perfBaseExpiryMs = Date.now() + 300_000;
+      const earliestPerfIso = new Date(perfBaseExpiryMs).toISOString();
       await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)",
         [histPerfConv, scope.workspaceId, scope.ownerUserId, courseId]);
+      for (const revId of [...distinctPerfRevs, sharedPerfRev]) {
+        await db.query("INSERT INTO v3_bitemporal_misconception_edges VALUES ($1,$2,$3,$4,7,'(,)','(,)','candidate')",
+          [revId, scope.workspaceId, scope.ownerUserId, courseId]);
+      }
+      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,$3,$4,'confirmed',NULL)",
+        [joblessPerfMem, scope.workspaceId, courseId, JSON.stringify([cleanOriginId])]);
+      for (let k = 0; k < 32; k++) {
+        const expIso = new Date(perfBaseExpiryMs + k * 1_000).toISOString();
+        await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,$3,$4,'temporary',$5)",
+          [distinctPerfMems[k]!, scope.workspaceId, courseId, JSON.stringify([cleanOriginId]), expIso]);
+        const joblessId = `af000004-0000-4000-8000-${String(k + 1).padStart(12, "0")}`;
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,
+            context_source_refs,context_anchor,query_system,created_at,text)
+          VALUES ($1,$2,$3,'assistant','complete',NULL,$4,$5,false,to_timestamp($6),$7)`,
+          [joblessId, scope.workspaceId, histPerfConv, JSON.stringify([{ memoryDependencyIds: [joblessPerfMem] }]),
+            JSON.stringify({ courseId }), baseEpochSec + 9_000 + k, `Jobless#${k + 1}`]);
+      }
       for (let idx = 0; idx < 64; idx++) {
         const uId = `af000001-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
         const aId = `af000002-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
         const jId = `af000003-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
-        const hash = idx < 32 ? JSON.stringify(cleanLineage) : null;
+        const hash = idx < 32
+          ? JSON.stringify({ kind: "v3_misconception_lineage", courseId, revisionIds: [distinctPerfRevs[idx]!, sharedPerfRev] })
+          : null;
+        const aRefs = idx < 32 ? "[]" : JSON.stringify([{ memoryDependencyIds: [distinctPerfMems[idx - 32]!] }]);
         await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,
             context_source_refs,context_anchor,query_system,created_at,text)
           VALUES ($1,$3,$4,'user','complete',NULL,'[]',$6,false,to_timestamp($7),$8),
-                 ($2,$3,$4,'assistant','complete',$5,'[]',$6,false,to_timestamp($7),$9)`,
+                 ($2,$3,$4,'assistant','complete',$5,$10,$6,false,to_timestamp($7),$9)`,
           [uId, aId, scope.workspaceId, histPerfConv, hash, JSON.stringify({ courseId }),
-            baseEpochSec + 10_000 + idx * 2, `Q${idx + 1}`, `A${idx + 1}`]);
+            baseEpochSec + 10_000 + idx * 2, `Q${idx + 1}`, `A${idx + 1}`, aRefs]);
         await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5)",
           [jId, scope.workspaceId, histPerfConv, uId, aId]);
       }
@@ -1332,6 +1524,8 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         const params: unknown[] = [];
         const rendered = this.render(params).trim();
         if (rendered.startsWith("WITH prior AS MATERIALIZED")) {
+          expect(rendered).not.toContain("invalid_assistant_ids");
+          expect(rendered).not.toContain("prior.assistant_id = ANY");
           const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
             "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
           historyExplainPlans.push(analyzed.rows[0]!["QUERY PLAN"][0]!.Plan);
@@ -1339,17 +1533,60 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         if (rendered.startsWith("WITH tick AS MATERIALIZED") && typeof params[0] === "string") {
           activeLineageBatchSizes.push((JSON.parse(params[0]) as unknown[]).length);
         }
+        if (rendered.startsWith("SELECT id FROM opening_memories AS m(memory_id)")) {
+          const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
+            "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
+          const batchIds = Array.isArray(params[1]) ? params[1].length : 1;
+          expect(analyzed.rows[0]!["QUERY PLAN"][0]!.Plan["Total Cost"] / Math.max(1, batchIds)).toBeLessThan(20_000);
+          return (await db.query(rendered, params)).rows;
+        }
         return origExecute.call(this);
       };
       const perfHistory = await loadTutorHistoryContext(sql, scope, histPerfCurrent);
       expect(perfHistory.history).toHaveLength(40);
-      expect(historyExplainPlans).toHaveLength(1);
-      expect(historyExplainPlans[0]!["Total Cost"]).toBeLessThan(20_000);
-      const histNodes = collectNodes(historyExplainPlans[0]!);
-      const histConvScan = histNodes.find(n => n["Subplan Name"] === "CTE conv_scan");
-      expect(histConvScan, "expected single-pass CTE conv_scan in readSavedExchanges").toBeDefined();
-      expect(histConvScan!["Actual Loops"]).toBe(1);
-      expect(activeLineageBatchSizes).toEqual([1]);
+      expect(perfHistory.historyMisconceptionLineage).toEqual({
+        kind: "v3_misconception_lineage",
+        courseId,
+        revisionIds: [distinctPerfRevs[0]!, sharedPerfRev, ...distinctPerfRevs.slice(1)],
+      });
+      expect(perfHistory.memoryIds).toEqual([joblessPerfMem, ...distinctPerfMems].sort());
+      expect(perfHistory.temporaryMemoryExpiresAt).toBe(earliestPerfIso);
+      const perfAncestorStatus = await readTutorHistoryAncestorStatus(sql, scope, histPerfCurrent);
+      expect(perfAncestorStatus).toMatchObject({
+        valid: true,
+        hasAncestors: true,
+        earliestExpiresAtMs: Date.parse(earliestPerfIso),
+      });
+      expect(historyExplainPlans).toHaveLength(2);
+      for (const plan of historyExplainPlans) {
+        expect(plan["Total Cost"]).toBeLessThan(20_000);
+        const nodes = collectNodes(plan);
+        const histConvScan = nodes.find(n => n["Subplan Name"] === "CTE conv_scan");
+        expect(histConvScan, "expected single-pass CTE conv_scan in readSavedExchanges").toBeDefined();
+        expect(histConvScan!["Actual Loops"]).toBe(1);
+        expect(nodes.some(n => (n.Filter ?? "").includes("assistant_id = ANY") || (n["Join Filter"] ?? "").includes("ANY"))).toBe(false);
+      }
+      expect(activeLineageBatchSizes).toEqual([32, 32]);
+
+      // Withdrawing 1 shared revision across all 32 hashed answers executes single-pass conv_scan + Hash Left Join (no `= ANY`).
+      historyExplainPlans.length = 0;
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [sharedPerfRev]);
+      const perfAfterWithdraw = await loadTutorHistoryContext(sql, scope, histPerfCurrent);
+      expect(perfAfterWithdraw.history).toEqual([]);
+      expect((await readTutorHistoryAncestorStatus(sql, scope, histPerfCurrent)).valid).toBe(false);
+      expect(historyExplainPlans).toHaveLength(2);
+      for (const plan of historyExplainPlans) {
+        expect(plan["Total Cost"]).toBeLessThan(20_000);
+        const nodes = collectNodes(plan);
+        const histConvScan = nodes.find(n => n["Subplan Name"] === "CTE conv_scan");
+        expect(histConvScan, "expected single-pass CTE conv_scan after shared withdrawal").toBeDefined();
+        expect(histConvScan!["Actual Loops"]).toBe(1);
+        expect(nodes.some(n => (n.Filter ?? "").includes("assistant_id = ANY") || (n["Join Filter"] ?? "").includes("ANY"))).toBe(false);
+        const csInvJoin = nodes.find(n => (n["Hash Cond"] ?? "").includes("assistant_id"));
+        expect(csInvJoin, "expected Hash Left Join on assistant_id for cs_inv").toBeDefined();
+      }
+      await db.query("DELETE FROM v3_bitemporal_misconception_edges WHERE revision_id <> $1", [candidate.revisionId]);
+      await db.query("DELETE FROM opening_memories WHERE id = ANY($1::uuid[])", [[joblessPerfMem, ...distinctPerfMems]]);
 
       // 4) Round-10 P1 #1: Unbound conversation where Exchange 1 (job-backed, hashless) consumes a memory carrying a Course A
       // misconception (or an ordinary Course A memory), followed by Exchange 2 (job-backed, hashless follow-up, no direct refs).
@@ -1404,11 +1641,12 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         .toMatchObject({ valid: true });
       expect(p1CollectedCourses.has(courseId)).toBe(true);
 
-      // Even when Exchange 1 is omitted by the 12,000-character budget, retained hashless Exchange 2 preserves exact lineage!
+      // Even when Exchange 1 is omitted by the 12,000-character budget, retained hashless Exchange 2 preserves exact lineage and memoryIds!
       await db.query("UPDATE opening_turns SET text=$1 WHERE id=$2", ["x".repeat(12_000), p1A1]);
       const p1OmittedOlder = await loadTutorHistoryContext(sql, scope, p1Current);
       expect(p1OmittedOlder.history.map(t => t.text)).toEqual(["Course A follow-up Q2", "Hashless derivative A2"]);
       expect(p1OmittedOlder.historyMisconceptionLineage).toEqual(exact);
+      expect(p1OmittedOlder.memoryIds).toContain(memoryId);
       await db.query("UPDATE opening_turns SET text='Course A memory answer' WHERE id=$1", [p1A1]);
 
       // Ordinary Course-A memory (without misconception) consumed in Exchange 1 also prevents hashless Exchange 2 (anchored to Course A
@@ -1439,6 +1677,89 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       ]);
       expect(examMemoryQueries).toBe(0);
       expect(examConvScanQueries).toBe(0);
+
+      // 6) Round-11 P1 regressions on PostgreSQL 16.4:
+      // (a) Multi-turn readTutorHistoryAncestorAuthority preserves conv_misconception_hashes when u2 is hashed and u1 is hashless;
+      // (b) Jobless predecessor with ordinary Course-A memory blocks Course-B / unbound derivative history reuse;
+      // (c) Paired user turn (Course A) with Course-A misconception memory + paired assistant (Course B) is rejected in both
+      //     loadTutorHistoryContext and readTutorHistoryAncestorStatus.
+      SqlFragment.prototype.execute = origExecute;
+      const r11Conv = "b1000000-0000-4000-8000-000000000001";
+      const r11Jobless = "b1000000-0000-4000-8000-000000000002";
+      const r11U1 = "b1000000-0000-4000-8000-000000000003";
+      const r11A1 = "b1000000-0000-4000-8000-000000000004";
+      const r11U2 = "b1000000-0000-4000-8000-000000000005";
+      const r11A2 = "b1000000-0000-4000-8000-000000000006";
+      const r11Current = "b1000000-0000-4000-8000-000000000007";
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [r11Conv, scope.workspaceId, scope.ownerUserId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$7,$8,'assistant','complete',NULL,$9,$10,false,to_timestamp($12),'Jobless Course A ordinary mem'),
+               ($2,$7,$8,'user','complete',NULL,'[]',$10,false,to_timestamp($13),'R11 Q1'),
+               ($3,$7,$8,'assistant','complete',NULL,'[]',$10,false,to_timestamp($13),'R11 hashless A1'),
+               ($4,$7,$8,'user','complete',NULL,'[]',$11,false,to_timestamp($14),'R11 Q2'),
+               ($5,$7,$8,'assistant','complete',$16,'[]',$11,false,to_timestamp($14),'R11 explicit A2'),
+               ($6,$7,$8,'user','complete',NULL,'[]',$11,false,to_timestamp($15),'R11 Course B Current')`,
+        [r11Jobless, r11U1, r11A1, r11U2, r11A2, r11Current, scope.workspaceId, r11Conv,
+          JSON.stringify([{ memoryDependencyIds: [p1MemCourseOnly] }]),
+          JSON.stringify({ courseId }), JSON.stringify({ courseId: otherCourseId }),
+          baseEpochSec + 30_000, baseEpochSec + 30_010, baseEpochSec + 30_020, baseEpochSec + 30_030,
+          JSON.stringify(cleanLineage)]);
+      await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5), ($6,$2,$3,$7,$8)",
+        [r11A1, scope.workspaceId, r11Conv, r11U1, r11A1, r11A2, r11U2, r11A2]);
+      await db.exec("ANALYZE");
+
+      // (b) Jobless Course-A ordinary memory prevents R11 hashless A1 from leaking into Course B (leaving only Course-B explicit A2),
+      // while Course A retains R11 hashless A1 and propagates p1MemCourseOnly!
+      const r11CourseBHistory = await loadTutorHistoryContext(sql, scope, r11Current);
+      expect(r11CourseBHistory.history.map(t => t.text)).toEqual(["R11 Q2", "R11 explicit A2"]);
+      expect(r11CourseBHistory.memoryIds).toBeUndefined();
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=$2", [JSON.stringify({ courseId }), r11Current]);
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=ANY($2::uuid[])", [JSON.stringify({ courseId }), [r11U2, r11A2]]);
+      const r11CourseAHistory = await loadTutorHistoryContext(sql, scope, r11Current);
+      expect(r11CourseAHistory.history.map(t => t.text)).toEqual(["R11 Q1", "R11 hashless A1", "R11 Q2", "R11 explicit A2"]);
+      expect(r11CourseAHistory.memoryIds).toEqual([p1MemCourseOnly]);
+
+      // (a) Multi-turn readTutorHistoryAncestorAuthority([r11U2, r11Current]):
+      // Make r11Jobless a hashed Course-A misconception turn, r11A1 hashless in Course A, r11A2 hashless in Course B,
+      // and r11Current hashed with cleanLineage in Course B -> r11Current stays valid while r11U2 (preceded by Course-A r11Jobless
+      // via hashless r11A1) is rejected even though r11Current's rows held conv_rn = 1!
+      const r11CurrentAssistant = "b1000000-0000-4000-8000-000000000008";
+      await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]' WHERE id=$2", [JSON.stringify(exact), r11Jobless]);
+      await db.query("UPDATE opening_turns SET intent_hash=NULL,context_anchor=$1 WHERE id=$2",
+        [JSON.stringify({ courseId: otherCourseId }), r11A2]);
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=ANY($2::uuid[])",
+        [JSON.stringify({ courseId: otherCourseId }), [r11U2, r11Current]]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',$4,'[]',$5,false,to_timestamp($6),'R11 current explicit')`,
+        [r11CurrentAssistant, scope.workspaceId, r11Conv, JSON.stringify(cleanLineage),
+          JSON.stringify({ courseId: otherCourseId }), baseEpochSec + 30_030]);
+      await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$1)",
+        [r11CurrentAssistant, scope.workspaceId, r11Conv, r11Current]);
+      const multiAuth = await readTutorHistoryAncestorAuthority(sql, scope, [r11U2, r11Current]);
+      expect(multiAuth.get(r11Current)).not.toBeNull();
+      expect(multiAuth.get(r11U2)).toBeNull();
+
+      // (c) Paired user (Course A) referencing Course-A misconception memory + paired assistant (Course B) is rejected!
+      const r11CrossConv = "b1000000-0000-4000-8000-000000000011";
+      const r11CrossU1 = "b1000000-0000-4000-8000-000000000012";
+      const r11CrossA1 = "b1000000-0000-4000-8000-000000000013";
+      const r11CrossNext = "b1000000-0000-4000-8000-000000000014";
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [r11CrossConv, scope.workspaceId, scope.ownerUserId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$4,$5,'user','complete',NULL,$6,$7,false,to_timestamp($9),'Paired Course A user'),
+               ($2,$4,$5,'assistant','complete',$11,'[]',$8,false,to_timestamp($9),'Paired Course B assistant'),
+               ($3,$4,$5,'user','complete',NULL,'[]',$7,false,to_timestamp($10),'Later Course A user')`,
+        [r11CrossU1, r11CrossA1, r11CrossNext, scope.workspaceId, r11CrossConv,
+          JSON.stringify([{ memoryDependencyIds: [memoryId] }]),
+          JSON.stringify({ courseId }), JSON.stringify({ courseId: otherCourseId }),
+          baseEpochSec + 31_000, baseEpochSec + 31_010, JSON.stringify(cleanLineage)]);
+      await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$1)",
+        [r11CrossA1, scope.workspaceId, r11CrossConv, r11CrossU1]);
+      expect((await loadTutorHistoryContext(sql, scope, r11CrossNext)).history).toEqual([]);
+      expect((await readTutorHistoryAncestorStatus(sql, scope, r11CrossNext)).valid).toBe(false);
     } finally {
       SqlFragment.prototype.execute = origExecute;
     }
