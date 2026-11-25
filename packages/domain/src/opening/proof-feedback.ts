@@ -30,11 +30,12 @@ const RESTRICTED_EQUALITY = [
   /不恒成立|并非恒等式/u,
 ];
 const RESTRICTED_CHINESE_CLAUSE = /[。！？；\r\n]/u;
+const CHINESE_MISSING_JUSTIFICATION = /(?:缺少|(?:没有|未)(?:给出|提供)?)(?:证明|推导|理由|依据)/u.source;
 const INFERENCE_CRITIQUE = [
   /\b(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\s+(?:(?:was|is)\s+to\s+be\s+proved|you\s+(?:had|were\s+asked|need(?:ed)?)\s+to\s+prove))|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result))\b/iu,
   /\b(?:(?:miss(?:ing|es)?|lack(?:s|ing)?|without|no|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|an?\s+explicit|necessary|required|intermediate)\s+)*(?:justification|reasoning|proof|derivation|steps?)|(?:do(?:es)?\s+not|doesn['’]t|don['’]t)\s+follow|(?:disallowed|forbidden|unauthori[sz]ed|not\s+allowed\s+to\s+use)\s+(?:the\s+)?(?:theorem|method|rule))\b/iu,
   /\b(?:divid(?:e[sd]?|ing)|division)\s+by\s+\$?(?:0|zero)\b/iu,
-  /循环论证|未证先用|直接假设|重述结论|缺少(?:证明|推导|理由|依据)|未经证明|跳步|(?:禁止|不能|不得)(?:使用|采用)(?:该|此)?(?:定理|方法)/u,
+  new RegExp(String.raw`循环论证|未证先用|直接假设|重述结论|${CHINESE_MISSING_JUSTIFICATION}|未经证明|跳步|(?:禁止|不能|不得)(?:使用|采用)(?:该|此)?(?:定理|方法)`, "u"),
 ];
 const VARIABLE_DIVISION = /\bdivid(?:e[sd]?|ing)\s+by\s+\$?(?:x|a\s+variable)\b/iu;
 const DIVISION_DEFECT = /\b(?:without|before)\s+(?:first\s+)?(?:prov|show|establish|justify|check|verify|ensur)\w*\b|\bfails?\s+(?:when|if|for|at|outside)\b/iu;
@@ -43,9 +44,9 @@ const INFERENCE_DEFECT_REFERENCE = /(?:circular\s+(?:reasoning|argument|proof)|b
 const INFERENCE_DEFECT_DENIAL = /(?:absent|none|nonexistent|lacking|missing|avoided|eliminated|ruled\s+out|unfounded|not\s+(?:present|found|used|detected|seen|observed|an?\s+issue|occurring)|(?:does|do|did)\s+not\s+(?:occur|appear|apply|exist|arise|happen))/u.source;
 const NEGATED_INFERENCE_CRITIQUE = [
   new RegExp(String.raw`\b${INFERENCE_DEFECT_REFERENCE}\b\$?(?:[^\S\r\n]+[\w'’-]+){0,4}[^\S\r\n]+${INFERENCE_DEFECT_DENIAL}\b`, "giu"),
-  /(?:循环论证|未证先用|直接假设|重述结论|跳步|除以(?:零|0))[^，。！？；：,.!?;:\r\n]{0,8}(?:不存在|没有|未出现|未见|已避免|不成立)/gu,
+  /(?:循环论证|未证先用|直接假设|重述结论|跳步|除以(?:零|0))(?:(?!且|并且|而且|但|不过)[^，。！？；：,.!?;:\r\n]){0,8}(?:不存在|没有(?=\s*(?:$|[，。！？；：,.!?;:)）】]|出现|发生|存在))|未出现|未见|已避免|不成立)/gu,
   /\b(?:no|not|never|neither|nor|without|free\s+of|avoid\w*|[a-z]+n['’]t)\b(?:\s+[\w'’-]+){0,4}\s+(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\b)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|(?:miss(?:ing|es)?|lack(?:s|ing)?|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|proof|derivation|reasoning|steps?)|(?:disallowed|forbidden|unauthori[sz]ed)\s+(?:the\s+)?(?:theorem|method|rule)|(?:divid(?:e[sd]?|ing)|division)\s+by)\b/giu,
-  /(?:无|没有|并未|并非|不存在|未见|避免(?:了)?|不曾)[^，。！？；：,.!?;:]{0,12}(?:循环论证|未证先用|直接假设|重述结论|缺少(?:证明|推导|理由|依据)|未经证明|跳步|除以)/gu,
+  new RegExp(String.raw`(?:无|没有|并未|并非|不存在|未见|避免(?:了)?|不曾)[^，。！？；：,.!?;:]{0,12}(?:循环论证|未证先用|直接假设|重述结论|${CHINESE_MISSING_JUSTIFICATION}|未经证明|跳步|除以)`, "gu"),
 ];
 
 function positiveInferenceClauses(text: string): string[] {
@@ -53,7 +54,7 @@ function positiveInferenceClauses(text: string): string[] {
     sentence.split(/[;；\r\n]/u).flatMap(segment => {
       const nonasserted = NONASSERTED_INFERENCE.exec(segment);
       const assertion = nonasserted ? segment.slice(0, nonasserted.index) : segment;
-      return assertion.split(/\b(?:and|but|yet|while|whereas|though|although|also|moreover|furthermore)\b|而且|并且|同时|此外|另外|但(?:是)?|不过/iu)
+      return assertion.split(/\b(?:and|but|yet|while|whereas|though|although|also|moreover|furthermore)\b|而且|并且|(?<!暂)且|同时|此外|另外|但(?:是)?|不过/iu)
         .map(clause => NEGATED_INFERENCE_CRITIQUE.reduce((value, pattern) => value.replace(pattern, " "), clause));
     }),
   );

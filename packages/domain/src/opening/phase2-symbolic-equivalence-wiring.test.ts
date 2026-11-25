@@ -765,6 +765,44 @@ describe("symbolic proof feedback Round 12", () => {
   });
 });
 
+describe("symbolic proof feedback Round 13", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    "由矛盾知原假设不成立。",
+    "矛盾说明原假设不成立。",
+    "矛盾表明前提不成立。",
+    "矛盾表明原假定不成立。",
+  ])("discharges the assumption when its rejection follows from a contradiction in %s", discharge => {
+    expectOutcome("correct", sequence("Assume x+1=x.", "1=0", discharge), "correct");
+  });
+
+  it.each(["所谓矛盾不成立。", "该矛盾无效。"])(
+    "leaves the assumption open when the contradiction itself is rejected in %s", discharge => {
+      expectOutcome("correct", sequence("Assume x+1=x.", "1=0", discharge), "unverified");
+    },
+  );
+
+  it.each([
+    "跳步且没有给出理由。",
+    "直接假设没有依据。",
+    "等式不成立且没有依据。",
+    "等式不成立且未提供证明。",
+  ])("retains a required incorrect verdict for an independent inference defect in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback });
+  });
+
+  it.each([
+    "循环论证不存在。",
+    "循环论证没有出现。",
+    "这里循环论证没有。",
+    "并非没有依据。",
+    "没有缺少理由。",
+  ])("does not accept an incorrect verdict based on a denied inference defect in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+});
+
 describe("symbolic proof feedback", () => {
   it.each([
     "$1+1=0$.", "$$1+1=0$$.", "1+1=0。", "1+1=0.", "x+1=x+2;", "Step 1: $1=0$；：",

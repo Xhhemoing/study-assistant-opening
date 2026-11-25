@@ -981,7 +981,7 @@ const MODAL_PROOF_ROLE = /(?:contradict\w*|absurd\w*|reductio|assumption|supposi
 const NEGATED_PROOF_ROLE = [
   new RegExp(String.raw`\b${CONTRADICTION_ERROR}\b[^\S\r\n]+(?:(?:purported|alleged|claimed|supposed)[^\S\r\n]+)?${CONTRADICTION_ROLE}\b`, "giu"),
   new RegExp(String.raw`\b${CONTRADICTION_ROLE}\b(?:[^\S\r\n]+(?!(?:assumption|supposition|hypothesis)\b)[a-z'’-]+){0,5}[^\S\r\n]+(?:${CONTRADICTION_ERROR}|fails?|collapses?|breaks?\s+down)\b`, "giu"),
-  /(?:矛盾|归谬|荒谬)[^，。！？；：,.!?;:\r\n]{0,6}(?:不成立|无效|错误|有误|失败|站不住脚)|(?:无效|错误|虚假)的?(?:矛盾|归谬)/gu,
+  /(?:矛盾|归谬|荒谬)(?:(?!假设|前提|假定)[^，。！？；：,.!?;:\r\n]){0,6}(?:不成立|无效|错误|有误|失败|站不住脚)|(?:无效|错误|虚假)的?(?:矛盾|归谬)/gu,
   new RegExp(String.raw`\b${MODAL}\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+${MODAL_PROOF_ROLE}\b|\b${MODAL_PROOF_ROLE}\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+${MODAL}\b`, "giu"),
   /(?:可能|也许|或许|未必|不一定)[^，。！？；：]{0,8}(?:矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该|内层|外层)?假设)|(?:矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该|内层|外层)?假设)[^，。！？；：]{0,8}(?:可能|也许|或许|未必|不一定)/gu,
   /\b(?:contradict\w*|assumption|supposition|hypothesis)[^\S\r\n]+(?:[a-z'’-]+[^\S\r\n]+){0,5}(?:yet\s+to\s+be(?:\s+[a-z'’-]+)?|far\s+from|short\s+of|unestablished|unproven|unreached|unresolved|pending|open|missing|absent|lacking)\b/giu,
