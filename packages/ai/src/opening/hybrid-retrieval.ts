@@ -605,7 +605,7 @@ function unwrapContainerBounds(
   blockStart: number,
   blockEnd: number,
   firstCrossedDocStart: number,
-): { innerStart: number; innerEnd: number } | null {
+): { innerStart: number; innerEnd: number; outerEnd: number } | null {
   if (blockEnd <= blockStart) return null;
   const slice = docText.slice(blockStart, blockEnd);
   const trimmedLen = slice.endsWith("\r\n")
@@ -628,7 +628,7 @@ function unwrapContainerBounds(
       lastLineStart >= mdFenceOpen[0].length && closeRe.test(slice.slice(lastLineStart, trimmedLen))
         ? blockStart + lastLineStart
         : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd: blockEnd } : null;
   }
 
   const colonOpen = /^[ \t]{0,3}(:{3,})[ \t]*[a-zA-Z][\w-]*[^\r\n]*(?:\r\n|\r|\n|$)/.exec(slice);
@@ -640,7 +640,7 @@ function unwrapContainerBounds(
       lastLineStart >= colonOpen[0].length && closeRe.test(slice.slice(lastLineStart, trimmedLen))
         ? blockStart + lastLineStart
         : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd: blockEnd } : null;
   }
 
   const latexOpen =
@@ -655,7 +655,7 @@ function unwrapContainerBounds(
       `\\\\end[ \\t]*(?:%[^\\r\\n]*(?:\\r\\n|\\r|\\n)[ \\t]*)?\\{[ \\t\\r\\n]*${escapedEnv}[ \\t\\r\\n]*\\}[ \\t\\r\\n]*$`,
     ).exec(tail);
     const innerEnd = closeMatch ? innerStart + closeMatch.index : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd: blockEnd } : null;
   }
 
   const mathOpen = /^[ \t]*(\$\$|\\\[)/.exec(slice);
@@ -668,16 +668,17 @@ function unwrapContainerBounds(
       closeMatch && isUnescapedAt(tail, closeMatch.index)
         ? innerStart + closeMatch.index
         : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd: blockEnd } : null;
   }
 
-  const htmlCommentOpen = /^[ \t]*<!--/.exec(slice);
+  const htmlCommentOpen = /^[ \t]*<!--(?!-?>)/.exec(slice);
   if (htmlCommentOpen) {
     const innerStart = blockStart + htmlCommentOpen[0].length;
     const tail = slice.slice(htmlCommentOpen[0].length);
-    const closeIdx = tail.search(/--!?>/);
-    const innerEnd = closeIdx >= 0 ? innerStart + closeIdx : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    const closeMatch = /--!?>/.exec(tail);
+    const innerEnd = closeMatch ? innerStart + closeMatch.index : blockEnd;
+    const outerEnd = closeMatch ? innerEnd + closeMatch[0].length : blockEnd;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   const cdataOpen = /^[ \t]*<!\[CDATA\[/.exec(slice);
@@ -686,7 +687,8 @@ function unwrapContainerBounds(
     const tail = slice.slice(cdataOpen[0].length);
     const closeIdx = tail.indexOf("]]>");
     const innerEnd = closeIdx >= 0 ? innerStart + closeIdx : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    const outerEnd = closeIdx >= 0 ? innerEnd + 3 : blockEnd;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   const piOpen = /^[ \t]*<\?/.exec(slice);
@@ -695,7 +697,8 @@ function unwrapContainerBounds(
     const tail = slice.slice(piOpen[0].length);
     const closeIdx = tail.indexOf("?>");
     const innerEnd = closeIdx >= 0 ? innerStart + closeIdx : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    const outerEnd = closeIdx >= 0 ? innerEnd + 2 : blockEnd;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   const declOpen = /^[ \t]*<![A-Za-z]/.exec(slice);
@@ -704,7 +707,8 @@ function unwrapContainerBounds(
     const tail = slice.slice(declOpen[0].length);
     const closeIdx = tail.indexOf(">");
     const innerEnd = closeIdx >= 0 ? innerStart + closeIdx : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    const outerEnd = closeIdx >= 0 ? innerEnd + 1 : blockEnd;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   const htmlTagOpen =
@@ -717,38 +721,53 @@ function unwrapContainerBounds(
     const tail = slice.slice(htmlTagOpen[0].length);
     const closeEndMatch = new RegExp(`<\\/${escapedTag}[ \\t\\r\\n]*>[ \\t\\r\\n]*$`, "i").exec(tail);
     let innerEnd = blockEnd;
+    let outerEnd = blockEnd;
     if (closeEndMatch) {
       innerEnd = innerStart + closeEndMatch.index;
+      outerEnd = blockEnd;
     } else if (lastLineStart > htmlTagOpen[0].length) {
       const lastLineClose = new RegExp(`<\\/${escapedTag}[ \\t\\r\\n]*>`, "i").exec(
         slice.slice(lastLineStart, trimmedLen),
       );
-      if (lastLineClose) innerEnd = blockStart + lastLineStart + lastLineClose.index;
+      if (lastLineClose) {
+        innerEnd = blockStart + lastLineStart + lastLineClose.index;
+        outerEnd = innerEnd + lastLineClose[0].length;
+      }
     }
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   const prefixLimit = Math.min(slice.length, Math.max(0, firstCrossedDocStart - blockStart));
   const prefix = slice.slice(0, prefixLimit);
   const inlineRawMatch =
-    /<!--|<!\[CDATA\[|<(?<rawTag>pre|script|style|textarea)(?:[\t\n\f\r /](?:(?:"[^"]*"|'[^']*'|[^'"<>])*))?>/i.exec(
+    /<!--(?!-?>)|<!\[CDATA\[|<(?<rawTag>pre|script|style|textarea)(?:[\t\n\f\r /](?:(?:"[^"]*"|'[^']*'|[^'"<>])*))?>/i.exec(
       prefix,
     );
   if (inlineRawMatch) {
     const innerStart = blockStart + inlineRawMatch.index + inlineRawMatch[0].length;
     const tail = slice.slice(inlineRawMatch.index + inlineRawMatch[0].length);
     let closeIdx = -1;
+    let closeLen = 0;
     if (inlineRawMatch[0] === "<!--") {
-      closeIdx = tail.search(/--!?>/);
+      const commentClose = /--!?>/.exec(tail);
+      if (commentClose) {
+        closeIdx = commentClose.index;
+        closeLen = commentClose[0].length;
+      }
     } else if (inlineRawMatch[0] === "<![CDATA[") {
       closeIdx = tail.indexOf("]]>");
+      if (closeIdx >= 0) closeLen = 3;
     } else {
       const rawTag = inlineRawMatch.groups!.rawTag!.toLowerCase();
       const rawClose = new RegExp(`<\\/${rawTag}[ \\t\\r\\n]*>`, "i").exec(tail);
-      if (rawClose) closeIdx = rawClose.index;
+      if (rawClose) {
+        closeIdx = rawClose.index;
+        closeLen = rawClose[0].length;
+      }
     }
     const innerEnd = closeIdx >= 0 ? innerStart + closeIdx : blockEnd;
-    return innerEnd > innerStart ? { innerStart, innerEnd } : null;
+    const outerEnd = closeIdx >= 0 ? innerEnd + closeLen : blockEnd;
+    return innerEnd > innerStart ? { innerStart, innerEnd, outerEnd } : null;
   }
 
   return null;
@@ -763,6 +782,9 @@ function collectHtmlLiteralSpans(
   if (!slice.includes("<")) return [];
   const results: Array<{ outerStart: number; outerEnd: number; innerStart: number; innerEnd: number }> = [];
   const failedTickRunUntil = new Map<number, number>();
+  const openRe =
+    /(?:<!--|<!\[CDATA\[|<\?|<(?<rawTag>pre|script|style|textarea)(?:[\t\n\f\r /](?:(?:"[^"]*"|'[^']*'|[^'"<>])*))?>)/iy;
+  const commentCloseRe = /--!?>/g;
   let fenceChar: string | null = null;
   let fenceLen = 0;
   let pos = 0;
@@ -855,29 +877,49 @@ function collectHtmlLiteralSpans(
         continue;
       }
       if (ch === "<") {
-        const rest = slice.slice(i);
-        const openMatch =
-          /^(?:<!--|<!\[CDATA\[|<\?|<(?<rawTag>pre|script|style|textarea)(?:[\t\n\f\r /](?:(?:"[^"]*"|'[^']*'|[^'"<>])*))?>)/i.exec(
-            rest,
-          );
+        if (slice.startsWith("<!-->", i)) {
+          i += 5;
+          continue;
+        }
+        if (slice.startsWith("<!--->", i)) {
+          i += 6;
+          continue;
+        }
+        openRe.lastIndex = i;
+        const openMatch = openRe.exec(slice);
         if (openMatch) {
           const relInnerStart = i + openMatch[0].length;
-          const tail = slice.slice(relInnerStart);
-          let closeMatch: RegExpExecArray | null = null;
+          let relInnerEnd = slice.length;
+          let relOuterEnd = slice.length;
           if (openMatch[0] === "<!--") {
-            closeMatch = /--!?>/.exec(tail);
+            commentCloseRe.lastIndex = relInnerStart;
+            const closeMatch = commentCloseRe.exec(slice);
+            if (closeMatch) {
+              relInnerEnd = closeMatch.index;
+              relOuterEnd = closeMatch.index + closeMatch[0].length;
+            }
           } else if (openMatch[0] === "<![CDATA[") {
-            closeMatch = /\]\]>/.exec(tail);
+            const closeIdx = slice.indexOf("]]>", relInnerStart);
+            if (closeIdx !== -1) {
+              relInnerEnd = closeIdx;
+              relOuterEnd = closeIdx + 3;
+            }
           } else if (openMatch[0] === "<?") {
-            closeMatch = /\?>/.exec(tail);
+            const closeIdx = slice.indexOf("?>", relInnerStart);
+            if (closeIdx !== -1) {
+              relInnerEnd = closeIdx;
+              relOuterEnd = closeIdx + 2;
+            }
           } else {
             const rawTag = openMatch.groups!.rawTag!.toLowerCase();
-            closeMatch = new RegExp(`<\\/${rawTag}[ \\t\\r\\n]*>`, "i").exec(tail);
+            const rawCloseRe = new RegExp(`<\\/${rawTag}[ \\t\\r\\n]*>`, "gi");
+            rawCloseRe.lastIndex = relInnerStart;
+            const closeMatch = rawCloseRe.exec(slice);
+            if (closeMatch) {
+              relInnerEnd = closeMatch.index;
+              relOuterEnd = closeMatch.index + closeMatch[0].length;
+            }
           }
-          const relInnerEnd = closeMatch ? relInnerStart + closeMatch.index : slice.length;
-          const relOuterEnd = closeMatch
-            ? relInnerEnd + closeMatch[0].length
-            : slice.length;
           if (relInnerEnd > relInnerStart) {
             results.push({
               outerStart: sliceStart + i,
@@ -1264,10 +1306,14 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
     prefixMaxEnd: Float64Array;
   };
   type UnwrappedRange = { start: number; end: number };
+  type UnwrappedScope = {
+    ranges: readonly UnwrappedRange[];
+    ast: IndexedDocAst;
+  };
   type ChunkDocSpan = {
     docAst: IndexedDocAst;
     overlayAst: IndexedDocAst | undefined;
-    unwrappedRanges: readonly UnwrappedRange[];
+    unwrappedScopes: readonly UnwrappedScope[];
     docStart: number;
     docEnd: number;
     chunkHasProtectedAst: boolean;
@@ -1308,54 +1354,184 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
     docText: string,
     rootBlocks: readonly PedagogicalAstBlock[],
     spans: ReadonlyArray<{ docStart: number; docEnd: number }>,
-  ): { blocks: PedagogicalAstBlock[]; ranges: UnwrappedRange[] } => {
-    if (spans.length <= 1 || rootBlocks.length === 0) return { blocks: [], ranges: [] };
+  ): { blocks: PedagogicalAstBlock[]; scopes: UnwrappedScope[] } => {
+    if (spans.length <= 1 || rootBlocks.length === 0) return { blocks: [], scopes: [] };
     const extraOverlayBlocks: PedagogicalAstBlock[] = [];
-    const unwrappedRanges: UnwrappedRange[] = [];
+    const unwrappedScopes: UnwrappedScope[] = [];
     const processedSliceKeys = new Set<string>();
     const maxUnwrapParses = Math.min(32, Math.max(8, spans.length * 2));
     let unwrapParses = 0;
 
     const firstCrossedBoundary = (outerStart: number, outerEnd: number): number => {
-      for (let k = 1; k < spans.length; k++) {
-        const boundary = spans[k]!.docStart;
-        if (boundary <= outerStart) continue;
-        if (boundary < outerEnd) return boundary;
-        break;
+      if (outerEnd <= outerStart + 1) return -1;
+      let lo = 1;
+      let hi = spans.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (spans[mid]!.docStart <= outerStart) lo = mid + 1;
+        else hi = mid;
       }
-      return -1;
+      return lo < spans.length && spans[lo]!.docStart < outerEnd ? spans[lo]!.docStart : -1;
     };
 
     const unwrapSlice = (
       innerStart: number,
       innerEnd: number,
+      outerEnd: number,
+      rangeEnd: number,
+      afterRangeSegments: readonly UnwrappedRange[],
       inWorkedExample: boolean,
       fallbackBlock?: PedagogicalAstBlock,
     ): void => {
       if (innerEnd <= innerStart) return;
-      const sliceKey = `${innerStart}:${innerEnd}`;
+      const postCloserSegments: UnwrappedRange[] = [];
+      if (outerEnd < rangeEnd) {
+        postCloserSegments.push({ start: outerEnd, end: rangeEnd });
+      }
+      for (const seg of afterRangeSegments) {
+        if (seg.end > seg.start) postCloserSegments.push(seg);
+      }
+      const tailEndKey =
+        postCloserSegments.length > 0
+          ? postCloserSegments[postCloserSegments.length - 1]!.end
+          : innerEnd;
+      const sliceKey = `${innerStart}:${innerEnd}:${outerEnd}:${tailEndKey}`;
       if (processedSliceKeys.has(sliceKey)) return;
       processedSliceKeys.add(sliceKey);
-      unwrappedRanges.push({ start: innerStart, end: innerEnd });
 
       if (unwrapParses >= maxUnwrapParses) {
         const template = fallbackBlock ?? rootBlocks[0]!;
-        extraOverlayBlocks.push({
+        const sealedFallback: PedagogicalAstBlock = {
           ...template,
           kind: "solution",
           visibility: "sealed",
           startOffset: innerStart,
-          endOffset: innerEnd,
-          text: docText.slice(innerStart, innerEnd),
+          endOffset: tailEndKey,
+          text: docText.slice(innerStart, tailEndKey),
+        };
+        extraOverlayBlocks.push(sealedFallback);
+        unwrappedScopes.push({
+          ranges: [{ start: innerStart, end: tailEndKey }],
+          ast: indexAstBlocks([sealedFallback]),
         });
         return;
       }
       unwrapParses++;
 
-      const sliceText = docText.slice(innerStart, innerEnd);
+      const interiorSlice = docText.slice(innerStart, innerEnd);
+      const innerLen = innerEnd - innerStart;
+      const rawInteriorBlocks = parsePedagogicalAst(interiorSlice);
+
+      let probeTailVis: PedagogicalVisibility = "public";
+      let hasCarryableHeadingScope = false;
+      if (postCloserSegments.length > 0 && rawInteriorBlocks.some(b => b.visibility !== "public")) {
+        probeTailVis = parsePedagogicalAst(`${interiorSlice}\n\nprobe`).at(-1)?.visibility ?? "public";
+        hasCarryableHeadingScope =
+          probeTailVis !== "public"
+          && (parsePedagogicalAst(`${interiorSlice}\n\n# Reset\n\nprobe`).at(-1)?.visibility ?? "public")
+            === "public";
+      }
+
+      if (hasCarryableHeadingScope) {
+        const template = rawInteriorBlocks.at(-1) ?? fallbackBlock ?? rootBlocks[0]!;
+        const scopeBlocks: PedagogicalAstBlock[] = [];
+        const scopeRanges: UnwrappedRange[] = [{ start: innerStart, end: innerEnd }];
+        const tailPieces: UnwrappedRange[] = [];
+
+        for (let idx = 0; idx < postCloserSegments.length; idx++) {
+          const seg = postCloserSegments[idx]!;
+          let segStart = seg.start;
+          if (
+            idx === 0
+            && segStart > 0
+            && docText[segStart - 1] !== "\n"
+            && docText[segStart - 1] !== "\r"
+          ) {
+            let sameLineEnd = segStart;
+            while (
+              sameLineEnd < seg.end
+              && docText[sameLineEnd] !== "\n"
+              && docText[sameLineEnd] !== "\r"
+            ) {
+              sameLineEnd++;
+            }
+            if (sameLineEnd > segStart) {
+              if (docText.slice(segStart, sameLineEnd).trim()) {
+                scopeBlocks.push({
+                  ...template,
+                  kind: probeTailVis === "sealed" ? "solution" : "hint",
+                  visibility: probeTailVis,
+                  startOffset: segStart,
+                  endOffset: sameLineEnd,
+                  text: docText.slice(segStart, sameLineEnd),
+                });
+              }
+              scopeRanges.push({ start: segStart, end: sameLineEnd });
+              segStart = sameLineEnd;
+            }
+          }
+          if (seg.end > segStart) {
+            tailPieces.push({ start: segStart, end: seg.end });
+            scopeRanges.push({ start: segStart, end: seg.end });
+          }
+        }
+
+        type VirtPiece = { virtStart: number; virtEnd: number; docStart: number };
+        const virtPieces: VirtPiece[] = [{ virtStart: 0, virtEnd: innerLen, docStart: innerStart }];
+        const extParts: string[] = [interiorSlice];
+        let virtOffset = innerLen;
+        for (const piece of tailPieces) {
+          extParts.push("\n\n");
+          virtOffset += 2;
+          const pieceLen = piece.end - piece.start;
+          virtPieces.push({
+            virtStart: virtOffset,
+            virtEnd: virtOffset + pieceLen,
+            docStart: piece.start,
+          });
+          extParts.push(docText.slice(piece.start, piece.end));
+          virtOffset += pieceLen;
+        }
+        const extendedText = extParts.join("");
+        const extendedBlocks = splitChunkDiscourseBlocks(
+          extendedText,
+          tailPieces.length > 0 ? parsePedagogicalAst(extendedText) : rawInteriorBlocks,
+          inWorkedExample,
+        );
+
+        const interiorMappedBlocks: PedagogicalAstBlock[] = [];
+        for (const b of extendedBlocks) {
+          for (let p = 0; p < virtPieces.length; p++) {
+            const vp = virtPieces[p]!;
+            const ovStart = Math.max(b.startOffset, vp.virtStart);
+            const ovEnd = Math.min(b.endOffset, vp.virtEnd);
+            if (ovEnd > ovStart) {
+              const mappedStart = vp.docStart + (ovStart - vp.virtStart);
+              const mappedEnd = vp.docStart + (ovEnd - vp.virtStart);
+              const mapped: PedagogicalAstBlock = {
+                ...b,
+                startOffset: mappedStart,
+                endOffset: mappedEnd,
+                text: docText.slice(mappedStart, mappedEnd),
+              };
+              scopeBlocks.push(mapped);
+              if (p === 0) interiorMappedBlocks.push(mapped);
+            }
+          }
+        }
+
+        extraOverlayBlocks.push(...scopeBlocks);
+        unwrappedScopes.push({
+          ranges: scopeRanges,
+          ast: indexAstBlocks(scopeBlocks),
+        });
+        inspectRangeAndBlocks(innerStart, innerEnd, interiorMappedBlocks, postCloserSegments);
+        return;
+      }
+
       const subBlocks = splitChunkDiscourseBlocks(
-        sliceText,
-        parsePedagogicalAst(sliceText),
+        interiorSlice,
+        rawInteriorBlocks,
         inWorkedExample,
       ).map(sb => ({
         ...sb,
@@ -1363,13 +1539,18 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
         endOffset: sb.endOffset + innerStart,
       }));
       extraOverlayBlocks.push(...subBlocks);
-      inspectRangeAndBlocks(innerStart, innerEnd, subBlocks);
+      unwrappedScopes.push({
+        ranges: [{ start: innerStart, end: innerEnd }],
+        ast: indexAstBlocks(subBlocks),
+      });
+      inspectRangeAndBlocks(innerStart, innerEnd, subBlocks, postCloserSegments);
     };
 
     const inspectRangeAndBlocks = (
       rangeStart: number,
       rangeEnd: number,
       blocks: readonly PedagogicalAstBlock[],
+      afterRangeSegments: readonly UnwrappedRange[],
     ): void => {
       for (const block of blocks) {
         if (block.visibility === "sealed") continue;
@@ -1382,17 +1563,32 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
           crossedDocStart,
         );
         if (!unwrapped) continue;
-        unwrapSlice(unwrapped.innerStart, unwrapped.innerEnd, block.kind === "example", block);
+        unwrapSlice(
+          unwrapped.innerStart,
+          unwrapped.innerEnd,
+          unwrapped.outerEnd,
+          rangeEnd,
+          afterRangeSegments,
+          block.kind === "example",
+          block,
+        );
       }
 
       for (const htmlSpan of collectHtmlLiteralSpans(docText, rangeStart, rangeEnd)) {
         if (firstCrossedBoundary(htmlSpan.outerStart, htmlSpan.outerEnd) === -1) continue;
-        unwrapSlice(htmlSpan.innerStart, htmlSpan.innerEnd, false);
+        unwrapSlice(
+          htmlSpan.innerStart,
+          htmlSpan.innerEnd,
+          htmlSpan.outerEnd,
+          rangeEnd,
+          afterRangeSegments,
+          false,
+        );
       }
     };
 
-    inspectRangeAndBlocks(0, docText.length, rootBlocks);
-    return { blocks: extraOverlayBlocks, ranges: unwrappedRanges };
+    inspectRangeAndBlocks(0, docText.length, rootBlocks, []);
+    return { blocks: extraOverlayBlocks, scopes: unwrappedScopes };
   };
 
   const sliceOverlappingAstBlocks = (
@@ -1479,7 +1675,7 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
     }
     const docText = parts.join("");
     const docAst = getIndexedAstBlocks(docText);
-    const { blocks: extraOverlayBlocks, ranges: unwrappedRanges } = collectUnwrappedContainerBlocks(
+    const { blocks: extraOverlayBlocks, scopes: unwrappedScopes } = collectUnwrappedContainerBlocks(
       docText,
       docAst.blocks,
       spans,
@@ -1495,7 +1691,7 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       chunkDocSpanById.set(span.chunk.id, {
         docAst,
         overlayAst,
-        unwrappedRanges,
+        unwrappedScopes,
         docStart: span.docStart,
         docEnd: span.docEnd,
         chunkHasProtectedAst:
@@ -1608,22 +1804,19 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       && localOverlapping.length === 0
     ) {
       const prevDocBlock = findPrecedingAstBlock(docAst, segDocEnd);
-      const enclosingOverlayRange = chunkSpan?.unwrappedRanges.find(
-        r => r.start < segDocEnd && r.end > segDocStart,
-      );
-      const prevOverlayBlock =
-        overlayAst && enclosingOverlayRange
-          ? findPrecedingAstBlock(overlayAst, segDocEnd)
-          : undefined;
+      const overlayProtectedInScope =
+        chunkSpan?.unwrappedScopes.some(scope => {
+          if (!scope.ranges.some(r => r.start < segDocEnd && r.end > segDocStart)) return false;
+          const prevOverlay = findPrecedingAstBlock(scope.ast, segDocEnd);
+          return prevOverlay !== undefined && isProtectedAstBlock(prevOverlay);
+        }) ?? false;
       const prevLocalBlock = docAst === localAst
         ? prevDocBlock
         : findPrecedingAstBlock(localAst, localEnd);
       const segmentInProtectedScope =
         chunkHasProtectedAst
         || (prevDocBlock !== undefined && isProtectedAstBlock(prevDocBlock))
-        || (prevOverlayBlock !== undefined
-          && prevOverlayBlock.startOffset >= enclosingOverlayRange!.start
-          && isProtectedAstBlock(prevOverlayBlock))
+        || overlayProtectedInScope
         || (prevLocalBlock !== undefined && isProtectedAstBlock(prevLocalBlock));
       const excludedByFamily = chunkFamilyId !== undefined && excludedItemFamilyIds.has(chunkFamilyId);
       if (chunkAdmissible && !segmentInProtectedScope && !excludedByFamily) {

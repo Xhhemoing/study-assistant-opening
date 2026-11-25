@@ -1355,7 +1355,8 @@ describe("material hybrid retrieval", () => {
       expect(JSON.stringify(emptyGraphPreferredPage3)).not.toContain("secret answer text omega = 314");
 
       // Also verify multi-level nested public fences (`page 1` ````, `page 2` ```, `page 3` ## Answer Key,
-      // `page 4` secret continuation, `page 5` closes both, `page 6` public theorem).
+      // `page 4` secret continuation, `page 5` closes both, `page 6` unlabeled continuation stays sealed,
+      // `page 7` ## Public Section + Theorem 1 reopens public).
       const deepSrc = "deep-nested-fences";
       const deepChunks: SourceChunk[] = [
         { ...chunk("deep-p1", "````markdown\nOuter showcase", 1), sourceId: deepSrc },
@@ -1363,20 +1364,25 @@ describe("material hybrid retrieval", () => {
         { ...chunk("deep-p3", "## Answer Key\nDeep secret alpha = 19", 3), sourceId: deepSrc },
         { ...chunk("deep-p4", "Deep secret continuation beta = 23", 4), sourceId: deepSrc },
         { ...chunk("deep-p5", "```\n````", 5), sourceId: deepSrc },
-        { ...chunk("deep-p6", "Theorem 1: Public orthogonal decomposition theorem.", 6), sourceId: deepSrc },
+        { ...chunk("deep-p6", "Deep secret post-closer gamma = 29", 6), sourceId: deepSrc },
+        { ...chunk("deep-p7", "## Public Section\nTheorem 1: Public orthogonal decomposition theorem.", 7), sourceId: deepSrc },
       ];
       const deepRanked = rankMaterialContext({
         chunks: deepChunks,
         query: "Deep secret continuation orthogonal decomposition",
         maxCharacters: 8000,
-        preferChunkId: "deep-p4",
-        preferPage: 4,
+        preferChunkId: "deep-p6",
+        preferPage: 6,
         pedagogicalGraph: {
           concepts: [
             { id: "c-tainted", label: "Tainted", evidenceChunkIds: ["deep-p4"], privacyEpoch: 1 },
-            { id: "c-thm", label: "Orthogonal Decomposition", evidenceChunkIds: ["deep-p6"], privacyEpoch: 1 },
+            { id: "c-tainted-post", label: "Tainted Post", evidenceChunkIds: ["deep-p6"], privacyEpoch: 1 },
+            { id: "c-thm", label: "Orthogonal Decomposition", evidenceChunkIds: ["deep-p7"], privacyEpoch: 1 },
           ],
-          edges: [{ from: "c-tainted", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 }],
+          edges: [
+            { from: "c-tainted", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 },
+            { from: "c-tainted-post", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 },
+          ],
           authorization: {
             admissibleSourceIds: [deepSrc],
             admissibleSourceVersions: { [deepSrc]: 1 },
@@ -1384,7 +1390,7 @@ describe("material hybrid retrieval", () => {
           },
         },
       });
-      expect(deepRanked.map(c => c.id)).toEqual(["deep-p6"]);
+      expect(deepRanked.map(c => c.id)).toEqual(["deep-p7"]);
       expect(JSON.stringify(deepRanked)).not.toContain("Deep secret");
     });
 
@@ -1502,6 +1508,227 @@ describe("material hybrid retrieval", () => {
         expect(res.map(c => c.id)).toEqual([`${tag}-p4`]);
         expect(JSON.stringify(res)).not.toContain("Secret");
       }
+    });
+
+    it("carries unwrapped heading seals past container closing delimiters onto unlabeled continuations while honoring real post-closer public headings", () => {
+      // Exact Round-4 Step-1 P1 #1:
+      // 4 chunks in one source: page 1 opens a fence, page 2 contains `## Answer Key`,
+      // page 3 closes the fence, and page 4 continues with `Substituting gives x = 42.` without a new heading.
+      const carrySrc = "fenced-unlabeled-post-closer-source";
+      const page1Open: SourceChunk = {
+        ...chunk("carry-p1", "```\nStarter template", 1),
+        sourceId: carrySrc,
+      };
+      const page2SealedHeading: SourceChunk = {
+        ...chunk("carry-p2", "## Answer Key\nLet u = x - 1.", 2),
+        sourceId: carrySrc,
+      };
+      const page3CloseFence: SourceChunk = {
+        ...chunk("carry-p3", "```", 3),
+        sourceId: carrySrc,
+      };
+      const page4UnlabeledAnswer: SourceChunk = {
+        ...chunk("carry-p4", "Substituting gives x = 42.", 4),
+        sourceId: carrySrc,
+      };
+
+      const fourChunkEmptyGraph = rankMaterialContext({
+        chunks: [page1Open, page2SealedHeading, page3CloseFence, page4UnlabeledAnswer],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "carry-p4",
+        preferPage: 4,
+        dense: [{ chunk: page4UnlabeledAnswer, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [carrySrc],
+            admissibleSourceVersions: { [carrySrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(fourChunkEmptyGraph).toEqual([]);
+      expect(JSON.stringify(fourChunkEmptyGraph)).not.toContain("Substituting gives x = 42.");
+
+      // Add deeper subheading `### Part (b)` (stays sealed under `## Answer Key`) and
+      // same-level `## Public Section` + `Theorem 1: public theorem` (reopens public!).
+      const page5DeeperSubheading: SourceChunk = {
+        ...chunk("carry-p5", "### Part (b)\nBack-substituting gives y = 84.", 5),
+        sourceId: carrySrc,
+      };
+      const page6PublicSection: SourceChunk = {
+        ...chunk(
+          "carry-p6",
+          "## Public Section\nTheorem 1: public theorem on Banach fixed-point convergence.",
+          6,
+        ),
+        sourceId: carrySrc,
+      };
+
+      const withPublicSection = rankMaterialContext({
+        chunks: [
+          page1Open,
+          page2SealedHeading,
+          page3CloseFence,
+          page4UnlabeledAnswer,
+          page5DeeperSubheading,
+          page6PublicSection,
+        ],
+        query: "Substituting Banach fixed-point convergence theorem",
+        maxCharacters: 8000,
+        preferChunkId: "carry-p4",
+        preferPage: 4,
+        dense: [
+          { chunk: page4UnlabeledAnswer, segmentIndex: 0 },
+          { chunk: page5DeeperSubheading, segmentIndex: 0 },
+          { chunk: page6PublicSection, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted-p4", label: "Tainted P4", evidenceChunkIds: ["carry-p4"], privacyEpoch: 1 },
+            { id: "c-banach", label: "Banach Fixed-Point", evidenceChunkIds: ["carry-p6"], privacyEpoch: 1 },
+          ],
+          edges: [{ from: "c-tainted-p4", to: "c-banach", kind: "prerequisite", privacyEpoch: 1 }],
+          authorization: {
+            admissibleSourceIds: [carrySrc],
+            admissibleSourceVersions: { [carrySrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(withPublicSection.map(c => c.id)).toEqual(["carry-p6"]);
+      expect(withPublicSection[0]?.text).toContain("Theorem 1: public theorem");
+      expect(JSON.stringify(withPublicSection)).not.toContain("x = 42");
+      expect(JSON.stringify(withPublicSection)).not.toContain("y = 84");
+
+      // Verify mid-line `--> ## Fake Public` on the same line as HTML comment closer cannot spoof a line-start heading,
+      // while an unclosed `<details>` without a sealed heading stops cleanly at `innerEnd`.
+      const sameLineCommentSrc = "comment-same-line-fake-heading";
+      const commentSameLine = rankMaterialContext({
+        chunks: [
+          { ...chunk("csl-p1", "<!--", 1), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p2", "## Answer Key\nHidden step", 2), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p3", "--> ## Not A Line-Start Heading", 3), sourceId: sameLineCommentSrc },
+          { ...chunk("csl-p4", "Substituting gives x = 42.", 4), sourceId: sameLineCommentSrc },
+        ],
+        query: "Substituting gives x = 42",
+        maxCharacters: 8000,
+        preferChunkId: "csl-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [sameLineCommentSrc],
+            admissibleSourceVersions: { [sameLineCommentSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(commentSameLine.map(c => c.id)).toEqual(["csl-p1"]);
+      expect(JSON.stringify(commentSameLine)).not.toContain("Hidden step");
+      expect(JSON.stringify(commentSameLine)).not.toContain("Substituting gives x = 42.");
+
+      const unclosedDetailsInFenceSrc = "unclosed-details-inside-fence";
+      const unclosedDetailsRes = rankMaterialContext({
+        chunks: [
+          { ...chunk("udf-p1", "```\n<details><summary>Reveal answer</summary>", 1), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p2", "Hidden answer inside unclosed details", 2), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p3", "```", 3), sourceId: unclosedDetailsInFenceSrc },
+          { ...chunk("udf-p4", "Theorem 3: Public theorem after closed fence without heading.", 4), sourceId: unclosedDetailsInFenceSrc },
+        ],
+        query: "Public theorem after closed fence",
+        maxCharacters: 8000,
+        preferChunkId: "udf-p4",
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [unclosedDetailsInFenceSrc],
+            admissibleSourceVersions: { [unclosedDetailsInFenceSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(unclosedDetailsRes.map(c => c.id)).toEqual(["udf-p4"]);
+      expect(JSON.stringify(unclosedDetailsRes)).not.toContain("Hidden answer");
+    });
+
+    it("binary-searches chunk boundaries in O(N log N) on 500-chunk sources and handles shortest-form CommonMark <!--> / <!---> comments", () => {
+      // Round-4 Step-1 P1 #2 + Step-2 P2:
+      const largeSrc = "large-500-chunk-source";
+      const largeChunks: SourceChunk[] = Array.from({ length: 500 }, (_, i) => ({
+        ...chunk(
+          `lg-${i + 1}`,
+          i === 249
+            ? "<!--> <!---> Definition 250: Contraction mapping on complete metric spaces."
+            : `<!--> Paragraph ${i + 1}: Preliminary background note ${i + 1} with bound a < b.`,
+          i + 1,
+        ),
+        sourceId: largeSrc,
+      }));
+
+      const runLarge = () =>
+        rankMaterialContext({
+          chunks: largeChunks,
+          query: "Contraction mapping complete metric spaces",
+          maxCharacters: 4000,
+          pedagogicalGraph: {
+            concepts: [
+              { id: "c-contraction", label: "Contraction Mapping", evidenceChunkIds: ["lg-250"], privacyEpoch: 1 },
+            ],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [largeSrc],
+              admissibleSourceVersions: { [largeSrc]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+
+      // Warmup JIT once before timing.
+      expect(runLarge()[0]?.id).toBe("lg-250");
+      const t0 = performance.now();
+      const timedRanked = runLarge();
+      const elapsedMs = performance.now() - t0;
+      expect(timedRanked[0]?.id).toBe("lg-250");
+      expect(elapsedMs).toBeLessThan(200);
+
+      // Verify shortest-form `<!-->` and `<!--->` never pair with a later `-->` across chunks
+      // (which would otherwise leave `<!--\n## Answer Key` unclosed inside the unwrapped slice),
+      // while keeping `sc-p1` and `sc-p5` public and sealing `sc-p2`, `sc-p3`, and unlabeled `sc-p4`.
+      const shortCommentSrc = "short-empty-html-comments";
+      const shortCommentChunks: SourceChunk[] = [
+        {
+          ...chunk("sc-p1", "<!--> Public Theorem 1: Spectral radius formula. <!--->", 1),
+          sourceId: shortCommentSrc,
+        },
+        { ...chunk("sc-p2", "<!--\n## Answer Key", 2), sourceId: shortCommentSrc },
+        { ...chunk("sc-p3", "Secret eigenvalue answer lambda = 7\n-->", 3), sourceId: shortCommentSrc },
+        { ...chunk("sc-p4", "Unlabeled secret continuation lambda_2 = 3", 4), sourceId: shortCommentSrc },
+        { ...chunk("sc-p5", "## Public Section\nCorollary 1: Gelfand spectral limit.", 5), sourceId: shortCommentSrc },
+      ];
+      const shortRanked = rankMaterialContext({
+        chunks: shortCommentChunks,
+        query: "Spectral radius Gelfand spectral limit eigenvalue",
+        maxCharacters: 8000,
+        preferChunkId: "sc-p4",
+        preferPage: 3,
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [shortCommentSrc],
+            admissibleSourceVersions: { [shortCommentSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(shortRanked.map(c => c.id)).toEqual(["sc-p5", "sc-p1"]);
+      expect(JSON.stringify(shortRanked)).not.toContain("lambda = 7");
+      expect(JSON.stringify(shortRanked)).not.toContain("lambda_2 = 3");
     });
   });
 });
