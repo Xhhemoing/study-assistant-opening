@@ -16,6 +16,56 @@ const radical = String.raw`计算 $\sqrt{8} - \sqrt{2}$`;
 const sqrtTwo = String.raw`\sqrt{2}`;
 
 describe("symbolic teaching choice", () => {
+  it("abstains when an unfenced distractor could render as a second correct option", () => {
+    const stem = "Evaluate $\\sqrt{49}$";
+    const distractor = "3\\!+1";
+    expect(check(stem, choice("7", distractor), "A", "B. " + distractor)).toBeNull();
+    expect(check(stem, choice("7", distractor), "A", "A. 7")).toBeNull();
+    expect(check(stem, choice("7", "$" + distractor + "$"), "A", "B. $" + distractor + "$")).toBe("incorrect");
+  });
+
+  it.each(["\\!", "\\,", "\\;", "\\:", "\\+", "\\-", "\\/", "\\{", "\\}", "\\[", "\\]",
+    "\\(", "\\)", "\\|", "\\^", "\\_", "\\$", "\\\\", "\\~", "\\ ", "~"])(
+    "abstains on unfenced punctuation escape or spacing %j in a stem, candidate, or proof",
+    escape => {
+      const expression = "3" + escape + "+1";
+      expect(check("Evaluate " + expression, numeric, "4", "4")).toBeNull();
+      expect(check("Evaluate $sqrt(16)$", numeric, "4", expression)).toBe("unparseable");
+      expect(verifySymbolicStepEquivalence({ kind: "scalar", reference: expression, student: "4" })).toBe("unverified");
+      expect(verifyStandaloneProofEquationClaim(expression + " = 4").status).toBe("unverified");
+    },
+  );
+
+  it("uses TeX spacing only inside a fenced calculus operand", () => {
+    const integral = "\\int (3\\!+1)\\,dx";
+    const derivative = "\\frac{d}{dx}((3\\!+1)x)";
+    const interaction = choice("4x+C", "7x+C");
+    expect(check("Evaluate " + integral, interaction, "A", "A. 4x+C")).toBeNull();
+    expect(check("Evaluate $" + integral + "$", interaction, "A", "A. 4x+C")).toBe("correct");
+    expect(verifyStandaloneProofEquationClaim(integral + " = 4x+C").status).toBe("unverified");
+    expect(verifyStandaloneProofEquationClaim("$" + integral + " = 4x+C$").status).toBe("equivalent");
+    expect(check("Differentiate " + derivative, numeric, "4", "4")).toBeNull();
+    expect(check("Differentiate $" + derivative + "$", numeric, "4", "4")).toBe("correct");
+    expect(verifyStandaloneProofEquationClaim("\\frac{d}{dx}(3\\!+1)x = 4").status).toBe("unverified");
+  });
+
+  it.each(["\\!", "\\;", "\\:", "\\ ", "\\,\\,"])(
+    "rejects %j before an unfenced integral differential", separator => {
+      const integral = "\\int 3" + separator + "dx";
+      const interaction = choice("3x+C", "4x+C");
+      expect(check("Evaluate " + integral, interaction, "A", "A. 3x+C")).toBeNull();
+      expect(verifyStandaloneProofEquationClaim(integral + " = 3x+C").status).toBe("unverified");
+      expect(check("Evaluate $" + integral + "$", interaction, "A", "A. 3x+C")).toBe("correct");
+    },
+  );
+
+  it("allows an unfenced integral's final thin space and escaped literal multiplication", () => {
+    const interaction = choice("x^2+C", "x^3+C");
+    expect(check("Evaluate \\int 2\\*x \\, d x?", interaction, "A", "A. x^2+C")).toBe("correct");
+    expect(verifyStandaloneProofEquationClaim("\\int 2\\*x \\, d x = x^2+C").status).toBe("equivalent");
+    expect(check("Evaluate sqrt(4) \\* 3", numeric, "6", "6")).toBe("correct");
+  });
+
   it.each(["A. 3", "A. 2 = 3", "A. 2x = 3x", "（A）：3"])(
     "rejects a contradictory arithmetic key suffix %s", key => {
       expect(check("Calculate 1+1", choice("2", "3"), key, "A. 2")).toBeNull();
@@ -358,6 +408,81 @@ function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedba
 }
 
 describe("symbolic proof feedback", () => {
+  it.each(["2=3", "2=2x=3", "2x=2x+1", "2x+1=2x+2"])(
+    "vetoes an impossible derivative equality chain %s", chain => {
+      const claim = "$\\frac{d}{dx}(x^2)=" + chain + "$";
+      expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "inequivalent", unconditional: false });
+      expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+    },
+  );
+
+  it("distinguishes derivative chains that agree everywhere or only at a point", () => {
+    const derivative = "\\frac{d}{dx}(x^2)";
+    expect(verifyStandaloneProofEquationClaim("$" + derivative + "=2x=x+x$"))
+      .toEqual({ status: "equivalent", unconditional: true });
+    expect(verifyStandaloneProofEquationClaim("$" + derivative + "=2=x+1$"))
+      .toEqual({ status: "unverified", unconditional: false });
+  });
+
+  it.each([
+    ["Assume x+1=x.", "Suppose the opposite."],
+    ["x+1=x", "Assume this equality for contradiction."],
+  ])("preserves an explicit proof by contradiction beginning with %s", (claim, comment) => {
+    const feedback = proof(claim, "correct");
+    const first = { ...feedback.steps[0]!, feedback: comment };
+    feedback.steps = [first, { ...first, stepIndex: 2, claim: "1=0", feedback: "Subtract x." },
+      { ...first, stepIndex: 3, claim: "Reject the assumption.", feedback: "No such x exists." }];
+    expect(proofFeedbackAllowsOutcome("correct", feedback)).toBe(true);
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
+  it.each(["Assume the equation for contradiction.", "This is the derived contradiction."])(
+    "preserves a step whose feedback identifies its role in a contradiction proof: %s", comment => {
+      const feedback = proof("1=0", "correct");
+      feedback.steps[0]!.feedback = comment;
+      expect(adjudicate("correct", feedback)).toBe("correct");
+    },
+  );
+
+  it("still vetoes a false direct calculation after an assumption without a rejection", () => {
+    const feedback = proof("Assume x = 2.", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "1=0" });
+    expect(proofFeedbackAllowsOutcome("correct", feedback)).toBe(false);
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it("requires a supposition before the refuted step", () => {
+    const feedback = proof("1=0", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "Assume x=2 for contradiction." },
+      { ...feedback.steps[0]!, stepIndex: 3, claim: "Reject the assumption." });
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it("does not mistake a reference to an assumption for introducing one", () => {
+    const feedback = proof("1=0", "correct");
+    feedback.steps[0]!.feedback = "Reject the assumption.";
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it.each(["Work in the field F₂", "\\mathbb{F}_{2}", "GF(2)", "\\mathbb{Z}/2\\mathbb{Z}",
+    "modulo 2", "\\pmod{2}", "char 2", "boolean algebra", "有限域", "模 2", "matrix algebra", "linear operators"])(
+    "does not apply real-scalar verification in context %s", context => {
+      const feedback = proof(context, "correct", false);
+      feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: true, claim: "1+1=0" });
+      expect(adjudicate("correct", feedback)).toBe("correct");
+    },
+  );
+
+  it("retains a negative proof verdict when feedback establishes modular arithmetic", () => {
+    const claim = "sqrt(4) = 2";
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "equivalent", unconditional: true });
+    const feedback = proof(claim, "incorrect");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: false, claim: "Check the choice of root.",
+      feedback: "No principal square root was specified in F₅." });
+    expect(proofFeedbackAllowsOutcome("incorrect", feedback)).toBe(true);
+    expect(adjudicate("incorrect", feedback)).toBe("incorrect");
+  });
+
   it.each([
     "x^2 + C = x^2 + C + 1",
     "x^2 + C + 1 = x^2 + x + C = x^2 + C",
@@ -486,6 +611,25 @@ describe("symbolic proof feedback", () => {
 });
 
 describe("structured symbolic steps", () => {
+  it.each(["(1+\\sqrt{-x^2})^0", "(1+\\sqrt{x^2(x-1)})^0"])(
+    "abstains when an integrand's domain includes isolated or non-interior points: %s", reference => {
+      const particular = "x*" + reference;
+      const student = particular + " + C";
+      const claim = "\\int " + reference + "\\,dx";
+      expect(verifySymbolicStepEquivalence({ kind: "indefinite-integral", reference, student })).toBe("unverified");
+      expect(check("Evaluate the indefinite integral " + claim, choice("$" + student + "$", "$" + particular + "$"),
+        "A", "A. $" + student + "$")).toBeNull();
+      expect(verifyStandaloneProofEquationClaim("$" + claim + " = " + student + "$").status).toBe("unverified");
+    },
+  );
+
+  it("abstains when a candidate antiderivative has a radicand boundary erased by differentiation", () => {
+    const input = { kind: "indefinite-integral" as const, reference: "2x" };
+    expect(verifySymbolicStepEquivalence({ ...input, student: "x^2+(1+sqrt(x^2))^0+C" })).toBe("unverified");
+    expect(verifySymbolicStepEquivalence({ ...input, student: "x^2+(1+sqrt(x^2+1))^0+C" })).toBe("equivalent");
+    expect(verifySymbolicStepEquivalence({ ...input, student: "x^3/x+C" })).toBe("inequivalent");
+  });
+
   it("abstains when the integration variable is C", () => {
     const integral = String.raw`\int 2C\,dC`;
     expect(check(`Evaluate $${integral}$`, choice("C^2", "C^3"), "A", "A. C^2")).toBeNull();

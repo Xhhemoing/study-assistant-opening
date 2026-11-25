@@ -1,4 +1,4 @@
-import type { TeachingQuestionInteraction } from "@aistudy/contracts";
+import type { ProofFeedback, TeachingQuestionInteraction } from "@aistudy/contracts";
 import {
   differentiate,
   evaluateScalar,
@@ -32,6 +32,8 @@ const SCALAR_FUNCTIONS = new Set(["sqrt", "abs", "ln", "sin", "cos", "exp"]);
 const TEX_SCALAR_COMMANDS = new Set(["\\sin", "\\cos", "\\ln", "\\exp", "\\cdot", "\\times", "\\div"]);
 const TEX_CLOSERS = new Map([["(", ")"], ["[", "]"], ["|", "|"], ["\\|", "\\|"]]);
 const KEY_PREFIX = /^(?:答案|答|answer)\s*[:：]\s*/i;
+const UNFENCED_ESCAPE = /\\(?![A-Za-z*])/;
+const INTEGRAL_COMMA = /^\\,[ \t\r\n]*d[ \t\r\n]*[A-Za-z]\b/;
 
 type ChoiceOptions = Extract<TeachingQuestionInteraction, { kind: "choice" }>["options"];
 type Outcome = "correct" | "incorrect" | "unparseable" | null;
@@ -71,6 +73,7 @@ function scanMathSpans(text: string, outsideMath: (char: string, index: number) 
     } else if (escaped) {
       escaped = false;
     } else if (char === "\\") {
+      if (!fence && !outsideMath(char, index)) return false;
       escaped = true;
     } else if (char === "$") {
       let width = 1;
@@ -85,11 +88,17 @@ function scanMathSpans(text: string, outsideMath: (char: string, index: number) 
   return fence === 0;
 }
 
-function keepsSymbolicMeaningWhenRendered(text: string): boolean {
+function keepsSymbolicMeaningWhenRendered(text: string, allowIntegralDifferential = false): boolean {
   return !text.split(/\r\n?|\n/).some(line => (
     /^\s*(?:-+|[+*]|\d{1,9}[.)]|#{1,6})(?:\s|$)/.test(line) ||
     /^\s*(?:_\s*){3,}$/.test(line) || /^(?: {4}|\t)\s*\S/.test(line)
-  )) && scanMathSpans(text, char => char !== "*");
+  )) && scanMathSpans(text, (char, index) => {
+    if (char === "*" || char === "~") return false;
+    if (char !== "\\" || /[A-Za-z*]/.test(text[index + 1] ?? "")) return true;
+    // The target parser checks that this comma ends the integral header.
+    return allowIntegralDifferential && INTEGRAL_COMMA.test(text.slice(index)) &&
+      /\\int(?![A-Za-z])/.test(text.slice(0, index));
+  });
 }
 
 function unwrapMath(text: string): string | null {
@@ -262,8 +271,10 @@ function parseExpression(text: string, derivativeOperand = false, texOperand = f
   const body = unwrapMath(text);
   const wrapped = text.trim().startsWith("$");
   if (!body) return null;
-  const source = wrapped || texOperand ? body : body.replace(/\\\*/g, "*");
-  const texMode = wrapped || texOperand || /\\|~/.test(source);
+  const fenced = wrapped || texOperand;
+  if (!fenced && (body.includes("~") || UNFENCED_ESCAPE.test(body))) return null;
+  const source = fenced ? body : body.replace(/\\\*/g, "*");
+  const texMode = fenced || source.includes("\\");
   const validated = validateTexExpression(source, texMode);
   if (!validated) return null;
   // The engine allows adjacent identifiers as implicit products. Reject words before normalization.
@@ -325,9 +336,9 @@ function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: Domai
   const variable = domain?.variable ?? source.variables.values().next().value ?? "x";
   if ((kind === "indefinite-integral" && variable === "C") || [...source.variables].some(name => name !== variable)) return null;
   const targetDomain = { ...domain, variable };
+  if (kind !== "scalar" && !hasDerivativeInterior(source, targetDomain)) return null;
   let expected = source.expr;
   if (kind === "derivative") {
-    if (!hasDerivativeInterior(source, targetDomain)) return null;
     const derivative = differentiate(source.expr, variable);
     if (!derivative) return null;
     // Differentiation can erase a restriction, such as ln(x) requiring x > 0.
@@ -348,20 +359,22 @@ function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: Domai
 function parseTargetExpression(text: string, promptKind: SymbolicKind, domain?: DomainSpec): Target | null {
   const body = unwrapMath(text);
   if (!body) return null;
+  const wrapped = text.trim().startsWith("$");
   const derivative = /^\\(?:dfrac|tfrac|frac)[ \t\r\n]*\{[ \t\r\n]*d[ \t\r\n]*\}[ \t\r\n]*\{[ \t\r\n]*d[ \t\r\n]*([A-Za-z])[ \t\r\n]*\}[ \t\r\n]*(.+)$/s.exec(body);
-  const integral = /^\\int(?![A-Za-z])[ \t\r\n]*(.+?)(?:\\[,;! ]|[ \t\r\n])*d[ \t\r\n]*([A-Za-z])$/s.exec(body);
+  const integral = /^\\int(?![A-Za-z])[ \t\r\n]*(.+?)((?:\\[,;:! ]|[ \t\r\n])*)d[ \t\r\n]*([A-Za-z])$/s.exec(body);
   if ((derivative || integral) && /[^\S \t\r\n]/.test(body)) return null;
+  if (!wrapped && integral && !/^[ \t\r\n]*(?:\\,[ \t\r\n]*)?$/.test(integral[2]!)) return null;
   const kind = derivative ? "derivative" : integral ? "indefinite-integral" : promptKind;
   if ((promptKind !== "scalar" && kind !== promptKind) || (kind === "indefinite-integral" && !integral)) return null;
-  const variable = derivative?.[1] ?? integral?.[2];
+  const variable = derivative?.[1] ?? integral?.[3];
   if (domain?.variable && variable && domain.variable !== variable) return null;
   const expression = derivative ? derivative[2]! : integral ? integral[1]! : text;
-  const source = parseExpression(expression, Boolean(derivative), Boolean(derivative || integral));
+  const source = parseExpression(expression, Boolean(derivative), wrapped);
   return source && makeTarget(kind, source, variable ? { ...domain, variable } : domain);
 }
 
 function parseQuestion(question: string): Target | null {
-  if (question.length > MAX_STEM_LENGTH || !keepsSymbolicMeaningWhenRendered(question)) return null;
+  if (question.length > MAX_STEM_LENGTH || !keepsSymbolicMeaningWhenRendered(question, true)) return null;
   const prompt = /^(?:(求导|differentiate\b)|(求不定积分|(?:evaluate|find|compute)\s+(?:the\s+)?indefinite\s+integral\b)|(?:化简|展开|计算|求值|simplify\b|expand\b|calculate\b|evaluate\b))\s*[:：]?\s*(.+)$/is.exec(question.trim());
   if (!prompt) return null;
   const kind = prompt[1] ? "derivative" : prompt[2] ? "indefinite-integral" : "scalar";
@@ -407,6 +420,10 @@ function compareToTarget(candidate: ParsedExpression, target: Target): Verificat
   if (!family) return { status: "unverified" };
   if (family.coefficient.n === 0n) return { status: "inequivalent", reason: "missing_additive_constant" };
   const result = verifyIndefiniteIntegral({ student: family.expr, integrand: expected, domain });
+  if (result.status === "equivalent") {
+    const inspected = inspectExpression(family.expr);
+    return inspected && hasDerivativeInterior(inspected, domain) ? result : { status: "unverified" };
+  }
   if (result.reason !== "natural_domain_mismatch") return result;
   // Require a hole in the candidate itself at an interior point of the integrand's domain.
   const familyDomain = withZeroValue(family.expr);
@@ -744,6 +761,10 @@ function scalarProofContradiction(left: ParsedExpression, right: ParsedExpressio
   return verifyScalarEquivalence(difference, sameDomainConstant, domain).status === "equivalent";
 }
 
+function scalarChainContradiction(terms: ParsedExpression[]): boolean {
+  return terms.some((left, index) => terms.slice(index + 1).some(right => scalarProofContradiction(left, right)));
+}
+
 function integralChainContradiction(candidates: ParsedExpression[], variable: string): boolean {
   const families = candidates.flatMap(candidate => {
     const family = additiveConstant(candidate.expr, variable);
@@ -798,7 +819,7 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
     const body = claim.trim().replace(
       /^(?:(?:Step\s+\d{1,3}|第\s*\d{1,3}\s*步)\s*[:：.)]\s*|\d{1,3}\.\s+(?![\s+\-−*/^=]))/i, "",
     );
-    if (!keepsSymbolicMeaningWhenRendered(body)) return unverified;
+    if (!keepsSymbolicMeaningWhenRendered(body, true)) return unverified;
     const parts = equalityTerms(body);
     if (!parts || parts.length < 2) return unverified;
     const [first, ...rest] = parts;
@@ -821,11 +842,13 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
           : unverified;
       }
     }
-    if (results.some(result => result.status !== "equivalent")) {
-      const sides = [target.source, ...candidates];
+    if (results.some(result => result.status !== "equivalent") ||
+        (target.kind === "derivative" &&
+          candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent"))) {
       const contradiction = target.kind === "scalar"
-        ? sides.some((left, index) => sides.slice(index + 1).some(right => scalarProofContradiction(left, right)))
-        : candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
+        ? scalarChainContradiction([target.source, ...candidates])
+        : (target.kind === "derivative" && scalarChainContradiction(candidates)) ||
+          candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
       return contradiction ? { status: "inequivalent", unconditional: false } : unverified;
     }
     const unconditional = [target.source, ...candidates].every(expression => !expression.hasDenominator &&
@@ -834,4 +857,30 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
       ).status === "equivalent"));
     return { status: "equivalent", unconditional };
   });
+}
+
+type ProofStep = ProofFeedback["steps"][number];
+
+const NON_REAL_SCALAR_CONTEXT = /\b(?:fields?|rings?|modulo|mod|characteristic|char\s*[0-9p]|boolean|semiring|tropical|matrix|matrices|vectors?|linear\s+operators?|operator\s+algebra|complex\s+numbers?)\b|\bgf\s*\(|\\mathbb\{\s*[FZ]\s*\}|\b[FZ](?:_?\{?[0-9]+\b|_\{?p\b|[₀-₉]+)|\\(?:pmod|bmod)\b|有限域|特征\s*[0-9p]|模\s*[0-9p]|同余|布尔|矩阵|向量|算子/iu;
+const PROOF_SUPPOSITION = /\b(?:assume\w*|assuming|suppose\w*|supposing|hypothesi[sz]\w*|(?:for|by)\s+contradiction|towards?\s+(?:a\s+)?contradiction|contrary|if\s+possible)\b|^\s*(?:assumption|hypothesis)\s*[:：]|假设|不妨设|反证|归谬|若.*成立/iu;
+const PROOF_REFUTATION = /\b(?:contradict\w*|absurd\w*|impossib\w*|false|reject\w*|refut\w*|invalid|fails|cannot|can't|no\s+(?:(?:real\s+)?solutions?|such)|does\s+not\s+exist|disprov\w*)\b|\\(?:neq|ne)\b|!=|≠|矛盾|反证|归谬|不成立|荒谬|否定|舍去|无解|不存在/iu;
+const EXPLICIT_COUNTERFACTUAL = /\b(?:(?:for|by)\s+contradiction|towards?\s+(?:a\s+)?contradiction|(?:derived|resulting)\s+contradiction|(?:derives?|yields?|gives?|shows?|is)\s+(?:a|the)\s+contradiction)\b|^\s*contradiction\b|反证|归谬|(?:推出|得到|得出|导出)矛盾/iu;
+
+function stepMentions(step: ProofStep, pattern: RegExp): boolean {
+  return pattern.test(step.claim) || pattern.test(step.feedback);
+}
+
+/** A real-scalar proof check requires the equation to be asserted in that context. */
+export function proofContextSupportsRealScalarCheck(
+  steps: readonly ProofStep[], step: ProofStep, outcome: "correct" | "incorrect",
+): boolean {
+  if (steps.some(candidate => stepMentions(candidate, NON_REAL_SCALAR_CONTEXT))) return false;
+  if (outcome === "incorrect") return true;
+  if (stepMentions(step, EXPLICIT_COUNTERFACTUAL)) return false;
+  const supposition = steps.some(candidate =>
+    candidate.stepIndex <= step.stepIndex && stepMentions(candidate, PROOF_SUPPOSITION));
+  const refutation = supposition && steps.some(candidate =>
+    PROOF_REFUTATION.test(candidate.feedback) ||
+    (candidate.stepIndex >= step.stepIndex && PROOF_REFUTATION.test(candidate.claim)));
+  return !refutation;
 }
