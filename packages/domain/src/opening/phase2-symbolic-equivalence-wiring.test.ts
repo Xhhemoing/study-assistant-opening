@@ -1212,6 +1212,116 @@ describe("symbolic proof feedback Round 15", () => {
   });
 });
 
+describe("symbolic proof feedback Round 16", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    "The claim that the assumption is false still needs proof.",
+    "The assertion that the hypothesis is false awaits further verification.",
+    "It remains to be shown that the assumption is false.",
+    "The conclusion that this gives a contradiction has not yet been justified.",
+    "The contention that the assumption is false.",
+    "原假设不成立的说法仍待证明。",
+    "还需进一步证明原假设不成立。",
+    "原假设不成立这一主张缺少依据。",
+    "推出矛盾这一结论尚未得到验证。",
+    "The instructor wrote “this gives a contradiction” on the board as an example of wording.",
+    'The handout says "this is impossible".',
+    "The instructor repeated 'the assumption is false'.",
+    "The worksheet quotes ‘this gives a contradiction’.",
+    "教材将「推出矛盾」作为表述示例。",
+    "课本写着『原假设不成立』。",
+    "黑板上的《矛盾》是标题。",
+    "As an illustration, this gives a contradiction.",
+    "作为措辞示例，这里推出矛盾。",
+  ])("keeps the supposition open in %s", feedback => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", feedback), "unverified");
+  });
+
+  it.each([
+    "The contradiction shows that the assumption is false.",
+    "The claim that the assumption is false follows from $1=0$.",
+    "The result doesn't hold. This gives a contradiction.",
+    "由此推出矛盾，故原假设不成立。",
+    "讲义引用『归谬』；由此推出矛盾。",
+  ])("recognizes a proved rejection or contradiction in %s", feedback => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", feedback), "correct");
+  });
+
+  it.each([
+    ["Work over ℝ. 1+1=0, and the following step uses F₂.", "unverified"],
+    ["Work over ℝ. 1+1=0, the second calculation takes place in F₂.", "unverified"],
+    ["Work over ℝ. 1+1=0, and step 2 uses F₂.", "unverified"],
+    ["在 ℝ 上计算。1+1=0，下一步使用 F₂。", "unverified"],
+    ["1+1=0, because we are working in F₂.", "correct"],
+    ["1+1=0, since this is computed over F₂.", "correct"],
+    ["1+1=0，因为我们在 F₂ 中运算。", "correct"],
+    ["1+1=0, because the next line works in F₂.", "unverified"],
+    ["Work over ℝ. One plus one equals zero. After this step, switch to F₂.", "unverified"],
+    ["Over ℝ. One plus one equals zero. We work in F₂.", "unverified"],
+    ["Over F₂. One plus one equals zero. We work over ℝ.", "unverified"],
+    ["在 ℝ 上运算。一加一等于零。此步完成后改用 F₂。", "unverified"],
+    ["Working in F₂, one plus one equals zero.", "correct"],
+    ["在 F₂ 中运算，一加一等于零。", "correct"],
+    ["Work over F₂. 1+1=0! in F₂. Now work over ℝ. 1+1=0.", "unverified"],
+    ["Work over F₂. 1+1=0!! in F₂. Now work over ℝ. 1+1=0.", "unverified"],
+    ["在 F₂ 上计算。1+1=0! 在 F₂ 中。然后在 ℝ 上计算。1+1=0。", "unverified"],
+    ["Work over F₂. 1+1=0 xy. Now work over ℝ. 1+1=0.", "unverified"],
+    ["Work over F₂. 1+1=0 cos x. Now work over ℝ. 1+1=0.", "unverified"],
+    ["Work over F₂: 1+1=0! Now work over ℝ.", "correct"],
+    ["Work over F₂. 1+1=0 holds. Now work over ℝ.", "correct"],
+    ["Work over F₂. 1+1=0 mod 2. Now work over ℝ.", "correct"],
+  ] as const)("grades the current domain in %s", (transcription, expected) => {
+    expectOutcome("correct", sequence("1+1=0"), expected, { transcription });
+  });
+
+  it.each(["3=1.", "Three equals one."])("applies a relative transition to the subsequent step in %s", next => {
+    const steps = sequence("1+1=0", "3=1").steps;
+    const transcription = "Work over ℝ. 1+1=0. After this step, work over F₂. " + next;
+    const usesReal = proofStepUsesRealScalar(steps, transcription, []);
+    expect(steps.map(step => usesReal.get(step))).toEqual([true, false]);
+  });
+
+  it.each([
+    ["It is false that the proof lacks justification.", "unverified"],
+    ["It is false that the proof lacks justification and skips a necessary step.", "unverified"],
+    ["It is simply not accurate to say that the proof skips a necessary step.", "unverified"],
+    ["We cannot fairly claim that the proof skips a necessary step.", "unverified"],
+    ["There is no basis in saying the proof skips a necessary step.", "unverified"],
+    ["说论证缺少理由是不准确的。", "unverified"],
+    ["不能认为论证缺少理由。", "unverified"],
+    ["Check whether the expansion is valid, but your proof skips a necessary step.", "incorrect"],
+    ["Check whether the expansion is valid, and their proof skips a necessary step.", "incorrect"],
+    ["Check whether the expansion is valid but overall reasoning lacks justification.", "incorrect"],
+    ["请检查展开是否成立，但你的证明缺少理由。", "incorrect"],
+    ["请检查展开是否成立但学生的证明缺少理由。", "incorrect"],
+    ["The proof skips a necessary step.", "incorrect"],
+    ["你的证明缺少理由。", "incorrect"],
+    ["It is false that the proof lacks justification, but your proof skips a necessary step.", "incorrect"],
+    ["Check whether your proof skips a necessary step.", "unverified"],
+  ] as const)("isolates asserted critiques in %s", (feedback, expected) => {
+    expectOutcome("incorrect", incorrectEquality(identity), expected, { feedback });
+  });
+
+  it.each([16, 48])("bounds terminal indexing for %s overlapping candidates", count => {
+    const steps = sequence(...Array.from({ length: count }, (_, index) => "a".repeat(index + 1))).steps;
+    const originalSet = Map.prototype.set;
+    let numericKeys = 0;
+    Map.prototype.set = function (key: unknown, value: unknown) {
+      if (typeof key === "number") numericKeys++;
+      return Reflect.apply(originalSet, this, [key, value]) as Map<unknown, unknown>;
+    };
+    let usesReal: ReadonlyMap<(typeof steps)[number], boolean>;
+    try {
+      usesReal = proofStepUsesRealScalar(steps, "b".repeat(12000), []);
+    } finally {
+      Map.prototype.set = originalSet;
+    }
+    expect(steps.map(step => usesReal.get(step))).toEqual(Array(count).fill(true));
+    expect(numericKeys).toBeLessThanOrEqual(count);
+  });
+});
+
 describe("symbolic proof feedback", () => {
   it.each([
     "$1+1=0$.", "$$1+1=0$$.", "1+1=0。", "1+1=0.", "x+1=x+2;", "Step 1: $1=0$；：",

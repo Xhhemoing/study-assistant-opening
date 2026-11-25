@@ -983,7 +983,8 @@ const DERIVED_CONTRADICTION = new RegExp([
   /^\s*(?:矛盾|归谬|荒谬)[。！!\s]*$|(?:导出|推出|得到|得出|产生|出现|构成|造成|发现|导致|由此(?:可知|可见)?|自相)\s*矛盾(?!\s*的)|(?:这|此结论|此结果)(?:显然|实在|确实)?(?:是|很|太)?(?:荒谬|不可能)(?:(?!的)|的(?=[。！!\s]*$))|与[^，。！？；：,.!?;:\r\n]+矛盾(?=\s*(?:$|[，。！？；：,.!?;:]|因此|所以|从而|故))|(?:由此|从而|据此)归谬(?!\s*的)/u.source,
 ].join("|"), "iu");
 const LEXICAL_PROOF_SUBJECT = /^(?:(?:the|a|an|this|that|our)\s+)?(?:(?:technical|ordinary|english|chinese|relevant|quoted|following|new|mathematical|logical|current|next|first|second|stated|purported|known|chosen)\s+)*(?:word|term|terminology|vocabulary|topic|subject|theme|title|name|label|concept|notion|definition|meaning|section|chapter|lesson|example|exercise|question|sense|spelling)s?\b|(?:介绍|讨论|讲解|解释|定义).*(?:术语|概念)|^(?:本|这一|该)(?:节|章|课|例|题)(?:介绍|讨论|讲解|解释|定义)/iu;
-const QUOTED_CONTRADICTION = /["'“‘「『]\s*(?:contradictions?|矛盾)\s*["'”’」』]/giu;
+const PROOF_QUOTATION = /\$\$[^\r\n]+?\$\$|\$[^$\r\n]+\$|"[^"\r\n]+"|“[^”\r\n]+”|‘[^’\r\n]+’|(?<![\p{L}\p{N}])'(?:[^'\r\n]|(?<=[\p{L}])'(?=[\p{L}]))+'(?![\p{L}\p{N}])|「[^」\r\n]+」|『[^』\r\n]+』|《[^》\r\n]+》/gu;
+const ILLUSTRATIVE_PROOF_ROLE = /\bas\s+an?\s+(?:example|illustration|template|sample|phrase|wording)\b|作为(?:措辞|表述|写法|用语)?的?(?:例子|示例|示范)|举例(?:说明|而言)/iu;
 const INDIRECT_QUESTION = /\b(?:whether|(?:wonder|ask|check|test|see|question|consider)\w*\s+(?:if|whether|what)|what\s+if)\b|是否|能否/iu;
 const CONDITIONAL_DOMAIN = /\b(?:if|whether|suppose|supposing|assuming|unless|imagine|in\s+case)\b|(?:如果|假若|若是?|倘若|要是|一旦)\s*(?=在|改在|换成|切换到)/iu;
 const DOMAIN_MODAL = /\b(?:would|could|might)\b/iu;
@@ -1001,7 +1002,9 @@ const ENGLISH_DISCHARGE_HEDGE = String.raw`(?:${MODAL}|not|no|never|neither|nor|
 const CHINESE_DISCHARGE_HEDGE = /(?:无|没有|未曾?|未能|并未|并非|并不|不是|不会|不能|无法|不足以|尚未|仍未|还未|可能|也许|或许|未必|不一定|有待|仍需)/u.source;
 const PENDING_REJECTION = /^[\s,，"”’')）]*(?:(?:remains?|is|was|are|were|be|being|been)[\s,]+(?:(?:still|actually|clearly|however|indeed)[\s,]+)?(?:unproved|unproven|unverified|open|pending|doubtful|unjustified|unsupported|unestablished|questionable|uncertain|disputed|premature|false|wrong|incorrect|invalid|mistaken)|(?:has|have|had)\s+(?:not|never)\s+been\s+(?:proved|proven|shown|established))\b/iu;
 const CHINESE_PENDING_REJECTION = /^[\s,，"”’')）]*(?:的)?(?:这一|该|上述)?(?:说法|结论|断言|判断|观点)?\s*(?:(?:尚未|未经|未获|有待|并未)(?:证明|证实|确立|成立)|(?:是|为)?(?:存疑|不成立|错误|有误|站不住脚))/u;
-const REJECTION_AS_TOPIC = /^(?:(?:consider|discuss|test|check|examine|question)\s+)?(?:(?:the|a|an|this|that)\s+)?(?:claim|assertion|statement|conclusion|idea)\s+that\b/iu;
+const UNPROVED_PROOF_ROLE = /\b(?:(?:needs?|requires?|awaits?|lacks?|wants?|demands?|is\s+(?:missing|without))\s+(?:(?:further|a|any|valid|rigorous)\s+)*(?:to\s+be\s+(?:prov|verif|justif|establish|demonstrat|show|confirm)\w*|proof|justification|verification|derivation|argument|evidence|support)|(?:remains?|is(?:\s+still)?)\s+(?:to\s+be\s+(?:prov|verif|justif|establish|demonstrat|show|confirm)\w*|unprov\w*|unverif\w*|unjustif\w*|unestablished|unsupported|open)|(?:has|have|had)\s+not\s+(?:yet\s+)?been\s+(?:prov|verif|justif|establish|demonstrat|show|confirm)\w*)\b|(?:仍待|尚待|有待|还需|仍需|尚需|需要|尚未|还未|未获|未经|缺乏|缺少)(?:(?:得到|获得?|进一步)\s*)?\s*(?:证明|证实|验证|推导|论证|说明|依据|理由)/iu;
+const REJECTION_AS_TOPIC = /^(?:(?:consider|discuss|test|check|examine|question)\s+)?(?:(?:the|a|an|this|that)\s+)?(?:claim|assertion|statement|conclusion|idea|view|contention)\s+that\b/iu;
+const ASSERTED_PROOF_PREDICATE = /\b(?:(?:follows?|results?)\s+from|(?:is|was|has\s+been)\s+(?:proved|proven|verified|justified|shown|established|demonstrated|confirmed|supported)|(?:we|this|that)\s+(?:prov|verif|justif|establish|demonstrat|show|confirm)\w*)\b/iu;
 const REJECTION_ASIDE = /^\s*(?:\([^()]*\)|（[^（）]*）|[,，][^,，]*[,，])/u;
 const END_OF_REJECTION = /^[\s.。!！"”’')）]*$/u;
 
@@ -1077,7 +1080,9 @@ export function assertiveProseSentences(text: string): string[] {
   return splitProseSentences(text).filter(sentence => !endsInQuestion(sentence));
 }
 
-function advanceProofDomain(domain: ScalarDomain, texts: readonly (string | undefined)[]): ScalarDomain {
+function advanceProofDomain(
+  domain: ScalarDomain, texts: readonly (string | undefined)[], onDomain?: (domain: ScalarDomain) => void,
+): ScalarDomain {
   for (const text of texts) {
     if (!text) continue;
     // Keep characteristic and field notation intact when splitting clauses.
@@ -1111,6 +1116,7 @@ function advanceProofDomain(domain: ScalarDomain, texts: readonly (string | unde
           DOMAIN_EXCLUSION_SUFFIX.test(clause);
         if (!excluded) domain = mention.domain;
         else if (mention.domain === "real") domain = "non_real";
+        onDomain?.(domain);
         previousEnd = mention.end;
         index = mention.end - 1;
       }
@@ -1127,23 +1133,35 @@ const SPACE = /\s/u;
 const WORD_CHARACTER = /[\p{L}\p{N}\p{M}_]/u;
 const ALPHABETIC_PROSE = /^[\p{L}\p{M}\s]+[.!?。？！]*$/u;
 const CALCULATION = /[=≠<>≤≥≈]|\\(?:ne|neq|le|leq|ge|geq|approx|equiv)\b|\d\s*[+×÷−-]/u;
-const LATER_DOMAIN_TRANSITION = /\b(?:now|then|next|after\s+which|whereupon|from\s+which\s+point|following\s+which|at\s+which\s+point|thereafter|subsequently|afterwards?|later|hereafter|for\s+the\s+rest)\b|随后|然后|接下来|此后|之后|接着|继而|下面/iu;
+const PROSE_CALCULATION = /\b(?:equals?|is\s+equal\s+to|adds?\s+up\s+to|sums?\s+to|is\s+congruent\s+to|evaluates?\s+to)\b|等于|同余于|相加为|相乘为|计算得/iu;
+const DEFERRED_DOMAIN_TRANSITION = /\b(?:after|following|once)\s+this\b(?:\s+(?:step|line|claim|calculation|equality|equation)\b)?|在?(?:本|此|这一)(?:步骤?|行|式)(?:之后|以后|完成后)|从下一步(?:开始|起)/iu;
+const BEFORE_RELATIVE_TRANSITION = /^(?:[\s.,，;；。]|(?:and|but)\b|并且|而后|且|但是?)*$/iu;
+const OTHER_PROOF_STEP = /\b(?:next|following|subsequent|later|remaining|second|third|final|last)\s+(?:steps?|lines?|parts?|cases?|calculations?|claims?|equalit(?:y|ies)|equations?|stages?)\b|\bsteps?\s+\d+\b|下一(?:步|行|部分)|后续步骤|接下来的步骤|后面的步骤|下式|后面/iu;
+const LATER_DOMAIN_TRANSITION = /\b(?:now|then|next|after\s+which|whereupon|from\s+which\s+point|following\s+which|at\s+which\s+point|thereafter|subsequently|afterwards?|later|hereafter|from\s+now\s+on|for\s+the\s+rest)\b|随后|然后|接下来|此后|之后|接着|继而|下面/iu;
 const PREAMBLE_DOMAIN_SWITCH = /\b(?:switch\w*|shift\w*)\b|切换|改用|改在/iu;
-const DOMAIN_TRANSITION_ACTION = /\b(?:(?:switch\w*|shift\w*|chang\w*|mov\w*)\s+(?:to|into|over\s+to)|(?:work\w*|comput\w*|calculat\w*|operat\w*|reason\w*)\s+(?:in|over|within))\b|(?:继续)?(?:切换至?|切换到|改用|改为|改在|转到|转用|换到|换用|換到|換用)/iu;
+const DOMAIN_SWITCH_ACTION = /\b(?:switch\w*|shift\w*|chang\w*|mov\w*|pass\w*)\s+(?:to|into|over\s+to)\b|切换|改用|改为|改在|转到|转用|换到|换用|換到|換用/iu;
+const DOMAIN_TRANSITION_ACTION = /\b(?:work\w*|comput\w*|calculat\w*|operat\w*|reason\w*)\s+(?:in|over|within)\b/iu;
+const DOMAIN_JUSTIFICATION = /\b(?:because|since|as|for|given\s+that|inasmuch\s+as|seeing\s+that|where)\b|因为|由于|鉴于|既然|其中/iu;
 const POST_CLAIM_DOMAIN_BREAK = /[,，;；]|\b(?:and|but|yet|whereas|while)\b|并且|而后|且|但(?:是)?/giu;
+
+function startsLaterDomain(clause: string): boolean {
+  return DEFERRED_DOMAIN_TRANSITION.test(clause) || OTHER_PROOF_STEP.test(clause) ||
+    LATER_DOMAIN_TRANSITION.test(clause) || DOMAIN_SWITCH_ACTION.test(clause) ||
+    (!DOMAIN_JUSTIFICATION.test(clause) && DOMAIN_TRANSITION_ACTION.test(clause));
+}
 
 function postClaimDomainEnd(text: string): number {
   let start = 0;
   let clauseStart = 0;
   for (const boundary of text.matchAll(POST_CLAIM_DOMAIN_BREAK)) {
     const clause = text.slice(clauseStart, boundary.index);
-    if (LATER_DOMAIN_TRANSITION.test(clause) || DOMAIN_TRANSITION_ACTION.test(clause)) return start;
+    if (startsLaterDomain(clause)) return start;
     if (boundary[0] === ";" || boundary[0] === "；") return boundary.index;
     start = boundary.index;
     clauseStart = start + boundary[0].length;
   }
   const clause = text.slice(clauseStart);
-  return LATER_DOMAIN_TRANSITION.test(clause) || DOMAIN_TRANSITION_ACTION.test(clause) ? start : text.length;
+  return startsLaterDomain(clause) ? start : text.length;
 }
 
 function prepareTranscription(transcription: string) {
@@ -1153,6 +1171,7 @@ function prepareTranscription(transcription: string) {
   const originalIndex: number[] = [];
   let offset = 0;
   let preambleEnd = 0;
+  let firstProseClaim: TextSpan | undefined;
   let inPreamble = true;
   for (const sentence of splitProseSentences(transcription)) {
     const end = offset + sentence.length;
@@ -1171,14 +1190,17 @@ function prepareTranscription(transcription: string) {
         originalIndex.push(offset + index);
       }
       if (inPreamble) {
-        inPreamble = !CALCULATION.test(sentence) && !LATER_DOMAIN_TRANSITION.test(sentence) &&
-          !PREAMBLE_DOMAIN_SWITCH.test(sentence);
+        const proseClaim = PROSE_CALCULATION.exec(sentence);
+        const domainBeforeClaim = proseClaim && !CALCULATION.test(sentence.slice(0, proseClaim.index));
+        if (domainBeforeClaim) firstProseClaim = { start: offset + proseClaim.index, end };
+        inPreamble = !CALCULATION.test(sentence) && !proseClaim && !LATER_DOMAIN_TRANSITION.test(sentence) &&
+          !DEFERRED_DOMAIN_TRANSITION.test(sentence) && !PREAMBLE_DOMAIN_SWITCH.test(sentence);
         if (inPreamble) preambleEnd = end;
       }
     }
     offset = end;
   }
-  return { context: masked.join(""), sentenceEnds, preambleEnd, chars, originalIndex };
+  return { context: masked.join(""), sentenceEnds, preambleEnd, firstProseClaim, chars, originalIndex };
 }
 
 type Transcription = ReturnType<typeof prepareTranscription>;
@@ -1201,9 +1223,9 @@ type MatchNode = {
 };
 type MatchOutput = "proseOutput" | "mathOutput";
 type TerminalSuffixes = {
+  depthBit: bigint;
   liveDepths: bigint;
-  terminalByDepth: Map<bigint, number>;
-  dependents: TerminalSuffixes[];
+  liveOutput: number;
 };
 
 function matchNode(depth: number): MatchNode {
@@ -1219,7 +1241,9 @@ const MATH_CLOSE = /[)\]}）]/u;
 const TEX_NAME_CHARACTER = /[a-z]/iu;
 const HORIZONTAL_WHITESPACE = /[^\S\r\n]/u;
 const PARENTHESIZED_MODULUS = /[(（]\s*mod(?:ulo)?\b/iuy;
-const CHINESE_DOMAIN_AFTER_MATH = /(?:且|而后|并且|但(?:是)?)?\s*(?:随后|然后|接下来|此后|之后|接着|继而|下面|切换|改在|改用|改为|转到|换到|其中特征)/uy;
+const CHINESE_DOMAIN_AFTER_MATH = /(?:且|而后|并且|但(?:是)?)?\s*(?:随后|然后|接下来|此后|之后|接着|继而|下面|切换|改在|改用|改为|转到|换到|其中特征|下一(?:步|行|部分)|后续步骤|因为|由于|鉴于|既然|其中)/uy;
+const PROSE_AFTER_MATH = /(?:in|on|at|by|to|of|or|as|if|so|we|is|be|are|was|were|over|under|with|without|from|into|onto|upon|mod|modulo|where|when|while|whereas|since|because|for|and|but|yet|nor|then|now|next|thus|hence|therefore|though|although|after|before|until|unless|via|per|holds?|gives?|yields?|equals?|shows?|means?|impl(?:ies|y)|proves?|has|have|had|does|do|did|can|may|must|will|would|should|could|which|that|who|whose)(?![\p{L}\p{N}\p{M}_])/iuy;
+const FACTORIAL_CONTINUATION = /[a-z]|[在中下上与且或即时而及]/uy;
 
 function isWordAt(text: string, offset: number): boolean {
   const codeUnit = text.charCodeAt(offset);
@@ -1245,9 +1269,9 @@ function startsMathOperand(text: string, offset: number): boolean {
     return !PARENTHESIZED_MODULUS.test(text);
   }
   if (first === "\\") return TEX_NAME_CHARACTER.test(text[offset + 1] ?? "");
-  const afterFirst = offset + first.length;
-  return DECIMAL_DIGIT.test(first) || (MATH_LETTER.test(first) &&
-    (!isWordAt(text, afterFirst) || /[_\p{N}]/u.test(codePointAt(text, afterFirst))));
+  if (!MATH_LETTER.test(first)) return DECIMAL_DIGIT.test(first);
+  PROSE_AFTER_MATH.lastIndex = offset;
+  return !PROSE_AFTER_MATH.test(text);
 }
 
 function endsMathOperand(text: string, offset: number): boolean {
@@ -1266,6 +1290,9 @@ function isPostfixFactorial(text: string, offset: number): boolean {
   let following = offset + 1;
   while (HORIZONTAL_WHITESPACE.test(text[following] ?? "")) following++;
   const next = text[following] ?? "";
+  FACTORIAL_CONTINUATION.lastIndex = following;
+  if (FACTORIAL_CONTINUATION.test(text)) return true;
+  if (following > offset + 1 && /[A-Z][a-z]/u.test(text.slice(following, following + 2))) return false;
   return !next || /[.!$,，;；。\r\n]/u.test(next) || MATH_OPERATOR.test(next) || MATH_CLOSE.test(next) ||
     startsMathOperand(text, following);
 }
@@ -1336,16 +1363,9 @@ function indexTranscribedCandidates(transcription: Transcription, candidates: It
     node.mathOutput = node.candidate && !node.candidate.prose ? index : suffix.mathOutput;
     if (node.candidate) {
       const link = node.candidate.prose ? "proseOutput" : "mathOutput";
-      const inherited = nodes[suffix[link]]!.suffixes;
+      const liveOutput = suffix[link];
       const depthBit = 1n << BigInt(node.depth - 1);
-      // Only terminal nodes store the lookup. Their proper suffixes have distinct
-      // depths, so all entries and reverse links fit in total pattern length.
-      const terminalByDepth = new Map(inherited?.terminalByDepth);
-      terminalByDepth.set(depthBit, index);
-      node.suffixes = { liveDepths: (inherited?.liveDepths ?? 0n) | depthBit, terminalByDepth, dependents: [] };
-      for (const terminalIndex of terminalByDepth.values()) {
-        if (terminalIndex !== index) nodes[terminalIndex]!.suffixes!.dependents.push(node.suffixes);
-      }
+      node.suffixes = { depthBit, liveOutput, liveDepths: (nodes[liveOutput]!.suffixes?.liveDepths ?? 0n) | depthBit };
     }
     for (const [char, child] of node.edges) {
       nodes[child]!.failure = advance(node.failure, char);
@@ -1393,20 +1413,30 @@ function indexTranscribedCandidates(transcription: Transcription, candidates: It
   }
 
   function recordMaxStart(link: MatchOutput, rightEnds: bigint, start: number): void {
-    const chain = nodes[liveOutput(state, link)]!.suffixes;
-    if (!chain) return;
-    // Intersect before visiting terminals so even repeated boundary-invalid
-    // matches take no time proportional to the number of matching suffixes.
-    for (let eligible = chain.liveDepths & rightEnds; eligible; ) {
-      const depthBit = eligible & -eligible;
-      const terminal = nodes[chain.terminalByDepth.get(depthBit)!]!;
-      terminal.candidate!.maxStart = start;
-      terminal[link] = liveOutput(terminal.failure, link);
+    let index = liveOutput(state, link);
+    if (((nodes[index]!.suffixes?.liveDepths ?? 0n) & rightEnds) === 0n) return;
+    const visited: number[] = [];
+    while (index) {
+      const { liveDepths, liveOutput: suffix } = nodes[index]!.suffixes!;
+      if ((liveDepths & rightEnds) === 0n) break;
+      visited.push(index);
+      index = liveOutput(suffix, link);
+    }
+    // Cached masks can overestimate after a suffix resolves on another chain.
+    // Each visit removes either this terminal or a depth from its cached mask.
+    for (let position = visited.length - 1; position >= 0; position--) {
+      const terminalIndex = visited[position]!;
+      const terminal = nodes[terminalIndex]!;
       const suffixes = terminal.suffixes!;
-      suffixes.liveDepths ^= depthBit;
-      for (const dependent of suffixes.dependents) dependent.liveDepths ^= depthBit;
-      eligible ^= depthBit;
-      unresolved--;
+      if ((suffixes.depthBit & rightEnds) !== 0n) {
+        terminal.candidate!.maxStart = start;
+        terminal[link] = index;
+        unresolved--;
+      } else {
+        suffixes.liveOutput = index;
+        suffixes.liveDepths = (nodes[index]!.suffixes?.liveDepths ?? 0n) | suffixes.depthBit;
+        index = terminalIndex;
+      }
     }
   }
 }
@@ -1493,16 +1523,27 @@ function locateTranscribedSteps(steps: readonly ProofStep[], transcription: Tran
   return locations;
 }
 
-function collectDomainContext(text: string, global: string[], anchored: Map<number, string[]>): void {
+function collectDomainContext(
+  text: string, global: string[], anchored: Map<number, string[]>, relativeStep: number,
+): void {
   for (const sentence of assertiveProseSentences(text)) {
     let start = 0;
     let target = global;
-    for (const match of sentence.matchAll(STEP_ANCHOR)) {
-      target.push(sentence.slice(start, match.index));
-      const stepNumber = Number(match[1] ?? match[2]);
+    const relative = DEFERRED_DOMAIN_TRANSITION.exec(sentence);
+    const anchors = Array.from(sentence.matchAll(STEP_ANCHOR), match => ({
+      index: match.index, end: match.index + match[0].length, stepNumber: Number(match[1] ?? match[2]),
+    }));
+    if (relative) {
+      const index = anchors.findIndex(anchor => anchor.index > relative.index);
+      anchors.splice(index < 0 ? anchors.length : index, 0, {
+        index: relative.index, end: relative.index + relative[0].length, stepNumber: relativeStep,
+      });
+    }
+    for (const { index, end, stepNumber } of anchors) {
+      target.push(sentence.slice(start, index));
       target = anchored.get(stepNumber) ?? [];
       anchored.set(stepNumber, target);
-      start = match.index + match[0].length;
+      start = end;
     }
     target.push(sentence.slice(start));
   }
@@ -1516,16 +1557,30 @@ export function proofStepUsesRealScalar(
   const locations = locateTranscribedSteps(ordered, transcribed);
   const global: string[] = [];
   const anchored = new Map<number, string[]>();
-  for (const text of [locations.size ? undefined : transcription, ...proposalContext]) {
-    if (text) collectDomainContext(text, global, anchored);
+  const secondStep = ordered[1]?.stepIndex ?? Infinity;
+  let unmatchedDomainAmbiguous = false;
+  const remainder: string[] = [];
+  if (!locations.size) {
+    const { context, preambleEnd, firstProseClaim } = transcribed;
+    const end = firstProseClaim
+      ? firstProseClaim.start + postClaimDomainEnd(context.slice(firstProseClaim.start, firstProseClaim.end))
+      : preambleEnd;
+    collectDomainContext(context.slice(0, end), global, anchored, secondStep);
+    collectDomainContext(context.slice(end), remainder, anchored, secondStep);
+  }
+  for (const text of proposalContext) {
+    if (text) collectDomainContext(text, global, anchored, secondStep);
   }
   let domain = advanceProofDomain("real", global);
+  advanceProofDomain(domain, remainder, nextDomain => {
+    unmatchedDomainAmbiguous ||= nextDomain !== domain;
+  });
   let cursor = 0;
   const matches = locations.values();
   let next = matches.next();
   let sentenceIndex = 0;
   const result = new Map<ProofStep, boolean>();
-  for (const step of ordered) {
+  for (const [index, step] of ordered.entries()) {
     const location = locations.get(step);
     let end = cursor;
     if (location) {
@@ -1535,32 +1590,47 @@ export function proofStepUsesRealScalar(
       end = location.end + postClaimDomainEnd(transcribed.context.slice(location.end, end));
     } else if (cursor === 0 && locations.size) {
       end = Math.min(transcribed.preambleEnd, next.value?.start ?? 0);
+    } else if (cursor > 0) {
+      // A transition explicitly attached to the preceding claim belongs to this
+      // step even when the transcription paraphrases its expression.
+      while (transcribed.sentenceEnds[sentenceIndex] !== undefined &&
+        transcribed.sentenceEnds[sentenceIndex]! <= cursor) sentenceIndex++;
+      const boundary = Math.min(transcribed.sentenceEnds[sentenceIndex] ?? cursor, next.value?.start ?? Infinity);
+      const candidate = transcribed.context.slice(cursor, boundary);
+      const relative = DEFERRED_DOMAIN_TRANSITION.exec(candidate);
+      if (relative && BEFORE_RELATIVE_TRANSITION.test(candidate.slice(0, relative.index))) end = boundary;
     }
     if (end > cursor) {
       const immediate: string[] = [];
-      collectDomainContext(transcribed.context.slice(cursor, end), immediate, anchored);
+      const relativeStep = cursor > 0 ? step.stepIndex : ordered[index + 1]?.stepIndex ?? Infinity;
+      collectDomainContext(transcribed.context.slice(cursor, end), immediate, anchored, relativeStep);
       domain = advanceProofDomain(domain, immediate);
       cursor = end;
     }
+    let scopedDomain = false;
     for (let stepNumber = 0; stepNumber <= step.stepIndex; stepNumber++) {
       const deferred = anchored.get(stepNumber);
       if (!deferred) continue;
-      domain = advanceProofDomain(domain, deferred);
+      domain = advanceProofDomain(domain, deferred, () => { scopedDomain = true; });
       anchored.delete(stepNumber);
     }
-    domain = advanceProofDomain(domain, [step.claim, step.feedback, step.repairPrompt]);
-    result.set(step, domain === "real");
+    const local: string[] = [];
+    for (const text of [step.claim, step.feedback, step.repairPrompt]) {
+      if (text) collectDomainContext(text, local, anchored, ordered[index + 1]?.stepIndex ?? Infinity);
+    }
+    domain = advanceProofDomain(domain, local, () => { scopedDomain = true; });
+    result.set(step, domain === "real" || (unmatchedDomainAmbiguous && !scopedDomain));
   }
   return result;
 }
 
-const EXPLICIT_CLAUSE_SUBJECT = /(?:the|this|that|these|those|a|an|we|you|it|they|he|she|there|every|each|all|both|some|any|no|neither|either|another|other|one|steps?|lines?|parts?|equations?|equalit(?:y|ies)|identit(?:y|ies)|claims?|proofs?|arguments?|derivations?|inferences?|reasoning|calculations?|expansions?|here|now)\b/u.source;
+const EXPLICIT_CLAUSE_SUBJECT = /(?:the|this|that|these|those|a|an|we|you|it|they|he|she|there|my|your|his|her|its|our|their|whose|such|which|what|every|each|all|both|some|any|no|neither|either|another|other|one|first|second|third|next|later|earlier|previous|subsequent|final|last|remaining|following|overall|entire|whole|steps?|lines?|parts?|equations?|equalit(?:y|ies)|identit(?:y|ies)|claims?|proofs?|arguments?|derivations?|inferences?|reasoning|calculations?|expansions?|here|now)\b/u.source;
 const INDEPENDENT_PROSE_CLAUSE = new RegExp([
   /[;；\r\n]/u.source,
   String.raw`\b(?:however|moreover|furthermore)\b,?\s+(?=${EXPLICIT_CLAUSE_SUBJECT})`,
   String.raw`(?:\b(?:but|yet|whereas|while)|[,，]\s*(?:though|although))\s+(?=${EXPLICIT_CLAUSE_SUBJECT})`,
-  /[,，]\s*\b(?:and|also)\s+(?=(?:the|this|that|we|you|it|they|there)\b)/iu.source,
-  /(?:但(?:是)?|不过|此外|另外)(?=\s*(?:这|该|其|此|原|假设|前提|论证|证明|结果|还|仍))|[，,]\s*(?:但(?:是)?|不过|此外|另外)/u.source,
+  /[,，]\s*\b(?:and|also)\s+(?=(?:the|this|that|we|you|it|they|there|my|your|his|her|its|our|their)\b)/iu.source,
+  /(?:但(?:是)?|不过|此外|另外)(?=\s*(?:这|该|其|此|原|假设|前提|论证|证明|结果|还|仍|你[的们]|您的|他的|她的|它的|我们的|他们的|学生的|作者的|上述|后面|前面|下一步))|[，,]\s*(?:但(?:是)?|不过|此外|另外)/u.source,
 ].join("|"), "iu");
 
 export function independentProseClauses(sentence: string): string[] {
@@ -1568,9 +1638,14 @@ export function independentProseClauses(sentence: string): string[] {
 }
 
 function proofRoleText(text: string): string {
-  return assertiveProseSentences(text).flatMap(independentProseClauses).map(clause => {
+  const unquoted = text.replace(PROOF_QUOTATION, span => span.startsWith("$") ? span : " ");
+  return assertiveProseSentences(unquoted).flatMap(independentProseClauses).map(clause => {
     const indirect = INDIRECT_QUESTION.exec(clause);
     const assertion = (indirect ? clause.slice(0, indirect.index) : clause).trim().replace(/\s+/gu, " ");
+    if (ILLUSTRATIVE_PROOF_ROLE.test(assertion) ||
+        (REJECTION_AS_TOPIC.test(assertion) && !ASSERTED_PROOF_PREDICATE.test(assertion))) return "";
+    if (UNPROVED_PROOF_ROLE.test(assertion) &&
+        (EXPLICIT_REJECTION.test(assertion) || DERIVED_CONTRADICTION.test(assertion))) return "";
     if (NONASSERTED_REJECTION.test(assertion.replace(/[,，()（）]/gu, " "))) return "";
     const rejection = EXPLICIT_REJECTION.exec(assertion);
     if (rejection) {
@@ -1585,7 +1660,7 @@ function proofRoleText(text: string): string {
 
 function assertedDischargeText(text: string): string {
   return text.split(DISCHARGE_CLAUSE_END).map(segment => {
-    let clause = segment.trim().replace(QUOTED_CONTRADICTION, " ");
+    let clause = segment.trim();
     if (SEQUENTIAL_DISCHARGE.test(clause)) {
       const conclusion = DEDUCTIVE_CONCLUSION.exec(clause);
       if (conclusion) clause = clause.slice(conclusion.index + conclusion[0].length);

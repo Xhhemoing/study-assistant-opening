@@ -31,7 +31,7 @@ const RESTRICTED_EQUALITY = [
   /不恒成立|并非恒等式/u,
 ];
 const RESTRICTED_CHINESE_CLAUSE = /[。！？；\r\n]/u;
-const CHINESE_MISSING_JUSTIFICATION = /(?:缺少|(?:没有|未)(?:给出|提供)?)(?:证明|推导|理由|依据)/u.source;
+const CHINESE_MISSING_JUSTIFICATION = /(?:缺少|缺乏|跳过|遗漏|(?:没有|未)(?:给出|提供)?)(?:证明|推导|理由|依据|步骤)/u.source;
 const MISSING_JUSTIFICATION = /(?:(?:miss(?:ing|es)?|lack(?:s|ing)?(?:\s+of)?|without|no|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|reasoning|proof|derivation|steps?))/u.source;
 const DISALLOWED_THEOREM = /(?:disallowed|forbidden|unauthori[sz]ed|not\s+allowed\s+to\s+use)\s+(?:the\s+)?(?:theorem|method|rule)/u.source;
 const CHINESE_INFERENCE_DEFECT = String.raw`(?:循环论证|未证先用|直接假设|重述结论|${CHINESE_MISSING_JUSTIFICATION}|未经证明|跳步|(?:禁止|不能|不得)(?:使用|采用)(?:该|此)?(?:定理|方法))`;
@@ -48,6 +48,12 @@ const INFERENCE_DEFECT_REFERENCE = String.raw`(?:circular\s+(?:reasoning|argumen
 const DEFECT_REFUTATION = /(?:false|wrong|incorrect|invalid|mistaken|untrue|baseless|groundless|unfounded|meritless|erroneous|bogus|spurious|misplaced|inaccurate|unproven|unsubstantiated|unsupported|rejected|refuted|disproved)/u.source;
 const INFERENCE_DEFECT_DENIAL = String.raw`(?:${DEFECT_REFUTATION}|fails?|collapses?|absent|none|nonexistent|lacking|missing|avoided|eliminated|ruled\s+out|not\s+(?:true|valid|correct|accurate|justified|supported|substantiated|present|found|used|detected|seen|observed|an?\s+(?:issue|concern|problem|defect)|occurring)|(?:(?:does|do|did)\s+not|never|didn['’]t|doesn['’]t)\s+(?:occur|appear|apply|exist|arise|happen)\w*)`;
 const CHINESE_DEFECT_DENIAL = /(?:错误的?|有误的?|不正确的?|不实的?|失实的?|虚假的?|站不住脚的?|无稽之谈|毫无根据的?|不成立的?)/u.source;
+const DENIED_CRITIQUE_PREFIX = String.raw`(?:\b(?:it|this|that)\s+(?:is|was|would\s+be|seems?)\s+(?:(?:completely|entirely|wholly|simply|plainly)\s+)?(?:${DEFECT_REFUTATION}|not\s+(?:true|correct|accurate|fair|valid|right|justified))\s+(?:that|to\s+(?:say|claim|suggest|argue|assert|allege|conclude|think))\b|\b(?:cannot|can['’]t|could\s+not|do(?:es)?\s+not|don['’]t|doesn['’]t|should\s+not|shouldn['’]t|must\s+not)\s+(?:(?:fairly|validly|rightly)\s+)?(?:say|claim|suggest|argue|assert|conclude|hold)\s+that\b|\bthere\s+is\s+no\s+(?:truth|basis|merit|grounds?)\s+(?:in|to|for)\s+(?:saying|claiming|the\s+(?:claim|idea|suggestion|view))\b)`;
+const DENIED_INFERENCE_CLAUSE = [
+  new RegExp(String.raw`${DENIED_CRITIQUE_PREFIX}[^\r\n]*${INFERENCE_DEFECT_REFERENCE}\b\$?[^\r\n]*`, "giu"),
+  new RegExp(String.raw`(?:并非|并不是|不能说|无法说|不能认为)[^\r\n]*${CHINESE_INFERENCE_DEFECT}[^\r\n]*`, "gu"),
+  new RegExp(String.raw`(?:^|[，,])[^，,]*${CHINESE_INFERENCE_DEFECT}[^，,]*(?:是(?:错误|不对|不准确|不成立|失实|无根据)的|并不(?:属实|成立|正确|准确))`, "gu"),
+];
 const NEGATED_INFERENCE_CRITIQUE = [
   new RegExp(String.raw`\b${INFERENCE_DEFECT_REFERENCE}\b\$?(?:[\s,()"“”]+(?!(?:and|or|but|yet|whereas|while|not|never|neither|nor)\b)[\w'’-]+){0,6}[\s,()"“”]+${INFERENCE_DEFECT_DENIAL}\b`, "giu"),
   new RegExp(String.raw`\b${DEFECT_REFUTATION}\s+(?:claims?|accusations?|allegations?|charges?|criticisms?)\s+(?:of|about|that)\s+(?:(?!\b(?:and|or|but|yet)\b)[\w'’-]+\s+){0,6}${INFERENCE_DEFECT_REFERENCE}\b`, "giu"),
@@ -60,7 +66,8 @@ const NEGATED_INFERENCE_CRITIQUE = [
 function positiveInferenceClauses(text: string): string[] {
   return assertiveProseSentences(text).flatMap(independentProseClauses).flatMap(segment => {
     const nonasserted = NONASSERTED_INFERENCE.exec(segment);
-    const assertion = nonasserted ? segment.slice(0, nonasserted.index) : segment;
+    const assertion = DENIED_INFERENCE_CLAUSE.reduce((value, pattern) => value.replace(pattern, " "),
+      nonasserted ? segment.slice(0, nonasserted.index) : segment);
     return assertion.split(/\b(?:and|but|yet|while|whereas|though|although|also)\b|而且|并且|(?<!暂)且|同时/iu)
       .map(clause => NEGATED_INFERENCE_CRITIQUE.reduce((value, pattern) => value.replace(pattern, " "), clause));
   });
