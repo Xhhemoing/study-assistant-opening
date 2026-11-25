@@ -9,7 +9,9 @@ import {
   createIdentityRepository,
   createLearningEventRepository,
   createLibraryRepository,
+  createOpeningNoteRepository,
   createPromotionRepository,
+  createScopedOpeningSystemQueryReader,
   createSqlClient,
   listMigrationFiles,
   readOpeningBackupRecords,
@@ -282,6 +284,278 @@ describe("native backup round-trip", () => {
       WHERE workspace_id=${owner.workspace.id} AND type='attempt'`;
     expect(event).toMatchObject({ content_id: historicalContentId, syllabus_point_id: historicalPointId });
     expect(await sql`SELECT id FROM library_blocks WHERE id=${seeded.blockId}`).toHaveLength(0);
+  });
+
+  it("withholds a note carrying malformed nested-array lineage from native export matching openingNoteReadable and readOpeningBackupRecords", async () => {
+    const owner = await identity.createUserWithWorkspace({
+      email: `malformed-note-${randomUUID()}@example.com`,
+      displayName: "Malformed Note",
+      passwordHash: "unused",
+    });
+    const scope = { workspaceId: owner.workspace.id, ownerUserId: owner.user.id };
+    const sourceId = randomUUID();
+    await sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES(${sourceId},${scope.workspaceId},'source.txt','text/plain',1,${"b".repeat(64)},1,'uploaded','ready')`;
+
+    const badNote = await library.createDocument({
+      workspaceId: scope.workspaceId,
+      title: "MALFORMED-LINEAGE-TITLE",
+      lifecycle: "scratch",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "MALFORMED-LINEAGE-BODY" } }],
+    });
+    const cleanNote = await library.createDocument({
+      workspaceId: scope.workspaceId,
+      title: "CLEAN-ORDINARY-NOTE",
+      lifecycle: "scratch",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "CLEAN-ORDINARY-BODY" } }],
+    });
+    const directCard = await cards.createCard({
+      workspaceId: scope.workspaceId,
+      ownerUserId: scope.ownerUserId,
+      front: "MALFORMED-DIRECT-CARD",
+      back: "MALFORMED-DIRECT-BACK",
+      sourceDocumentId: badNote.id,
+    });
+    const pubCard = await cards.createCard({
+      workspaceId: scope.workspaceId,
+      ownerUserId: scope.ownerUserId,
+      front: "MALFORMED-PUB-CARD",
+      back: "MALFORMED-PUB-BACK",
+    });
+    const cleanCard = await cards.createCard({
+      workspaceId: scope.workspaceId,
+      ownerUserId: scope.ownerUserId,
+      front: "CLEAN-CARD",
+      back: "CLEAN-BACK",
+    });
+    const badReview = await events.append({
+      workspaceId: scope.workspaceId,
+      ownerUserId: scope.ownerUserId,
+      type: "review",
+      idempotencyKey: `bad-review-${randomUUID()}`,
+      occurredAt: "2026-08-15T03:00:00.000Z",
+      contentId: directCard.id,
+      contentVersion: 1,
+      payload: { grade: "good", assisted: false, excludeFromAssessment: false },
+    });
+    const pubReview = await events.append({
+      workspaceId: scope.workspaceId,
+      ownerUserId: scope.ownerUserId,
+      type: "review",
+      idempotencyKey: `pub-review-${randomUUID()}`,
+      occurredAt: "2026-08-15T03:00:00.000Z",
+      contentId: pubCard.id,
+      contentVersion: 1,
+      payload: { grade: "good", assisted: false, excludeFromAssessment: false },
+    });
+
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${badNote.id},${scope.workspaceId},${sql.json([
+        { sourceId, sourceVersion: 1, legacy: [] },
+        { publicationCardIds: [pubCard.id] },
+      ])})`;
+
+    await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: badNote.id }))
+      .rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const openingSnapshot = await readOpeningBackupRecords(sql, scope);
+    const nativePacked = await backups.exportWorkspace(scope);
+
+    expect(openingSnapshot.tables.library_documents.map(row => row.id)).toEqual([cleanNote.id]);
+    expect(openingSnapshot.tables.cards.map(row => row.id)).toEqual([cleanCard.id]);
+    expect(nativePacked.records.documents.map(row => row.id)).toEqual([cleanNote.id]);
+    expect(nativePacked.records.cards.map(row => row.id)).toEqual([cleanCard.id]);
+    expect(nativePacked.records.events).toEqual([]);
+
+    for (const serialized of [JSON.stringify(openingSnapshot.tables), JSON.stringify(nativePacked)]) {
+      for (const forbidden of [
+        badNote.id,
+        "MALFORMED-LINEAGE-TITLE",
+        "MALFORMED-LINEAGE-BODY",
+        directCard.id,
+        "MALFORMED-DIRECT-CARD",
+        pubCard.id,
+        "MALFORMED-PUB-CARD",
+        badReview.id,
+        pubReview.id,
+      ]) {
+        expect(serialized).not.toContain(forbidden);
+      }
+    }
+
+    await wipeLearningData();
+    for (const badRefs of [
+      [{ sourceId, sourceVersion: 1, legacy: [] }],
+      [{ sourceId, sourceVersion: 1, publication: false }],
+    ]) {
+      const forged = structuredClone(nativePacked);
+      (forged.records.documents[0] as Record<string, unknown>).openingProvenance = { contextSourceRefs: badRefs };
+      await expect(backups.restoreWorkspace({ ...scope, packed: forged, conflictPolicy: "reject" }))
+        .rejects.toMatchObject({ code: "VALIDATION" });
+    }
+  });
+
+  it("preserves and revalidates source-free snippet lineage across native export, wipe, restore, system queries, and skip merges", async () => {
+    const owner = await identity.createUserWithWorkspace({
+      email: `snippet-roundtrip-${randomUUID()}@example.com`,
+      displayName: "Snippet Roundtrip",
+      passwordHash: "unused",
+    });
+    const scope = { workspaceId: owner.workspace.id, ownerUserId: owner.user.id };
+    const conversationId = randomUUID();
+    const userTurnId = randomUUID();
+    const assistantTurnId = randomUUID();
+    const memoryId = randomUUID();
+
+    await sql`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,title)
+      VALUES(${conversationId},${scope.workspaceId},${scope.ownerUserId},'Memory dialogue')`;
+    await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+      VALUES(${userTurnId},${scope.workspaceId},${conversationId},'user','Remember my algebra rule','listen','complete','[]'::jsonb)`;
+    await sql`INSERT INTO opening_memories(id,workspace_id,kind,text,source_turn_ids,status)
+      VALUES(${memoryId},${scope.workspaceId},'confirmed','Confirmed algebra memory',${sql.json([userTurnId])},'active')`;
+    await sql`INSERT INTO opening_turns(id,workspace_id,conversation_id,role,text,mode,status,context_source_refs)
+      VALUES(${assistantTurnId},${scope.workspaceId},${conversationId},'assistant','Explanation using memory','listen','complete',
+        ${sql.json([{ memoryDependencyIds: [memoryId] }])})`;
+    await sql`INSERT INTO opening_tutor_jobs(id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status,mode)
+      VALUES(${randomUUID()},${scope.workspaceId},${conversationId},${userTurnId},${assistantTurnId},'succeeded','listen')`;
+
+    const notes = createOpeningNoteRepository(sql);
+    const { documentId } = await notes.saveSnippet(scope, {
+      title: "Memory-backed snippet",
+      text: "PRIVATE-SNIPPET-BODY",
+      savedTurnId: assistantTurnId,
+    });
+    const expectedOriginTurnIds = [assistantTurnId, userTurnId].sort();
+    const expectedDbProvenance = [
+      { memoryDependencyIds: [memoryId] },
+      { snippetLineageVersion: 1 },
+      { originTurnIds: expectedOriginTurnIds },
+    ];
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs)
+      .toEqual(expectedDbProvenance);
+
+    const packed = await backups.exportWorkspace(scope);
+    expect(packed.records.documents).toHaveLength(1);
+    expect(packed.records.documents[0]!.openingProvenance).toEqual({
+      contextSourceRefs: [],
+      memoryDependencyIds: [memoryId],
+      originTurnIds: expectedOriginTurnIds,
+      snippetLineageVersion: 1,
+    });
+
+    const other = await identity.createUserWithWorkspace({
+      email: `other-snippet-${randomUUID()}@example.com`,
+      displayName: "Other",
+      passwordHash: "unused",
+    });
+    const crossPacked = structuredClone(packed);
+    const crossDocId = randomUUID();
+    const crossBlockId = randomUUID();
+    (crossPacked.records.documents[0] as Record<string, unknown>).id = crossDocId;
+    for (const block of crossPacked.records.blocks) {
+      Object.assign(block as object, { id: crossBlockId, documentId: crossDocId });
+    }
+    for (const rev of crossPacked.records.revisions) {
+      const record = rev as Record<string, unknown>;
+      Object.assign(record, { id: randomUUID(), documentId: crossDocId });
+      for (const block of record.blocks as Array<Record<string, unknown>>) block.id = crossBlockId;
+    }
+    await expect(backups.restoreWorkspace({
+      workspaceId: other.workspace.id,
+      ownerUserId: other.user.id,
+      packed: crossPacked,
+      conflictPolicy: "reject",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(await sql`SELECT id FROM library_documents WHERE workspace_id=${other.workspace.id}`).toEqual([]);
+
+    const wipeNotesOnly = async () => {
+      await sql`TRUNCATE library_documents RESTART IDENTITY CASCADE`;
+    };
+
+    await wipeNotesOnly();
+    const restored = await backups.restoreWorkspace({
+      ...scope,
+      packed,
+      conflictPolicy: "reject",
+    });
+    expect(restored.applied.documents).toBe(1);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs)
+      .toEqual(expectedDbProvenance);
+
+    const collectedMemoryIds = new Set<string>();
+    const collectedOriginTurnIds = new Set<string>();
+    const readSystemQuery = createScopedOpeningSystemQueryReader(sql, scope, {
+      collectLineage: lineage => {
+        for (const id of lineage.memoryIds) collectedMemoryIds.add(id);
+        for (const id of lineage.originTurnIds) collectedOriginTurnIds.add(id);
+      },
+    });
+    const queryResult = await readSystemQuery(
+      { name: "notes", arguments: { offset: 0, limit: 10 } },
+      new AbortController().signal,
+    );
+    expect(queryResult.status).toBe("ok");
+    expect(queryResult.data).toMatchObject([{ id: documentId, title: "Memory-backed snippet" }]);
+    expect([...collectedMemoryIds]).toEqual([memoryId]);
+    expect([...collectedOriginTurnIds].sort()).toEqual(expectedOriginTurnIds);
+
+    const skipped = await backups.restoreWorkspace({
+      ...scope,
+      packed,
+      conflictPolicy: "skip",
+    });
+    expect(skipped.skipped.documents).toBe(1);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs)
+      .toEqual(expectedDbProvenance);
+
+    const stripped = structuredClone(packed);
+    (stripped.records.documents[0] as Record<string, unknown>).openingProvenance = null;
+    await expect(backups.restoreWorkspace({
+      ...scope,
+      packed: stripped,
+      conflictPolicy: "skip",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+
+    // Deleting/revoking the referenced memory withholds export and fails closed on restore.
+    await sql`UPDATE opening_memories SET status='deleted' WHERE id=${memoryId}`;
+    const afterMemoryDeleted = await backups.exportWorkspace(scope);
+    expect(afterMemoryDeleted.records.documents).toEqual([]);
+    expect(JSON.stringify(afterMemoryDeleted)).not.toContain("PRIVATE-SNIPPET-BODY");
+    expect((await readSystemQuery({ name: "notes", arguments: { offset: 0, limit: 10 } }, new AbortController().signal)).data)
+      .toEqual([]);
+
+    const revisionOnlyPacked = structuredClone(packed);
+    revisionOnlyPacked.records.documents = [];
+    revisionOnlyPacked.records.blocks = [];
+    (revisionOnlyPacked.records.revisions[0] as Record<string, unknown>).id = randomUUID();
+    await expect(backups.restoreWorkspace({
+      ...scope,
+      packed: revisionOnlyPacked,
+      conflictPolicy: "skip",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+
+    await wipeNotesOnly();
+    await expect(backups.restoreWorkspace({
+      ...scope,
+      packed,
+      conflictPolicy: "reject",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(await sql`SELECT id FROM library_documents WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
+
+    // Restore memory, verify restore succeeds again, then make origin turn unavailable and verify export/restore fail closed.
+    await sql`UPDATE opening_memories SET status='active' WHERE id=${memoryId}`;
+    await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" });
+    await sql`DELETE FROM opening_conversations WHERE id=${conversationId}`;
+    const afterTurnDeleted = await backups.exportWorkspace(scope);
+    expect(afterTurnDeleted.records.documents).toEqual([]);
+    expect(JSON.stringify(afterTurnDeleted)).not.toContain("PRIVATE-SNIPPET-BODY");
+    await wipeNotesOnly();
+    await expect(backups.restoreWorkspace({
+      ...scope,
+      packed,
+      conflictPolicy: "reject",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(await sql`SELECT id FROM library_documents WHERE workspace_id=${scope.workspaceId}`).toEqual([]);
   });
 
   async function wipeLearningData() {

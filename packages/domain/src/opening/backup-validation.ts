@@ -501,11 +501,16 @@ const noteMetadataKeys = new Set([
   "memoryDependencyIds",
 ]);
 
-export function containsDisallowedNoteMetadataOrArray(node: unknown): boolean {
-  if (Array.isArray(node)) return true;
-  if (!isRecord(node)) return false;
-  for (const [key, child] of Object.entries(node)) {
-    if (noteMetadataKeys.has(key) || containsDisallowedNoteMetadataOrArray(child)) return true;
+export function containsDisallowedNoteMetadataOrArray(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) return true;
+    if (!isRecord(node)) continue;
+    for (const [key, child] of Object.entries(node)) {
+      if (noteMetadataKeys.has(key) || Array.isArray(child)) return true;
+      if (isRecord(child)) stack.push(child);
+    }
   }
   return false;
 }

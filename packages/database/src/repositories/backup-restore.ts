@@ -11,6 +11,7 @@ import type { BackupRestoreRepository } from "./backup-types";
 import { privateExamDocumentIds, readBackupLibrarySourceVersions, readBackupNoteProvenance, readBackupTeachingSourceRefs } from "./opening-backup-library";
 import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeCardPublicationSources, attachNativeTeachingOrigins, readNativeTeachingOrigins } from "./native-backup-teaching";
+import { isVerifiedSnippetLineage, noteOriginTurnIds, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
 import { historicalTeachingDocumentsByCard, parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationSourceRefsByDocument, type BackupSourceRef } from "./backup-publication-provenance";
 
 // This entrypoint is also re-exported by the database package's public barrel.
@@ -51,7 +52,9 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
           ]);
           const inputRecords = input.packed.records;
           const cards = origins ? attachNativeTeachingOrigins(inputRecords.cards, origins, historicalTeachingDocumentsByCard(noteProvenance)) : inputRecords.cards;
+          const modernNotes = Number.parseInt(input.packed.schemaManifest.latestMigrationId.slice(0, 4), 10) >= 35;
           const answerKeys = publicationAnswerKeysByDocument(teachingSpecs, noteProvenance);
+          const existingNoteRows = new Map(noteProvenance.map(row => [String(row.document_id).toLowerCase(), row.context_source_refs]));
           const incomingNotes = new Map(asRecords(inputRecords.documents).map(document => [document.id, readNoteBackupProvenance(document, false)]));
           const privateBlocks = [...[...answerKeys.values()].flat(), ...[...incomingNotes.values()].flatMap(note => note?.answerKeyBlockIds ?? [])];
           const currentSpecs = sameWorkspace ? teachingSpecs : [];
@@ -71,13 +74,42 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
           const documents = library.records.documents.map(document => {
             const id = String(document.id).toLowerCase();
             const note = incomingNotes.get(String(document.id));
+            const existingRaw = sameWorkspace ? existingNoteRows.get(id) : undefined;
             const currentRefs = currentPublications.get(id) ?? [];
             const refs = parseBackupSourceRefs([...(note?.contextSourceRefs ?? []), ...currentRefs])!;
             if (refs.length) publications.set(id, [...(publications.get(id) ?? []), ...refs.filter(ref => ref.publication)]);
             const keys = [...new Set([...(note?.answerKeyBlockIds ?? []), ...(sameWorkspace ? answerKeys.get(id) ?? [] : [])])];
-            return note || refs.length || keys.length ? { ...document, openingProvenance: {
-              contextSourceRefs: refs, ...(keys.length > 0 && { answerKeyBlockIds: keys }),
-            } } : document;
+            if (!note) {
+              if (existingRaw !== undefined || (modernNotes && !Object.hasOwn(document, "openingProvenance"))) {
+                return document;
+              }
+              return refs.length || keys.length ? {
+                ...document,
+                openingProvenance: {
+                  contextSourceRefs: refs,
+                  ...(keys.length > 0 && { answerKeyBlockIds: keys }),
+                },
+              } : document;
+            }
+            const existingParsed = existingRaw !== undefined ? parseNoteContextProvenanceRefs(existingRaw) : null;
+            const existingMemoryIds = existingParsed?.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [];
+            const memoryDependencyIds = [...new Set([...(note.memoryDependencyIds ?? []), ...existingMemoryIds])].sort();
+            const existingOriginTurnIds = Array.isArray(existingRaw) ? noteOriginTurnIds(existingRaw) : [];
+            const originTurnIds = [...new Set([...(note.originTurnIds ?? []), ...existingOriginTurnIds])].sort();
+            const snippetLineageVersion = note.snippetLineageVersion === 1
+              || (Array.isArray(existingRaw) && existingRaw.some(isVerifiedSnippetLineage))
+              ? 1 as const
+              : undefined;
+            return {
+              ...document,
+              openingProvenance: {
+                contextSourceRefs: refs,
+                ...(keys.length > 0 && { answerKeyBlockIds: keys }),
+                ...(memoryDependencyIds.length > 0 && { memoryDependencyIds }),
+                ...(originTurnIds.length > 0 && { originTurnIds }),
+                ...(snippetLineageVersion === 1 && { snippetLineageVersion: 1 as const }),
+              },
+            };
           });
           const restoredCards = attachNativeCardPublicationSources(library.records.cards, publications);
           const packed = { ...input.packed, records: { ...inputRecords, ...library.records, documents, cards: restoredCards }, files };

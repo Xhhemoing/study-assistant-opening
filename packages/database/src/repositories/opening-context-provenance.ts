@@ -125,16 +125,21 @@ const NOTE_METADATA_KEYS = new Set([
   "memoryDependencyIds",
 ]);
 
-function containsDisallowedNoteMetadataOrArray(node: unknown): boolean {
-  if (Array.isArray(node)) return true;
-  if (!node || typeof node !== "object") return false;
-  for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
-    if (NOTE_METADATA_KEYS.has(key) || containsDisallowedNoteMetadataOrArray(child)) return true;
+export function containsDisallowedNoteMetadataOrArray(root: unknown): boolean {
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) return true;
+    if (!node || typeof node !== "object") continue;
+    for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+      if (NOTE_METADATA_KEYS.has(key) || Array.isArray(child)) return true;
+      if (child && typeof child === "object") stack.push(child);
+    }
   }
   return false;
 }
 
-function hasValidNoteMetadataStructure(value: unknown): value is unknown[] {
+export function hasValidNoteMetadataStructure(value: unknown): value is unknown[] {
   return Array.isArray(value) && value.every(ref =>
     notePublicationMetadata(ref) !== null
     || isMemoryDependencyMetadata(ref)

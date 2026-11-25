@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseBackupSourceRefs,
+} from "../../../database/src/repositories/backup-publication-provenance";
+import {
   projectOpeningBackupCardSources,
   projectOpeningBackupProvenance,
 } from "../../../database/src/repositories/opening-backup-library";
 import {
+  containsDisallowedNoteMetadataOrArray as dbContainsDisallowedNoteMetadataOrArray,
   parseNoteContextProvenanceRefs,
   parseNoteContextSourceRefs,
 } from "../../../database/src/repositories/opening-context-provenance";
@@ -11,6 +15,7 @@ import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
 import { projectPrivacyGuardedOpeningDataset } from "./deidentified-dataset";
 import {
+  containsDisallowedNoteMetadataOrArray,
   noteProvenanceSourceReferences,
   sourceReferences,
   turnMemoryDependencyIds,
@@ -396,5 +401,77 @@ describe("context provenance at the backup boundary", () => {
       },
     }, (kind, id) => `${kind}:${id}`);
     expect(datasetResult.dataset.coursePackageQuality.map(item => item.identity)).toEqual([`activity:${obsId}`]);
+  });
+
+  it.each([4_096, 10_000])("handles %i-deep nested publicationCardIds arrays and deep object structures without RangeError", depth => {
+    const allEcmaSpaces = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+    const docId = "99999999-9999-4999-8999-999999999999";
+    const objCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const keepCardId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const activityA = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const activityB = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const activityKeep = "11111111-1111-4111-8111-111111111111";
+
+    let deepIds: unknown = [
+      `${allEcmaSpaces}${candidateId.toUpperCase()}${allEcmaSpaces}`,
+      { cardId: `${allEcmaSpaces}${objCardId.toUpperCase()}${allEcmaSpaces}` },
+    ];
+    for (let i = 0; i < depth; i++) {
+      deepIds = [deepIds];
+    }
+    const refs = [{ publicationCardIds: deepIds }];
+    const provenanceRow = {
+      document_id: docId,
+      workspace_id: workspaceId,
+      context_source_refs: refs,
+    };
+
+    expect(parseBackupSourceRefs(refs)).toBeNull();
+    expect(parseNoteContextProvenanceRefs(refs)).toBeNull();
+    expect(parseNoteContextSourceRefs(refs)).toBeNull();
+    expect(noteProvenanceSourceReferences(provenanceRow)).toBeNull();
+
+    const cards = [
+      { id: candidateId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+      { id: objCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+      { id: keepCardId, workspace_id: workspaceId, origin_observation_root_id: null, source_document_id: null, source_ids: [] },
+    ];
+    expect(projectOpeningBackupCardSources({
+      cards,
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+    }, [provenanceRow])).toEqual([cards[2]]);
+
+    const datasetResult = projectPrivacyGuardedOpeningDataset({
+      scope: { workspaceId, ownerUserId: ownerId },
+      privacyEpoch: 0,
+      mode: "solo",
+      role: "learner",
+      tables: {
+        cards: cards.map(card => ({ ...card, owner_user_id: ownerId })),
+        library_documents: [{ id: docId, workspace_id: workspaceId, deleted_at: null }],
+        opening_sources: [{ id: sourceId, workspace_id: workspaceId, upload_state: "uploaded" }],
+        opening_teaching_activities: [
+          { id: activityA, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: candidateId } },
+          { id: activityB, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: objCardId } },
+          { id: activityKeep, workspace_id: workspaceId, owner_user_id: ownerId, generate_status: "ready", source_ids: [sourceId], create_intent: { kind: "card_review_variant", cardId: keepCardId } },
+        ],
+        opening_note_provenance: [{ ...provenanceRow, snippet_origin: false }],
+      },
+    }, (kind, id) => `${kind}:${id}`);
+    expect(datasetResult.dataset.coursePackageQuality.map(item => item.identity)).toEqual([`activity:${activityKeep}`]);
+
+    let deepCleanObj: Record<string, unknown> = { leaf: "ok" };
+    let deepBadObj: Record<string, unknown> = { legacy: [] };
+    for (let i = 0; i < depth; i++) {
+      deepCleanObj = { next: deepCleanObj };
+      deepBadObj = { next: deepBadObj };
+    }
+    expect(containsDisallowedNoteMetadataOrArray(deepCleanObj)).toBe(false);
+    expect(dbContainsDisallowedNoteMetadataOrArray(deepCleanObj)).toBe(false);
+    expect(containsDisallowedNoteMetadataOrArray(deepBadObj)).toBe(true);
+    expect(dbContainsDisallowedNoteMetadataOrArray(deepBadObj)).toBe(true);
+    expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepBadObj }])).toBeNull();
+    expect(parseBackupSourceRefs([{ sourceId, sourceVersion: 1, extra: deepCleanObj }])).toEqual([{ sourceId, sourceVersion: 1 }]);
   });
 });

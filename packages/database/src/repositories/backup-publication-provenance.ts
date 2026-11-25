@@ -2,12 +2,25 @@ import { notePublicationMetadata } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { asObject } from "./backup-map";
 import { isBackupAnswerBlock } from "./backup-private-library";
-import { parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
+import {
+  hasValidNoteMetadataStructure,
+  isMemoryDependencyMetadata,
+  isVerifiedSnippetLineage,
+  noteOriginTurnIds,
+  parseContextSourceRefs,
+  parseNoteContextProvenanceRefs,
+  type ContextSourceRef,
+} from "./opening-context-provenance";
 
 type Db = Sql | TransactionSql;
 type Row = Record<string, unknown>;
 type PublicationSourceRef = ContextSourceRef & { publication: true };
 export type BackupSourceRef = ContextSourceRef & { publication?: true };
+export type NoteProvenanceLineageInput = {
+  memoryDependencyIds?: string[];
+  originTurnIds?: string[];
+  snippetLineageVersion?: 1;
+};
 
 export function answerKeyBlockIds(order: unknown): string[] {
   if (!Array.isArray(order)) return [];
@@ -18,8 +31,13 @@ export function answerKeyBlockIds(order: unknown): string[] {
 }
 
 export function parseBackupSourceRefs(value: unknown): BackupSourceRef[] | null {
-  if (!Array.isArray(value)) return null;
+  if (!hasValidNoteMetadataStructure(value)) return null;
   const sources = value.filter(ref => !notePublicationMetadata(ref));
+  for (const ref of sources) {
+    if (isMemoryDependencyMetadata(ref)) continue;
+    const obj = asObject(ref);
+    if (!obj || (obj.publication !== undefined && obj.publication !== true)) return null;
+  }
   const refs = parseContextSourceRefs(sources);
   if (!refs) return null;
   const publications = new Set(parseContextSourceRefs(sources.filter(ref => asObject(ref)?.publication === true))
@@ -89,11 +107,67 @@ export function historicalTeachingDocumentsByCard(rows: Row[]) {
   return documentsByCard;
 }
 
-export async function mergeNotePublicationProvenance(tx: Db, workspaceId: string, documentId: string,
-  refs: BackupSourceRef[], answerIds: string[] = [], cardIds: string[] = []) {
+export function canonicalNoteProvenanceEntries(
+  refs: BackupSourceRef[],
+  answerIds: string[] = [],
+  cardIds: string[] = [],
+  lineage?: NoteProvenanceLineageInput,
+): unknown[] {
+  const canonicalRefs = parseBackupSourceRefs(refs) ?? [];
+  const memoryIds = [...new Set((lineage?.memoryDependencyIds ?? []).map(id => id.toLowerCase()))].sort();
+  const originTurnIds = [...new Set((lineage?.originTurnIds ?? []).map(id => id.toLowerCase()))].sort();
+  const normalizedAnswers = [...new Set(answerIds.map(id => id.toLowerCase()))];
+  const normalizedCards = [...new Set(cardIds.map(id => id.toLowerCase()))];
+  return [
+    ...canonicalRefs,
+    ...(memoryIds.length > 0 ? [{ memoryDependencyIds: memoryIds }] : []),
+    ...(lineage?.snippetLineageVersion === 1 ? [{ snippetLineageVersion: 1 as const }] : []),
+    ...(originTurnIds.length > 0 ? [{ originTurnIds }] : []),
+    ...publicationMetadata(normalizedAnswers, normalizedCards),
+  ];
+}
+
+export async function mergeNotePublicationProvenance(
+  tx: Db,
+  workspaceId: string,
+  documentId: string,
+  refs: BackupSourceRef[],
+  answerIds: string[] = [],
+  cardIds: string[] = [],
+  lineage?: NoteProvenanceLineageInput,
+) {
+  const incoming = canonicalNoteProvenanceEntries(refs, answerIds, cardIds, lineage);
+  const [existing] = await tx`SELECT workspace_id, context_source_refs FROM opening_note_provenance
+    WHERE document_id=${documentId} FOR UPDATE`;
+  if (existing) {
+    if (String(existing.workspace_id).toLowerCase() !== workspaceId.toLowerCase()) return;
+    const raw = existing.context_source_refs;
+    const existingProvenance = parseNoteContextProvenanceRefs(raw);
+    const existingRefs = parseBackupSourceRefs(raw);
+    if (existingProvenance !== null && existingRefs !== null) {
+      const existingMemoryIds = existingProvenance.find(ref => "memoryDependencyIds" in ref)?.memoryDependencyIds ?? [];
+      const existingOriginTurnIds = noteOriginTurnIds(raw);
+      const existingSnippetVersion = Array.isArray(raw) && raw.some(isVerifiedSnippetLineage) ? 1 as const : undefined;
+      const existingAnswers = publicationMetadataIds(raw, "answerKeyBlockIds");
+      const existingCards = publicationMetadataIds(raw, "publicationCardIds");
+      const merged = canonicalNoteProvenanceEntries(
+        [...existingRefs, ...refs],
+        [...existingAnswers, ...answerIds],
+        [...existingCards, ...cardIds],
+        {
+          memoryDependencyIds: [...existingMemoryIds, ...(lineage?.memoryDependencyIds ?? [])],
+          originTurnIds: [...existingOriginTurnIds, ...(lineage?.originTurnIds ?? [])],
+          snippetLineageVersion: lineage?.snippetLineageVersion === 1 || existingSnippetVersion === 1 ? 1 : undefined,
+        },
+      );
+      await tx`UPDATE opening_note_provenance SET context_source_refs=${tx.json(merged as never)}
+        WHERE document_id=${documentId} AND workspace_id=${workspaceId}`;
+      return;
+    }
+  }
   // A null entry keeps unknown source lineage inadmissible while retaining redaction metadata.
   await tx`INSERT INTO opening_note_provenance AS p(document_id,workspace_id,context_source_refs)
-    VALUES(${documentId},${workspaceId},${tx.json([...refs, ...publicationMetadata(answerIds, cardIds)])})
+    VALUES(${documentId},${workspaceId},${tx.json(incoming as never)})
     ON CONFLICT(document_id) DO UPDATE SET context_source_refs = (
       SELECT COALESCE(jsonb_agg(DISTINCT ref), '[]'::jsonb)
       FROM jsonb_array_elements(COALESCE(p.context_source_refs, '[null]'::jsonb) || EXCLUDED.context_source_refs) ref

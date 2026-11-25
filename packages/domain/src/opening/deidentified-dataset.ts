@@ -95,24 +95,35 @@ const containsSourceRef = (ids: ReadonlySet<string>, refs: unknown) =>
   Array.isArray(refs) && refs.some(ref => containsId(ids, ref)
     || containsId(ids, field(ref, "sourceId")) || containsId(ids, field(ref, "source_id")));
 
-function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<string>) {
-  if (Array.isArray(node)) {
-    for (const item of node) collectPublicationCardIds(item, inPub, out);
-    return;
-  }
-  if (inPub && typeof node === "string") {
-    const id = node.trim().toLowerCase();
-    if (id) out.add(id);
-    return;
-  }
-  if (!isRecord(node)) return;
-  if (inPub) {
-    for (const candidate of [node.id, node.cardId]) {
-      if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
+function collectPublicationCardIds(root: unknown, initialInPub: boolean, out: Set<string>) {
+  const stack: Array<{ node: unknown; inPub: boolean }> = [{ node: root, inPub: initialInPub }];
+  while (stack.length > 0) {
+    const { node, inPub } = stack.pop()!;
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) {
+        stack.push({ node: node[i], inPub });
+      }
+      continue;
     }
-  }
-  for (const [key, child] of Object.entries(node)) {
-    collectPublicationCardIds(child, key === "publicationCardIds", out);
+    if (inPub && typeof node === "string") {
+      const id = node.trim().toLowerCase();
+      if (id) out.add(id);
+      continue;
+    }
+    if (!isRecord(node)) continue;
+    if (inPub) {
+      for (const candidate of [node.id, node.cardId]) {
+        if (typeof candidate === "string") {
+          const id = candidate.trim().toLowerCase();
+          if (id) out.add(id);
+        }
+      }
+    }
+    const entries = Object.entries(node);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const [key, child] = entries[i]!;
+      stack.push({ node: child, inPub: key === "publicationCardIds" });
+    }
   }
 }
 
@@ -249,10 +260,11 @@ export function projectPrivacyGuardedOpeningDataset(
       else link(memory, child);
     }
   };
-  const validSourceId = (value: unknown) => isUuid(canonicalId(value))
+  const validSourceId = (value: unknown) => typeof value === "string" && isUuid(value)
     && (tables.opening_sources === undefined || containsId(sourceInventory, value));
   const validVersion = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-  const validSourceRef = (ref: unknown): ref is Row => isRecord(ref) && validSourceId(ref.sourceId)
+  const validSourceRef = (ref: unknown): ref is Row => isRecord(ref)
+    && typeof ref.sourceId === "string" && isUuid(ref.sourceId) && validSourceId(ref.sourceId)
     && validVersion(ref.sourceVersion) && (ref.memoryOnly === undefined || typeof ref.memoryOnly === "boolean");
   const hasUnavailableSource = (row: Row) => {
     const pins = row.source_versions;

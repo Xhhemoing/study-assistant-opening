@@ -1,6 +1,11 @@
 import type { Sql, TransactionSql } from "postgres";
 import { notePublicationMetadata } from "@aistudy/domain";
-import { isMemoryDependencyMetadata, noteContextSourceRefsIncluded, parseContextMemoryDependencyIds } from "./opening-context-provenance";
+import {
+  containsDisallowedNoteMetadataOrArray,
+  isMemoryDependencyMetadata,
+  noteContextSourceRefsIncluded,
+  parseContextMemoryDependencyIds,
+} from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
@@ -9,24 +14,6 @@ import { parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMeta
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
-
-const NOTE_METADATA_KEYS = new Set([
-  "publicationCardIds",
-  "answerKeyBlockIds",
-  "originTurnIds",
-  "snippetLineageVersion",
-  "memoryDependencyIds",
-]);
-
-function containsDisallowedNoteMetadataOrArray(node: unknown): boolean {
-  if (Array.isArray(node)) return true;
-  const record = asObject(node);
-  if (!record) return false;
-  for (const [key, child] of Object.entries(record)) {
-    if (NOTE_METADATA_KEYS.has(key) || containsDisallowedNoteMetadataOrArray(child)) return true;
-  }
-  return false;
-}
 
 function hasValidBackupNoteMetadataStructure(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
@@ -37,25 +24,36 @@ function hasValidBackupNoteMetadataStructure(value: unknown): boolean {
   );
 }
 
-function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<string>) {
-  if (Array.isArray(node)) {
-    for (const item of node) collectPublicationCardIds(item, inPub, out);
-    return;
-  }
-  if (inPub && typeof node === "string") {
-    const id = node.trim().toLowerCase();
-    if (id) out.add(id);
-    return;
-  }
-  const record = asObject(node);
-  if (!record) return;
-  if (inPub) {
-    for (const candidate of [record.id, record.cardId]) {
-      if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
+function collectPublicationCardIds(root: unknown, initialInPub: boolean, out: Set<string>) {
+  const stack: Array<{ node: unknown; inPub: boolean }> = [{ node: root, inPub: initialInPub }];
+  while (stack.length > 0) {
+    const { node, inPub } = stack.pop()!;
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) {
+        stack.push({ node: node[i], inPub });
+      }
+      continue;
     }
-  }
-  for (const [key, child] of Object.entries(record)) {
-    collectPublicationCardIds(child, key === "publicationCardIds", out);
+    if (inPub && typeof node === "string") {
+      const id = node.trim().toLowerCase();
+      if (id) out.add(id);
+      continue;
+    }
+    const record = asObject(node);
+    if (!record) continue;
+    if (inPub) {
+      for (const candidate of [record.id, record.cardId]) {
+        if (typeof candidate === "string") {
+          const id = candidate.trim().toLowerCase();
+          if (id) out.add(id);
+        }
+      }
+    }
+    const entries = Object.entries(record);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const [key, child] = entries[i]!;
+      stack.push({ node: child, inPub: key === "publicationCardIds" });
+    }
   }
 }
 

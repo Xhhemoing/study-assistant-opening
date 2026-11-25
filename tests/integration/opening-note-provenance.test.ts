@@ -231,10 +231,10 @@ describe("Opening linked note persistence", () => {
     const { documentId } = await save([{ sourceId, sourceVersion: 0 }]);
     const packed = await backups.exportWorkspace(scope);
     expect(packed.records.memberships).toEqual([]);
-    expect(packed.records.documents[0]).toMatchObject({ id: documentId, openingProvenance: { contextSourceRefs: [{ sourceId, sourceVersion: 0 }] } });
+    expect(packed.records.documents[0]).toMatchObject({ id: documentId, openingProvenance: { contextSourceRefs: [{ sourceId, sourceVersion: 0 }], snippetLineageVersion: 1 } });
     await wipeNotes();
     await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "skip" });
-    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }]);
+    expect((await sql`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${documentId}`)[0]!.context_source_refs).toEqual([{ sourceId, sourceVersion: 0 }, { snippetLineageVersion: 1 }]);
     await exclude(sourceId, true);
     await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId })).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
