@@ -573,7 +573,10 @@ async function readInheritedExchangeMemories(
     ...rows.filter(row => row.inherits_memory === true).map(row => String(row.assistant_id)),
     ...extraTurnIds,
   ])];
-  return readTurnMisconceptionMemoryOriginBatches(sql, scope, ids, { excludeAssistantIds: exchangeAssistantIds });
+  return readTurnMisconceptionMemoryOriginBatches(sql, scope, ids, {
+    excludeAssistantIds: exchangeAssistantIds,
+    includeUserPrefix: true,
+  });
 }
 
 function mergeDirectOriginBackings(
@@ -1277,6 +1280,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
   type ConvSweepState = {
     convId: string;
     checkPriorScope: boolean;
+    currentInheritsMemory: boolean;
     currentCourseId: string | null;
     currentPosUs: bigint | undefined;
     currentPosId: string;
@@ -1288,6 +1292,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     currentId: string,
     convId: string,
     checkPriorScope: boolean,
+    currentInheritsMemory: boolean,
     currentCourseId: string | null,
     currentPosUs: bigint | undefined,
     currentPosId: string,
@@ -1302,6 +1307,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
       state = {
         convId,
         checkPriorScope,
+        currentInheritsMemory,
         currentCourseId,
         currentPosUs,
         currentPosId,
@@ -1309,6 +1315,12 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
         coursesByLimit: new Map(),
       };
       convMap.set(convId, state);
+    } else {
+      state.checkPriorScope ||= checkPriorScope;
+      state.currentInheritsMemory ||= currentInheritsMemory;
+      if (state.currentPosUs === undefined && currentPosUs !== undefined) {
+        state.currentPosUs = currentPosUs;
+      }
     }
     return state;
   };
@@ -1316,6 +1328,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
   for (const row of currentOnlyRows) {
     if (authority.get(row.current_id) === null) continue;
     const checkPriorScope = !explicitCurrentIds.has(row.current_id) && !rules?.skipPriorMisconceptions;
+    const currentInheritsMemory = !explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true;
     if (checkPriorScope && row.current_misconception_invalid === true) {
       authority.set(row.current_id, null);
       continue;
@@ -1326,13 +1339,14 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     if (typeof row.conversation_id === "string") {
       const hasConvItems = (batches.byConversation.get(row.conversation_id)?.length ?? 0) > 0;
       if (
-        (!explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true)
+        currentInheritsMemory
         || (checkPriorScope && (jcByConv.has(row.conversation_id) || hasConvItems))
       ) {
         ensureConvSweepState(
           row.current_id,
           row.conversation_id,
           checkPriorScope,
+          currentInheritsMemory,
           row.current_course_id ?? null,
           row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
           String(row.current_id).toLowerCase(),
@@ -1345,6 +1359,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const entries = authority.get(row.current_id);
     if (!entries) continue;
     const checkPriorScope = !explicitCurrentIds.has(row.current_id) && !rules?.skipPriorMisconceptions;
+    const currentInheritsMemory = !explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true;
     let requiredCourses = hashlessCoursesByCurrent.get(row.current_id);
     if (!requiredCourses) {
       requiredCourses = new Set<string | null>();
@@ -1368,13 +1383,14 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     if (typeof row.conversation_id === "string") {
       const convItems = batches.byConversation.get(row.conversation_id) ?? [];
       const shouldSweep = row.inherits_memory === true
-        || (!explicitCurrentIds.has(row.current_id) && row.current_inherits_memory === true)
+        || currentInheritsMemory
         || (checkPriorScope && (jcByConv.has(row.conversation_id) || convItems.length > 0));
       if (shouldSweep) {
         const state = ensureConvSweepState(
           row.current_id,
           row.conversation_id,
           checkPriorScope,
+          currentInheritsMemory,
           row.current_course_id ?? null,
           row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
           String(row.current_id).toLowerCase(),
@@ -1456,15 +1472,17 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     let invalidated = false;
     for (const state of convMap.values()) {
       const convItems = batches.byConversation.get(state.convId) ?? [];
-      if (state.checkPriorScope) {
-        if (state.currentPosUs !== undefined && convItems.length > 0) {
-          const cOrigLimit = upperBoundMemoryOriginPosition(convItems, state.currentPosUs, state.currentPosId);
-          if (cOrigLimit > 0) {
-            if (cOrigLimit > state.maxLimit) state.maxLimit = cOrigLimit;
+      if ((state.checkPriorScope || state.currentInheritsMemory) && state.currentPosUs !== undefined && convItems.length > 0) {
+        const cOrigLimit = upperBoundMemoryOriginPosition(convItems, state.currentPosUs, state.currentPosId);
+        if (cOrigLimit > 0) {
+          if (cOrigLimit > state.maxLimit) state.maxLimit = cOrigLimit;
+          if (state.checkPriorScope) {
             const mergedCurrent = mergeMisconceptionCourses(state.coursesByLimit.get(cOrigLimit), state.currentCourseId);
             if (mergedCurrent) state.coursesByLimit.set(cOrigLimit, mergedCurrent);
           }
         }
+      }
+      if (state.checkPriorScope) {
         const jcInfo = jcByConv.get(state.convId);
         if (jcInfo) {
           const cEnd = state.currentPosUs !== undefined
@@ -1505,7 +1523,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
         } else {
           const histEntry: HistoryAncestorAuthority = {
             courseId: resolved.courseId,
-            consumerCourseId: state.checkPriorScope ? state.currentCourseId : (runningCourses?.[0] ?? null),
+            consumerCourseId: state.checkPriorScope ? state.currentCourseId : runningCourses?.[0],
             extraMisconceptionCourses: itemExtra,
             materialUse: resolved.materialUse,
             memoryIds: resolved.ids,

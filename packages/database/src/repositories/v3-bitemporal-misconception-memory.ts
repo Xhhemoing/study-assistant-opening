@@ -554,10 +554,11 @@ export function upperBoundMemoryOriginPosition(
 /** Read direct and conversation-grouped memory-bearing origins without quadratic prefix copying. */
 export async function readTurnMisconceptionMemoryOriginBatches(
   db: Db, scope: OpeningScope, turnIds: readonly string[],
-  options?: { excludeAssistantIds?: ReadonlySet<string>; includeExpiredBackings?: boolean },
+  options?: { excludeAssistantIds?: ReadonlySet<string>; includeExpiredBackings?: boolean; includeUserPrefix?: boolean },
 ): Promise<TurnMisconceptionMemoryOriginBatches> {
   if (!turnIds.length) return { targets: new Map(), byConversation: new Map(), consumersByConversation: new Map() };
   const includeExpiredBackings = Boolean(options?.includeExpiredBackings);
+  const includeUserPrefix = Boolean(options?.includeUserPrefix);
   const owner: FragmentFactory = () => db`${scope.ownerUserId}::uuid`;
   const rows = await db<{
     id: string;
@@ -593,7 +594,7 @@ export async function readTurnMisconceptionMemoryOriginBatches(
             COALESCE(own_u.id, saved.id)::text AS pos_id,
             ((saved.role = 'assistant' AND saved.intent_hash IS NULL
               AND NOT saved.query_system AND saved.system_query IS NULL)
-              OR (saved.role = 'user' AND NOT saved.query_system)) AS inherits_prefix
+              OR (${includeUserPrefix} AND saved.role = 'user' AND NOT saved.query_system)) AS inherits_prefix
           FROM opening_turns saved
           JOIN opening_conversations c ON c.id = saved.conversation_id AND c.workspace_id = saved.workspace_id
           CROSS JOIN LATERAL (SELECT saved.*) t
@@ -1070,6 +1071,42 @@ export async function readMemoryMisconceptionAuthorities(
       }
     }
 
+    const nodeMustHaveLineage = baseHasLineage || (allSlots.length > 0 && !requireNoLineage);
+    let slotCeilingExpiresAtMs = baseExpiresAtMs;
+    if (allSlots.length > 0) {
+      for (const slot of allSlots) {
+        const qualifying: MemoryMisconceptionAuthority[] = [];
+        let slotMaxExpiresAtMs = -Infinity;
+        for (const dep of slot) {
+          const auth = resolved.get(dep.toLowerCase())!;
+          if (requireLive && !isLive(auth.unexpired, auth.earliestExpiresAtMs)) continue;
+          if (requireNoLineage && auth.lineage) continue;
+          qualifying.push(auth);
+          if (requireLive && auth.earliestExpiresAtMs > slotMaxExpiresAtMs) {
+            slotMaxExpiresAtMs = auth.earliestExpiresAtMs;
+          }
+        }
+        if (requireLive) {
+          slotCeilingExpiresAtMs = Math.min(slotCeilingExpiresAtMs, slotMaxExpiresAtMs);
+        }
+        if (!requireNoLineage && qualifying.length > 0 && qualifying.every(auth => Boolean(auth.lineage))) {
+          const firstLin = qualifying[0]!.lineage!;
+          if (firstLin.courseId !== null && qualifying.every(auth => auth.lineage!.courseId === firstLin.courseId)) {
+            runningCourseId ??= firstLin.courseId;
+          }
+          let sharedRevs = new Set(firstLin.revisionIds);
+          for (let q = 1; q < qualifying.length && sharedRevs.size > 0; q++) {
+            const nextSet = new Set(qualifying[q]!.lineage!.revisionIds);
+            sharedRevs = new Set([...sharedRevs].filter(rev => nextSet.has(rev)));
+          }
+          if (sharedRevs.size > 0) {
+            runningRevSet ??= new Set();
+            for (const rev of sharedRevs) runningRevSet.add(rev);
+          }
+        }
+      }
+    }
+
     const lineages = [node.lineage];
     const depMap = new Map<string, string | null>();
     const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
@@ -1098,12 +1135,12 @@ export async function readMemoryMisconceptionAuthorities(
         const auth = resolved.get(normDep)!;
         if (requireLive && !isLive(auth.unexpired, auth.earliestExpiresAtMs)) continue;
         if (requireNoLineage && auth.lineage) continue;
-        const effDead = requireLive ? Math.min(baseExpiresAtMs, auth.earliestExpiresAtMs) : -1;
+        const effDead = requireLive ? Math.min(slotCeilingExpiresAtMs, baseExpiresAtMs, auth.earliestExpiresAtMs) : -1;
         const combCourse = runningCourseId ?? auth.lineage?.courseId ?? null;
         const combRevs = runningRevSet || auth.lineage
           ? [...new Set([...(runningRevSet ?? []), ...(auth.lineage?.revisionIds ?? [])])].sort()
           : [];
-        const combHasLin = combCourse !== null || combRevs.length > 0;
+        const combHasLin = nodeMustHaveLineage || combCourse !== null || combRevs.length > 0;
         const combNoLin = combHasLin ? 0 : 1;
         const combRevLen = combRevs.length;
         const combLinKey = combHasLin ? `${combCourse ?? ""}:${combRevs.join(",")}` : "";

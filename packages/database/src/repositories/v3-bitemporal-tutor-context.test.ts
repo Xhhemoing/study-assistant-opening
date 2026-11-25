@@ -2353,6 +2353,389 @@ it("closes Round-15 historical backing bounds, zero-job ancestor sweeps, limit-0
   }
 });
 
+it("closes Round-16 skipPriorMisconceptions jobless sweeps, includeUserPrefix scoping, and slot-order-independent multi-slot backings", async () => {
+  const convId = "c6000000-0000-4000-8000-000000000001";
+  const srcA = "c6000000-0000-4000-8000-000000000002";
+  const srcB = "c6000000-0000-4000-8000-000000000003";
+  const rev1 = candidate.revisionId;
+  const rev2 = correction.revisionId;
+  const linR1 = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [rev1] };
+  const linR1R2 = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [rev1, rev2] };
+  const courseALin = { kind: "v3_misconception_lineage" as const, courseId, revisionIds: [rev1] };
+  const courseBLin = { kind: "v3_misconception_lineage" as const, courseId: otherCourseId, revisionIds: [rev2] };
+  const emptySnapshot: TutorMisconceptionSnapshot = {
+    courseId,
+    effectiveCourseId: null,
+    privacyEpoch: 7,
+    revisionIds: [],
+    renderedMarkdown: "",
+    byteLength: 0,
+  };
+
+  // 1) Round-16 P1 #1: readStream (skipPriorMisconceptions: true via misconceptionSnapshot and/or historyMisconceptionLineage)
+  // sweeps 0..cOrigLimit-1 when prior has 0 job-backed exchanges AND when a jobless memory-bearing turn follows a job-backed
+  // exchange (limit === 0), rejecting malformed/retracted/expired jobless memories and propagating finite temporary deadlines
+  // to releaseOpeningStudyExposure, while completed hashed assistant turns keep currentInheritsMemory = false!
+  for (const hasPriorJobExchange of [false, true] as const) {
+    const u1 = "c6000000-0000-4000-8000-000000000011";
+    const a1 = "c6000000-0000-4000-8000-000000000012";
+    const joblessMemTurn = "c6000000-0000-4000-8000-000000000013";
+    const curU = "c6000000-0000-4000-8000-000000000014";
+    const receiptId = "c6000000-0000-4000-8000-000000000015";
+    const memCleanPrior = "c6000000-0000-4000-8000-000000000016";
+    const memJobless = "c6000000-0000-4000-8000-000000000017";
+    const futureExpIso = new Date(Date.now() + 90_000).toISOString();
+    const pastExpIso = new Date(Date.now() - 5_000).toISOString();
+    let joblessState: "malformed" | "retracted" | "expired" | "temp_live" | "perm_live" = "malformed";
+    let completedHashedCurrent = false;
+    const updateExpiryValues: unknown[][] = [];
+
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT privacy_epoch FROM workspaces")) return [{ privacy_epoch: 7 }];
+      if (s.startsWith("SELECT j.*,t.attempt_id")) {
+        return [{
+          id: jobId, workspace_id: scope.workspaceId, user_turn_id: curU, assistant_turn_id: assistantTurnId,
+          status: "running", claim_token: null, timing_execution_id: null, created_at: at, updated_at: at,
+          source_ids: [], source_versions: {}, course_id: courseId, has_prior_exchanges: true,
+        }];
+      }
+      if (s.startsWith("WITH prior AS MATERIALIZED")) {
+        const currentHashedRow = completedHashedCurrent ? [{
+          conversation_id: convId, current_id: curU, current_pos_us: "400", current_course_id: courseId,
+          id: curU, assistant_id: assistantTurnId, pos_us: "400", prior_course_id: courseId, assistant_course_id: courseId,
+          material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+          assistant_intent_hash: JSON.stringify(cleanLineage), inherits_memory: false, current_inherits_memory: true,
+          user_source_refs: [], assistant_source_refs: [], user_direct_ids: [], assistant_direct_ids: [],
+          memory_backing_ids: [], user_memory_backing_ids: [],
+          assistant_direct_versioned: true, origin_allowed: true, current_allowed: true, conv_misconception_hashes: [],
+        }] : [];
+        if (!hasPriorJobExchange) {
+          return completedHashedCurrent ? currentHashedRow : [{
+            conversation_id: convId, current_id: curU, id: null, assistant_id: null,
+            current_pos_us: "400", current_course_id: courseId, current_query_system: false,
+            material_use: "citation", current_misconception_invalid: false, current_inherits_memory: true,
+            first_scoped_course_id: null, conv_misconception_hashes: [],
+          }];
+        }
+        return [
+          ...currentHashedRow,
+          {
+            conversation_id: convId, current_id: curU, current_pos_us: "400", current_course_id: courseId,
+            id: u1, assistant_id: a1, pos_us: "100", prior_course_id: courseId, assistant_course_id: courseId,
+            material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+            assistant_intent_hash: null, inherits_memory: true, current_inherits_memory: true,
+            user_source_refs: [], assistant_source_refs: [{ memoryDependencyIds: [memCleanPrior] }],
+            user_direct_ids: [], assistant_direct_ids: [],
+            memory_backing_ids: [], user_memory_backing_ids: [],
+            assistant_direct_versioned: true, origin_allowed: true, current_allowed: true, conv_misconception_hashes: [],
+          },
+        ];
+      }
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        expect(s).toContain("? AND saved.role = 'user' AND NOT saved.query_system");
+        const turnIdsIdx = q.values.findIndex(v => Array.isArray(v));
+        expect(turnIdsIdx).toBeGreaterThanOrEqual(3);
+        expect(q.values[turnIdsIdx - 3]).toBe(true);
+        const convOrigins = [{
+          posUs: "250",
+          posId: joblessMemTurn,
+          origin: {
+            id: joblessMemTurn, assistantTurnId: joblessMemTurn, courseId, consumerCourseId: null,
+            materialUse: "citation",
+            refs: [{ memoryDependencyIds: [joblessState === "malformed" ? "not-a-valid-uuid" : memJobless] }],
+            standalone: false, historical: true, jobBacked: false,
+          },
+        }];
+        return hasPriorJobExchange ? [{
+          id: a1,
+          origins: [{
+            id: a1, assistantTurnId: a1, courseId, consumerCourseId: courseId, materialUse: "citation",
+            refs: [{ memoryDependencyIds: [memCleanPrior] }], standalone: false, historical: false, jobBacked: true,
+          }],
+          conversation_id: convId, consumer_course_id: courseId,
+          pos_us: "100", pos_id: u1, inherits_prefix: true,
+          conv_origins: convOrigins, conv_consumers: [],
+        }] : [{
+          id: curU, origins: [], conversation_id: convId, consumer_course_id: courseId,
+          pos_us: "400", pos_id: curU, inherits_prefix: true,
+          conv_origins: convOrigins, conv_consumers: [],
+        }];
+      }
+      if (s.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        const exp = joblessState === "expired" ? new Date(pastExpIso) : joblessState === "temp_live" ? new Date(futureExpIso) : null;
+        return [
+          { id: memCleanPrior, course_id: courseId, source_turn_ids: [], expires_at: null },
+          { id: memJobless, course_id: courseId, source_turn_ids: [], expires_at: exp },
+        ];
+      }
+      if (s.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (s.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+      if (s.startsWith("SELECT id FROM opening_memories")) {
+        const expIso = joblessState === "expired" ? pastExpIso : joblessState === "temp_live" ? futureExpIso : null;
+        const joblessLive = joblessState !== "retracted" && joblessState !== "expired";
+        return [
+          { id: { memoryId: memCleanPrior, hashes: [], courseId, statusActive: true, unexpired: true, active: true, expiresAt: null, origins: [] } },
+          ...(joblessState === "retracted" ? [] : [{
+            id: { memoryId: memJobless, hashes: [], courseId, statusActive: true, unexpired: joblessLive, active: joblessLive, expiresAt: expIso, origins: [] },
+          }]),
+        ];
+      }
+      if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (s.startsWith("SELECT 1 WHERE COALESCE")) return [{ ok: 1 }];
+      if (s.includes("opening_workspace_history_revisions") || s.includes("opening_learning_history_revisions")) {
+        return [{ revision: 1 }];
+      }
+      if (s.startsWith("SELECT pg_advisory_xact_lock")) return [];
+      if (s.startsWith("SELECT DISTINCT COALESCE") || s.startsWith("SELECT root_observation_id")) return [];
+      if (s.startsWith("SELECT clock_timestamp()")) return [{ at }];
+      if (s.startsWith("SELECT e.status")) return [];
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return q.values[0] as unknown[];
+      if (s.startsWith("SELECT id FROM opening_help_exposures")) return [{ id: receiptId }];
+      if (s.startsWith("SELECT *, (clock_timestamp() <") || s.startsWith("SELECT * FROM opening_help_exposures")) {
+        return [{
+          id: receiptId, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          turn_id: assistantTurnId, exposure_origin: "assistant", kind: "hint", level: 1, support_domain: "unknown",
+          release_key: "r16-rec", context_anchor: { purpose: "learning_help", courseId },
+          generated_at: at, released_at: null, delivered_at: null, delivered: false,
+          history_revision: 0, workspace_history_revision: 0, before_deadline: true,
+        }];
+      }
+      if (s.startsWith("UPDATE opening_help_exposures")) {
+        updateExpiryValues.push([...q.values]);
+        return [{
+          id: receiptId, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          turn_id: assistantTurnId, exposure_origin: "assistant", kind: "hint", level: 1, support_domain: "unknown",
+          release_key: "r16-rec", context_anchor: { purpose: "learning_help", courseId },
+          generated_at: at, released_at: at, delivered_at: at, delivered: true,
+          history_revision: 1, workspace_history_revision: 1,
+        }];
+      }
+      return unexpected(q);
+    });
+
+    const txSql = Object.assign(
+      ((strings: TemplateStringsArray, ...vals: unknown[]) => {
+        const res = sql(strings, ...vals);
+        return Object.assign(res, {
+          async *cursor(size = 64) {
+            const rows = await res;
+            for (let i = 0; i < rows.length; i += size) yield rows.slice(i, i + size);
+          },
+        });
+      }) as typeof sql,
+      sql,
+      {
+        begin: (run: (tx: typeof sql) => unknown) => run(txSql),
+        savepoint: (run: (sp: typeof sql) => unknown) => run(txSql),
+      },
+    );
+    const jobs = createOpeningTutorJobsRepository(txSql);
+
+    for (const st of ["malformed", "retracted", "expired"] as const) {
+      joblessState = st;
+      expect((await readTutorHistoryAncestorStatus(sql, scope, curU, { skipPriorMisconceptions: true })).valid, `${hasPriorJobExchange}-${st}`).toBe(false);
+      await expect(jobs.readStream(scope, jobId, {
+        privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: receiptId, misconceptionSnapshot: emptySnapshot,
+      })).rejects.toThrow("stream history is no longer available");
+      await expect(jobs.readStream(scope, jobId, {
+        privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: receiptId, historyMisconceptionLineage: cleanLineage,
+      })).rejects.toThrow("stream history is no longer available");
+    }
+
+    // Completed hashed assistant turn keeps currentInheritsMemory = false and ignores unreferenced jobless prefix!
+    joblessState = "malformed";
+    completedHashedCurrent = true;
+    expect((await readTutorHistoryAncestorStatus(sql, scope, curU)).valid).toBe(true);
+    completedHashedCurrent = false;
+
+    // Live temporary jobless ancestor propagates exact finite expiresAt to releaseOpeningStudyExposure!
+    joblessState = "temp_live";
+    updateExpiryValues.length = 0;
+    await expect(jobs.readStream(scope, jobId, {
+      privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: receiptId,
+      misconceptionSnapshot: emptySnapshot, historyMisconceptionLineage: cleanLineage,
+    })).resolves.toMatchObject({ id: jobId, status: "running" });
+    expect(updateExpiryValues).toHaveLength(1);
+    expect(updateExpiryValues[0]).toContain(futureExpIso);
+
+    // Permanent jobless ancestor preserves exact 3-arg releaseOpeningStudyExposure (no finite deadline parameter)!
+    joblessState = "perm_live";
+    updateExpiryValues.length = 0;
+    await expect(jobs.readStream(scope, jobId, {
+      privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: receiptId, historyMisconceptionLineage: cleanLineage,
+    })).resolves.toMatchObject({ id: jobId, status: "running" });
+    expect(updateExpiryValues).toHaveLength(1);
+    expect(updateExpiryValues[0]).not.toContain(futureExpIso);
+  }
+
+  // 2) Round-16 P1 #2: readTurnMisconceptionMemoryOriginBatches defaults includeUserPrefix to false so
+  // admitTaskCandidate / assertTaskCandidateMemoryDependencies on a hashed Course-A turn with user+assistant
+  // memory dependencies do NOT fail because of an earlier Course-B memory-bearing turn in the same unbound conversation!
+  {
+    const u2 = "c6000000-0000-4000-8000-000000000031";
+    const a2 = "c6000000-0000-4000-8000-000000000032";
+    const candId = "c6000000-0000-4000-8000-000000000033";
+    const memA = "c6000000-0000-4000-8000-000000000034";
+    const batchIncludeUserFlags: boolean[] = [];
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT id FROM workspaces w(workspace_id)")) {
+        return [{ id: { ownerUserId: scope.ownerUserId, turnIds: [a2, u2] } }];
+      }
+      if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (s.startsWith("SELECT c.payload")) {
+        return [{
+          payload: { kind: "task", title: "Course A follow-up", minutes: 15, dueText: null },
+          source_turn_id: a2, paired_user_turn_id: u2, historical_user_turn_id: u2,
+          has_memory_dependencies: true, assistant_has_memory_dependencies: true,
+          course_id: courseId, user_course_id: courseId, role: "assistant", material_use: "citation",
+          source_ids: [], user_source_ids: [],
+          context_source_refs: [{ memoryDependencyIds: [memA] }],
+        }];
+      }
+      if (s.startsWith("WITH prior AS MATERIALIZED")) {
+        return [{
+          conversation_id: convId, current_id: u2, id: u2, assistant_id: a2, pos_us: "200",
+          prior_course_id: courseId, assistant_course_id: courseId, current_course_id: courseId,
+          material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+          assistant_intent_hash: JSON.stringify(courseALin), inherits_memory: false, current_inherits_memory: true,
+          user_source_refs: [{ memoryDependencyIds: [memA] }], assistant_source_refs: [{ memoryDependencyIds: [memA] }],
+          user_direct_ids: [], assistant_direct_ids: [], memory_backing_ids: [], user_memory_backing_ids: [],
+          assistant_direct_versioned: true, origin_allowed: true, current_allowed: true, conv_misconception_hashes: [],
+        }];
+      }
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return q.values[0] as unknown[];
+      if (s.startsWith("SELECT t.id FROM opening_turns")) {
+        return [{ id: {
+          turnId: a2, ownerUserId: scope.ownerUserId, courseId, materialUse: "citation",
+          refs: [{ memoryDependencyIds: [memA] }], checkedAt: new Date().toISOString(), historicalUserTurnId: u2,
+          paired: { turnId: u2, courseId, materialUse: "citation", refs: [{ memoryDependencyIds: [memA] }] },
+        } }];
+      }
+      if (s.startsWith("SELECT dep_m.id")) return [{ id: memA, course_id: courseId, source_turn_ids: [], expires_at: null }];
+      if (s.startsWith("SELECT m.id, course.id")) return [];
+      if (s.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+      if (s.startsWith("SELECT c.id FROM opening_assistant_candidates")) return [{ id: candId }];
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        expect(s).toContain("? AND saved.role = 'user' AND NOT saved.query_system");
+        const turnIdsIdx = q.values.findIndex(v => Array.isArray(v));
+        expect(turnIdsIdx).toBeGreaterThanOrEqual(3);
+        const includeUserPrefix = Boolean(q.values[turnIdsIdx - 3]);
+        batchIncludeUserFlags.push(includeUserPrefix);
+        return [a2, u2].map(tid => ({
+          id: tid, conversation_id: convId, consumer_course_id: courseId, pos_us: "200", pos_id: u2,
+          inherits_prefix: includeUserPrefix && tid === u2,
+          origins: [{
+            id: tid, assistantTurnId: a2, courseId, consumerCourseId: courseId, pairedAssistantCourseId: courseId,
+            materialUse: "citation", refs: [{ memoryDependencyIds: [memA] }], standalone: false, isPairedUser: tid === u2,
+          }],
+          // If inherits_prefix were true on u2, this cross-course Course-B misconception memory would reject u2!
+          conv_origins: includeUserPrefix ? [{
+            posUs: "100", posId: "c6000000-0000-4000-8000-000000000039",
+            origin: {
+              id: "c6000000-0000-4000-8000-000000000039", courseId: otherCourseId, consumerCourseId: null,
+              materialUse: "citation", refs: [{ memoryDependencyIds: ["c6000000-0000-4000-8000-000000000038"] }],
+              standalone: false, historical: true, jobBacked: false,
+            },
+          }] : [],
+        }));
+      }
+      if (s.startsWith("SELECT id FROM opening_memories")) {
+        return [
+          { id: { memoryId: memA, hashes: [JSON.stringify(courseALin)], courseId, active: true, unexpired: true, expiresAt: null, origins: [] } },
+          { id: { memoryId: "c6000000-0000-4000-8000-000000000038", hashes: [JSON.stringify(courseBLin)], courseId: otherCourseId, active: true, unexpired: true, expiresAt: null, origins: [] } },
+        ];
+      }
+      return unexpected(q);
+    });
+    await expect(admitTaskCandidate(sql as never, scope, candId)).resolves.toBe(a2);
+    await expect(assertTaskCandidateMemoryDependencies(sql as never, scope.workspaceId, a2)).resolves.toBeUndefined();
+    expect(batchIncludeUserFlags).toEqual([false, false]);
+  }
+
+  // 3) Round-16 P2 #3: Multi-slot evaluateNode / selectBestSlotOption is 100% slot-order-independent under BOTH
+  // forced lineage ([cleanTempT, permR] + [permR]) AND cross-slot expiry ceilings ([permR1R2, tempR1] + [tempClean])!
+  {
+    const exp50Iso = new Date(Date.now() + 50_000).toISOString();
+    const exp100Iso = new Date(Date.now() + 100_000).toISOString();
+    const exp50Ms = new Date(exp50Iso).getTime();
+    const cleanTempT = "c6100000-0000-4000-8000-000000000001";
+    const permR = "c6100000-0000-4000-8000-000000000002";
+    const permR1R2 = "c6100000-0000-4000-8000-000000000003";
+    const tempR1 = "c6100000-0000-4000-8000-000000000004";
+    const tempClean50 = "c6100000-0000-4000-8000-000000000005";
+    const forcedNodeFwd = "c6100000-0000-4000-8000-000000000011";
+    const forcedNodeRev = "c6100000-0000-4000-8000-000000000012";
+    const ceilingNodeFwd = "c6100000-0000-4000-8000-000000000013";
+    const ceilingNodeRev = "c6100000-0000-4000-8000-000000000014";
+    const tForcedFwd = "c6100000-0000-4000-8000-000000000021";
+    const tForcedRev = "c6100000-0000-4000-8000-000000000022";
+    const tCeilFwd = "c6100000-0000-4000-8000-000000000023";
+    const tCeilRev = "c6100000-0000-4000-8000-000000000024";
+
+    const twoSlotRefs = [
+      { sourceId: srcA, sourceVersion: 1, memoryOnly: true },
+      { sourceId: srcB, sourceVersion: 1, memoryOnly: true },
+    ];
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT id FROM opening_memories AS m(memory_id)")) {
+        const reqIds = q.values[1] as string[];
+        return reqIds.flatMap(id => {
+          if (id === cleanTempT) return [{ id: { memoryId: cleanTempT, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: exp100Iso, origins: [] } }];
+          if (id === permR) return [{ id: { memoryId: permR, hashes: [JSON.stringify(linR1)], courseId: null, active: true, unexpired: true, expiresAt: null, origins: [] } }];
+          if (id === permR1R2) return [{ id: { memoryId: permR1R2, hashes: [JSON.stringify(linR1R2)], courseId: null, active: true, unexpired: true, expiresAt: null, origins: [] } }];
+          if (id === tempR1) return [{ id: { memoryId: tempR1, hashes: [JSON.stringify(linR1)], courseId: null, active: true, unexpired: true, expiresAt: exp100Iso, origins: [] } }];
+          if (id === tempClean50) return [{ id: { memoryId: tempClean50, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: exp50Iso, origins: [] } }];
+          const turnByMem: Record<string, string> = {
+            [forcedNodeFwd]: tForcedFwd,
+            [forcedNodeRev]: tForcedRev,
+            [ceilingNodeFwd]: tCeilFwd,
+            [ceilingNodeRev]: tCeilRev,
+          };
+          const turnId = turnByMem[id];
+          if (turnId) {
+            return [{ id: {
+              memoryId: id, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: null,
+              origins: [{ id: turnId, courseId: null, consumerCourseId: null, materialUse: "citation", refs: twoSlotRefs, standalone: true }],
+            } }];
+          }
+          return [];
+        });
+      }
+      if (s.startsWith("SELECT saved.id,")) {
+        return [
+          { id: tForcedFwd, backings: [[cleanTempT, permR], [permR]] },
+          { id: tForcedRev, backings: [[permR], [cleanTempT, permR]] },
+          { id: tCeilFwd, backings: [[permR1R2, tempR1], [tempClean50]] },
+          { id: tCeilRev, backings: [[tempClean50], [permR1R2, tempR1]] },
+        ];
+      }
+      if (s.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        return [
+          { id: cleanTempT, course_id: null, source_turn_ids: [], expires_at: new Date(exp100Iso) },
+          { id: permR, course_id: null, source_turn_ids: [], expires_at: null },
+          { id: permR1R2, course_id: null, source_turn_ids: [], expires_at: null },
+          { id: tempR1, course_id: null, source_turn_ids: [], expires_at: new Date(exp100Iso) },
+          { id: tempClean50, course_id: null, source_turn_ids: [], expires_at: new Date(exp50Iso) },
+        ];
+      }
+      if (s.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return q.values[0] as unknown[];
+      return unexpected(q);
+    });
+
+    const res = await readMemoryMisconceptionAuthorities(
+      sql, scope, [forcedNodeFwd, forcedNodeRev, ceilingNodeFwd, ceilingNodeRev], null,
+    );
+    expect(res.get(forcedNodeFwd)).toMatchObject({ lineage: linR1, unexpired: true, earliestExpiresAtMs: Infinity });
+    expect(res.get(forcedNodeRev)).toEqual(res.get(forcedNodeFwd));
+    expect(res.get(ceilingNodeFwd)).toMatchObject({ lineage: linR1, unexpired: true, earliestExpiresAtMs: exp50Ms });
+    expect(res.get(ceilingNodeRev)).toEqual(res.get(ceilingNodeFwd));
+  }
+});
+
 it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception lineage validation on PostgreSQL 16", async () => {
   // PGlite is provisioned locally for this optional real-SQL test so the workspace lockfile stays unchanged.
   const packageName = "@electric-sql/pglite";
@@ -2434,6 +2817,10 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       }
       then(resolve: (rows: unknown[]) => void, reject: (error: unknown) => void) {
         return this.execute().then(resolve, reject);
+      }
+      async *cursor(size = 64) {
+        const rows = await this.execute();
+        for (let i = 0; i < rows.length; i += size) yield rows.slice(i, i + size);
       }
       async execute() {
         const params: unknown[] = [];
@@ -3532,9 +3919,14 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         }
         return origExecute.call(this);
       };
+      await loadTutorHistoryContext(sql, scope, r12ScaleCurrent);
+      SqlFragment.prototype.execute = origExecute;
+      explain = false;
       const scaleStart = performance.now();
       const scaleRes = await loadTutorHistoryContext(sql, scope, r12ScaleCurrent);
-      expect(performance.now() - scaleStart).toBeLessThan(500);
+      const scaleElapsed = performance.now() - scaleStart;
+      explain = true;
+      expect(scaleElapsed).toBeLessThan(500);
       expect(scaleRes.history).toHaveLength(40);
       expect(scaleRes.memoryIds).toEqual([...r12ScaleMems].sort());
       expect(scaleRes.historyCourseBindings).toEqual([
@@ -4360,6 +4752,284 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
           unexpired: true,
           earliestExpiresAtMs: r15CycExpMs,
         });
+      }
+
+      // 11) Round-16 P1 #1/#2 & P2 #3 on real PostgreSQL 16.4 (< 20,000 EXPLAIN cost gate active):
+      await db.exec(`
+        ALTER TABLE v3_bitemporal_misconception_edges
+          ADD COLUMN IF NOT EXISTS edge_id uuid DEFAULT '00000016-0000-4000-8000-000000000000',
+          ADD COLUMN IF NOT EXISTS learner_disposition text,
+          ADD COLUMN IF NOT EXISTS summary text DEFAULT 'Check domain bounds';
+      `);
+      const r16Rev1 = "b7000000-0000-4000-8000-000000000001";
+      const r16Rev2 = "b7000000-0000-4000-8000-000000000002";
+      const r16CourseBRev = "b7000000-0000-4000-8000-000000000003";
+      const r16GlobalLin1 = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [r16Rev1] };
+      const r16GlobalLin12 = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [r16Rev1, r16Rev2] };
+      const r16CourseALin = { kind: "v3_misconception_lineage" as const, courseId, revisionIds: [r16Rev1] };
+      const r16CourseBLin = { kind: "v3_misconception_lineage" as const, courseId: otherCourseId, revisionIds: [r16CourseBRev] };
+      await db.query(`INSERT INTO v3_bitemporal_misconception_edges
+          (revision_id,workspace_id,owner_user_id,course_id,privacy_epoch,valid_range,tx_range,status,edge_id,summary)
+        VALUES ($1,$4,$5,NULL,7,'(,)','(,)','candidate',$1,'Global R1'),
+               ($2,$4,$5,NULL,7,'(,)','(,)','candidate',$2,'Global R2'),
+               ($3,$4,$5,$6,7,'(,)','(,)','candidate',$3,'Course B R3')`,
+        [r16Rev1, r16Rev2, r16CourseBRev, scope.workspaceId, scope.ownerUserId, otherCourseId]);
+
+      // (a) P1 #1 on real PostgreSQL 16.4: readStream with misconceptionSnapshot AND/OR historyMisconceptionLineage
+      // (skipPriorMisconceptions: true) rejects malformed, expired, and retracted jobless ancestor memories when prior has
+      // 0 job-backed exchanges AND when a jobless memory-bearing turn follows a job-backed exchange (limit === 0), and
+      // propagates finite temporary deadlines to releaseOpeningStudyExposure!
+      const r16OrigConvA = "b7100000-0000-4000-8000-000000000001";
+      const r16OrigTurnA = "b7100000-0000-4000-8000-000000000002";
+      const r16CleanPriorMem = "b7100000-0000-4000-8000-000000000003";
+      const r16MiscMem = "b7100000-0000-4000-8000-000000000004";
+      const r16ExpiredMem = "b7100000-0000-4000-8000-000000000005";
+      const r16LiveTempMem = "b7100000-0000-4000-8000-000000000006";
+      const r16LiveTempIso = new Date(Date.now() + 95_000).toISOString();
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)", [r16OrigConvA, scope.workspaceId, scope.ownerUserId, courseId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',$4,'[]',$5,false,to_timestamp($6),'R16 Course A misc origin')`,
+        [r16OrigTurnA, scope.workspaceId, r16OrigConvA, JSON.stringify(r16CourseALin), JSON.stringify({ courseId }), baseEpochSec + 90_000]);
+      await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,created_at)
+        VALUES ($1,$5,$6,$7,'confirmed',NULL,to_timestamp($9)),
+               ($2,$5,$6,$8,'confirmed',NULL,to_timestamp($9)),
+               ($3,$5,$6,$7,'temporary',to_timestamp($10),to_timestamp($9)),
+               ($4,$5,$6,$7,'temporary',$11,to_timestamp($9))`,
+        [r16CleanPriorMem, r16MiscMem, r16ExpiredMem, r16LiveTempMem, scope.workspaceId, courseId,
+          JSON.stringify([cleanOriginId]), JSON.stringify([r16OrigTurnA]),
+          baseEpochSec + 90_005, baseEpochSec + 90_015, r16LiveTempIso]);
+
+      const r16SnapshotA = (await readTutorLearnerMisconceptionContext(sql, scope, { courseId, expectedPrivacyEpoch: 7 }))!;
+      expect(r16SnapshotA).toBeTruthy();
+
+      for (const [idx, withJobExchange] of [[1, false], [2, true]] as const) {
+        const pfx = `b710000${idx}-0000-4000-8000-0000000000`;
+        const cStream = `${pfx}11`, u1 = `${pfx}12`, a1 = `${pfx}13`, j2 = `${pfx}14`;
+        const curU = `${pfx}15`, curA = `${pfx}16`, curJob = `${pfx}17`, recId = `${pfx}18`;
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)", [cStream, scope.workspaceId, scope.ownerUserId, courseId]);
+        if (withJobExchange) {
+          await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+              context_anchor,query_system,created_at,text)
+            VALUES ($1,$3,$4,'user','complete',NULL,'[]',$6,false,to_timestamp($7),'Prior Q1'),
+                   ($2,$3,$4,'assistant','complete',NULL,$5,$6,false,to_timestamp($7),'Prior A1')`,
+            [u1, a1, scope.workspaceId, cStream, JSON.stringify([{ memoryDependencyIds: [r16CleanPriorMem] }]),
+              JSON.stringify({ courseId }), baseEpochSec + 90_020]);
+          await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status) VALUES ($1,$2,$3,$4,$1,'succeeded')",
+            [a1, scope.workspaceId, cStream, u1]);
+        }
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+            context_anchor,query_system,created_at,text)
+          VALUES ($1,$4,$5,'assistant','complete',NULL,$6,$7,false,to_timestamp($8),'Jobless j2'),
+                 ($2,$4,$5,'user','complete',NULL,'[]',$7,false,to_timestamp($9),'Stream curU'),
+                 ($3,$4,$5,'assistant','pending',NULL,'[]',$7,false,to_timestamp($9),'Stream curA')`,
+          [j2, curU, curA, scope.workspaceId, cStream,
+            JSON.stringify([{ memoryDependencyIds: ["not-a-valid-uuid"] }]),
+            JSON.stringify({ courseId }), baseEpochSec + 90_030, baseEpochSec + 90_040]);
+        await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status) VALUES ($1,$2,$3,$4,$5,'running')",
+          [curJob, scope.workspaceId, cStream, curU, curA]);
+        await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+          VALUES ($1,$2,$3,$4,$5,'assistant',$6,$7,NULL)`,
+          [recId, scope.workspaceId, scope.ownerUserId, courseId, curA, `r16-stream-rec-${idx}`, JSON.stringify({ purpose: "learning_help", courseId })]);
+        await db.exec("ANALYZE");
+
+        // 1. Malformed jobless memory UUID rejected under misconceptionSnapshot AND historyMisconceptionLineage!
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId, misconceptionSnapshot: r16SnapshotA,
+        })).rejects.toThrow("stream history is no longer available");
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId, historyMisconceptionLineage: cleanLineage,
+        })).rejects.toThrow("stream history is no longer available");
+
+        // 2. Expired temporary jobless memory rejected under both!
+        await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
+          [JSON.stringify([{ memoryDependencyIds: [r16ExpiredMem] }]), j2]);
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId, misconceptionSnapshot: r16SnapshotA,
+        })).rejects.toThrow("stream history is no longer available");
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId, historyMisconceptionLineage: cleanLineage,
+        })).rejects.toThrow("stream history is no longer available");
+
+        // 3. Retracted misconception on jobless memory rejected under skipPriorMisconceptions: true!
+        await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
+          [JSON.stringify([{ memoryDependencyIds: [r16MiscMem] }]), j2]);
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [r16Rev1]);
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId, historyMisconceptionLineage: cleanLineage,
+        })).rejects.toThrow("stream history is no longer available");
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate' WHERE revision_id=$1", [r16Rev1]);
+
+        // 4. Live temporary jobless memory propagates finite deadline to releaseOpeningStudyExposure (rolls back on mid-release expiry, releases with < expiresAt)!
+        await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
+          [JSON.stringify([{ memoryDependencyIds: [r16LiveTempMem] }]), j2]);
+        let capturedDeadlineParam: unknown;
+        SqlFragment.prototype.execute = async function (this: SqlFragment) {
+          const params: unknown[] = [];
+          const rendered = this.render(params).trim();
+          if (rendered.startsWith("UPDATE opening_help_exposures") && rendered.includes("now_ts.ts <") && params.includes(recId)) {
+            capturedDeadlineParam = params[params.length - 1];
+          }
+          return origExecute.call(this);
+        };
+        await expect(jobs.readStream(scope, curJob, {
+          privacyEpoch: 7, contextSourceRefs: [], exposureReceiptId: recId,
+          misconceptionSnapshot: r16SnapshotA, historyMisconceptionLineage: cleanLineage,
+        })).resolves.toMatchObject({ id: curJob, status: "running" });
+        SqlFragment.prototype.execute = origExecute;
+        expect(capturedDeadlineParam).toBe(r16LiveTempIso);
+        expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [recId])).rows[0]?.released_at)
+          .not.toBeNull();
+      }
+
+      // (b) P1 #2 on real PostgreSQL 16.4: admitTaskCandidate and assertTaskCandidateMemoryDependencies succeed for a
+      // hashed Course-A assistant turn (intent_hash IS NOT NULL) with assistant AND paired-user memory dependencies in an
+      // unbound conversation after an earlier Course-B memory-bearing turn (and unreferenced jobless turns)!
+      {
+        const cUnbound = "b7200000-0000-4000-8000-000000000001";
+        const origConvB = "b7200000-0000-4000-8000-000000000002";
+        const origTurnB = "b7200000-0000-4000-8000-000000000003";
+        const memB = "b7200000-0000-4000-8000-000000000004";
+        const joblessB = "b7200000-0000-4000-8000-000000000005";
+        const u1B = "b7200000-0000-4000-8000-000000000006";
+        const a1B = "b7200000-0000-4000-8000-000000000007";
+        const u2A = "b7200000-0000-4000-8000-000000000008";
+        const a2A = "b7200000-0000-4000-8000-000000000009";
+        const candA2 = "b7200000-0000-4000-8000-000000000010";
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$3,$4,NULL), ($2,$3,$4,$5)",
+          [cUnbound, origConvB, scope.workspaceId, scope.ownerUserId, otherCourseId]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+            context_anchor,query_system,created_at,text)
+          VALUES ($1,$2,$3,'assistant','complete',$4,'[]',$5,false,to_timestamp($6),'R16 Course B misc origin')`,
+          [origTurnB, scope.workspaceId, origConvB, JSON.stringify(r16CourseBLin), JSON.stringify({ courseId: otherCourseId }), baseEpochSec + 91_000]);
+        await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,created_at) VALUES ($1,$2,$3,$4,'confirmed',NULL,to_timestamp($5))",
+          [memB, scope.workspaceId, otherCourseId, JSON.stringify([origTurnB]), baseEpochSec + 91_005]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+            context_anchor,query_system,created_at,text)
+          VALUES ($1,$6,$7,'assistant','complete',NULL,$10,$12,false,to_timestamp($14),'Jobless B mem turn'),
+                 ($2,$6,$7,'user','complete',NULL,$10,$12,false,to_timestamp($15),'Course B Q1'),
+                 ($3,$6,$7,'assistant','complete',$8,$10,$12,false,to_timestamp($15),'Course B A1'),
+                 ($4,$6,$7,'user','complete','sha256:req-u2a',$11,$13,false,to_timestamp($16),'Course A Q2'),
+                 ($5,$6,$7,'assistant','complete',$9,$11,$13,false,to_timestamp($16),'Course A A2')`,
+          [joblessB, u1B, a1B, u2A, a2A, scope.workspaceId, cUnbound,
+            JSON.stringify(r16CourseBLin), JSON.stringify(r16CourseALin),
+            JSON.stringify([{ memoryDependencyIds: [memB] }]),
+            JSON.stringify([{ memoryDependencyIds: [r16MiscMem] }]),
+            JSON.stringify({ courseId: otherCourseId }), JSON.stringify({ courseId }),
+            baseEpochSec + 91_010, baseEpochSec + 91_020, baseEpochSec + 91_030]);
+        await db.query(`INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status)
+          VALUES ($1,$3,$4,$5,$1,'succeeded'), ($2,$3,$4,$6,$2,'succeeded')`,
+          [a1B, a2A, scope.workspaceId, cUnbound, u1B, u2A]);
+        await db.query("INSERT INTO opening_assistant_candidates VALUES ($1,$2,$3,$4,'[]',$5)",
+          [candA2, scope.workspaceId, cUnbound, a2A, { kind: "task", title: "Course A task", minutes: 20, dueText: null }]);
+        await db.exec("ANALYZE");
+
+        await expect(admitTaskCandidate(sql as never, scope, candA2)).resolves.toBe(a2A);
+        await expect(assertTaskCandidateMemoryDependencies(sql as never, scope.workspaceId, a2A)).resolves.toBeUndefined();
+
+        // Even if the unreferenced earlier jobless turn joblessB had malformed refs, hashed a2A still admits cleanly:
+        await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
+          [JSON.stringify([{ memoryDependencyIds: ["not-a-valid-uuid"] }]), joblessB]);
+        await expect(admitTaskCandidate(sql as never, scope, candA2)).resolves.toBe(a2A);
+        await expect(assertTaskCandidateMemoryDependencies(sql as never, scope.workspaceId, a2A)).resolves.toBeUndefined();
+
+        // Retracting a2A's OWN Course-A memory misconception r16Rev1 rejects both admitTaskCandidate & assertTaskCandidateMemoryDependencies!
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [r16Rev1]);
+        await expect(admitTaskCandidate(sql as never, scope, candA2)).rejects.toMatchObject({ code: "VALIDATION" });
+        await expect(assertTaskCandidateMemoryDependencies(sql as never, scope.workspaceId, a2A)).rejects.toMatchObject({ code: "VALIDATION" });
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate' WHERE revision_id=$1", [r16Rev1]);
+      }
+
+      // (c) P2 #3 on real PostgreSQL 16.4: Multi-slot backing order-independence for BOTH
+      // [cleanTempT, permR] + [permR] vs [permR] + [cleanTempT, permR] (Infinity in both orders) AND
+      // [permR1R2 (Inf), tempR1 (100)] + [tempClean (50)] in both orders (expiry 50 and {r1} in both orders)!
+      {
+        const s0 = "b7300000-0000-4000-8000-000000000001";
+        const s1 = "b7300000-0000-4000-8000-000000000002";
+        const s2 = "b7300000-0000-4000-8000-000000000003";
+        const s3 = "b7300000-0000-4000-8000-000000000004";
+        const cMulti = "b7300000-0000-4000-8000-000000000005";
+        const tCleanS0 = "b7300000-0000-4000-8000-000000000006";
+        const tPermRS0S1 = "b7300000-0000-4000-8000-000000000007";
+        const tPermR1R2S2 = "b7300000-0000-4000-8000-000000000008";
+        const tTempR1S2 = "b7300000-0000-4000-8000-000000000009";
+        const tTempCleanS3 = "b7300000-0000-4000-8000-000000000010";
+        const mCleanTempT = "b7300000-0000-4000-8000-000000000011";
+        const mPermR = "b7300000-0000-4000-8000-000000000012";
+        const mPermR1R2 = "b7300000-0000-4000-8000-000000000013";
+        const mTempR1 = "b7300000-0000-4000-8000-000000000014";
+        const mTempClean50 = "b7300000-0000-4000-8000-000000000015";
+        const tForced01 = "b7300000-0000-4000-8000-000000000021";
+        const tForced10 = "b7300000-0000-4000-8000-000000000022";
+        const tCeil23 = "b7300000-0000-4000-8000-000000000023";
+        const tCeil32 = "b7300000-0000-4000-8000-000000000024";
+        const mForced01 = "b7300000-0000-4000-8000-000000000031";
+        const mForced10 = "b7300000-0000-4000-8000-000000000032";
+        const mCeil23 = "b7300000-0000-4000-8000-000000000033";
+        const mCeil32 = "b7300000-0000-4000-8000-000000000034";
+        const exp50Iso = new Date(Date.now() + 50_000).toISOString();
+        const exp100Iso = new Date(Date.now() + 100_000).toISOString();
+        const exp50Ms = new Date(exp50Iso).getTime();
+
+        await db.query(`INSERT INTO opening_sources (id,workspace_id,version,upload_state)
+          VALUES ($1,$5,1,'uploaded'), ($2,$5,1,'uploaded'), ($3,$5,1,'uploaded'), ($4,$5,1,'uploaded')`,
+          [s0, s1, s2, s3, scope.workspaceId]);
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [cMulti, scope.workspaceId, scope.ownerUserId]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,source_ids,source_versions,
+            context_source_refs,query_system,created_at,text)
+          VALUES ($1,$10,$11,'assistant','complete',$12,ARRAY[$15]::uuid[],jsonb_build_object($15::text,1),$19,false,to_timestamp($27),'clean S0'),
+                 ($2,$10,$11,'assistant','complete',$13,ARRAY[$15,$16]::uuid[],jsonb_build_object($15::text,1,$16::text,1),$20,false,to_timestamp($27),'permR S0+S1'),
+                 ($3,$10,$11,'assistant','complete',$14,ARRAY[$17]::uuid[],jsonb_build_object($17::text,1),$21,false,to_timestamp($27),'permR1R2 S2'),
+                 ($4,$10,$11,'assistant','complete',$13,ARRAY[$17]::uuid[],jsonb_build_object($17::text,1),$21,false,to_timestamp($27),'tempR1 S2'),
+                 ($5,$10,$11,'assistant','complete',$12,ARRAY[$18]::uuid[],jsonb_build_object($18::text,1),$22,false,to_timestamp($27),'tempClean S3'),
+                 ($6,$10,$11,'assistant','complete',$12,'{}','{}'::jsonb,$23,false,to_timestamp($28),'forced 0->1'),
+                 ($7,$10,$11,'assistant','complete',$12,'{}','{}'::jsonb,$24,false,to_timestamp($28),'forced 1->0'),
+                 ($8,$10,$11,'assistant','complete',$12,'{}','{}'::jsonb,$25,false,to_timestamp($28),'ceil 2->3'),
+                 ($9,$10,$11,'assistant','complete',$12,'{}','{}'::jsonb,$26,false,to_timestamp($28),'ceil 3->2')`,
+          [tCleanS0, tPermRS0S1, tPermR1R2S2, tTempR1S2, tTempCleanS3, tForced01, tForced10, tCeil23, tCeil32,
+            scope.workspaceId, cMulti,
+            JSON.stringify(cleanLineage), JSON.stringify(r16GlobalLin1), JSON.stringify(r16GlobalLin12),
+            s0, s1, s2, s3,
+            JSON.stringify([{ sourceId: s0, sourceVersion: 1 }]),
+            JSON.stringify([{ sourceId: s0, sourceVersion: 1 }, { sourceId: s1, sourceVersion: 1 }]),
+            JSON.stringify([{ sourceId: s2, sourceVersion: 1 }]),
+            JSON.stringify([{ sourceId: s3, sourceVersion: 1 }]),
+            JSON.stringify([{ sourceId: s0, sourceVersion: 1, memoryOnly: true }, { sourceId: s1, sourceVersion: 1, memoryOnly: true }]),
+            JSON.stringify([{ sourceId: s1, sourceVersion: 1, memoryOnly: true }, { sourceId: s0, sourceVersion: 1, memoryOnly: true }]),
+            JSON.stringify([{ sourceId: s2, sourceVersion: 1, memoryOnly: true }, { sourceId: s3, sourceVersion: 1, memoryOnly: true }]),
+            JSON.stringify([{ sourceId: s3, sourceVersion: 1, memoryOnly: true }, { sourceId: s2, sourceVersion: 1, memoryOnly: true }]),
+            baseEpochSec + 92_000, baseEpochSec + 92_020]);
+        await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,created_at)
+          VALUES ($1,$10,NULL,$11,'temporary',$20,to_timestamp($22)),
+                 ($2,$10,NULL,$12,'confirmed',NULL,to_timestamp($22)),
+                 ($3,$10,NULL,$13,'confirmed',NULL,to_timestamp($22)),
+                 ($4,$10,NULL,$14,'temporary',$20,to_timestamp($22)),
+                 ($5,$10,NULL,$15,'temporary',$21,to_timestamp($22)),
+                 ($6,$10,NULL,$16,'confirmed',NULL,to_timestamp($23)),
+                 ($7,$10,NULL,$17,'confirmed',NULL,to_timestamp($23)),
+                 ($8,$10,NULL,$18,'confirmed',NULL,to_timestamp($23)),
+                 ($9,$10,NULL,$19,'confirmed',NULL,to_timestamp($23))`,
+          [mCleanTempT, mPermR, mPermR1R2, mTempR1, mTempClean50, mForced01, mForced10, mCeil23, mCeil32,
+            scope.workspaceId,
+            JSON.stringify([tCleanS0]), JSON.stringify([tPermRS0S1]), JSON.stringify([tPermR1R2S2]),
+            JSON.stringify([tTempR1S2]), JSON.stringify([tTempCleanS3]),
+            JSON.stringify([tForced01]), JSON.stringify([tForced10]), JSON.stringify([tCeil23]), JSON.stringify([tCeil32]),
+            exp100Iso, exp50Iso, baseEpochSec + 92_005, baseEpochSec + 92_025]);
+        await db.exec("ANALYZE");
+
+        const multiAuth = await readMemoryMisconceptionAuthorities(sql, scope, [mForced01, mForced10, mCeil23, mCeil32], null);
+        expect(multiAuth.get(mForced01)).toMatchObject({
+          lineage: r16GlobalLin1,
+          unexpired: true,
+          earliestExpiresAtMs: Infinity,
+        });
+        expect(multiAuth.get(mForced10)).toEqual(multiAuth.get(mForced01));
+        expect(multiAuth.get(mCeil23)).toMatchObject({
+          lineage: r16GlobalLin1,
+          unexpired: true,
+          earliestExpiresAtMs: exp50Ms,
+        });
+        expect(multiAuth.get(mCeil32)).toEqual(multiAuth.get(mCeil23));
       }
     } finally {
       SqlFragment.prototype.execute = origExecute;
