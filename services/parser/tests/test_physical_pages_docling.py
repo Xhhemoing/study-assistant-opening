@@ -1903,6 +1903,24 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
             self.assertEqual(ext_inline.texts_by_page[1], ["1. Find x."], inline_label)
             self.assertTrue(ext_inline.inline_sealed_by_page[1], inline_label)
 
+        worked_example = "Worked Example 1: Solve x = 2."
+        for running_in_example in ("Chapter 2: Algebra (第2张)", "Chapter 2 (Page 5)", "第二章 代数（第2张）", "Chapter 2: 第2张"):
+            text = f"{worked_example}\n{running_in_example}\nSolution: 2张"
+            ext_example = physical_pages.extract_physical_pages(
+                result_for([text_element(1, text, 1)], start_page=1)
+            )
+            self.assertEqual(ext_example.texts_by_page[1], [text], running_in_example)
+            self.assertFalse(ext_example.had_sealed_by_page[1], running_in_example)
+            self.assertFalse(ext_example.inline_sealed_by_page[1], running_in_example)
+
+        for non_running_in_example in ("Chapter 2: Groups (Lagrange)", "Chapter 2: Linear Maps (Part 1)"):
+            ext_exited = physical_pages.extract_physical_pages(
+                result_for([text_element(1, f"{worked_example}\n{non_running_in_example}\nSolution: 2张", 1)], start_page=1)
+            )
+            self.assertEqual(ext_exited.texts_by_page[1], [f"{worked_example}\n{non_running_in_example}"], non_running_in_example)
+            self.assertTrue(ext_exited.had_sealed_by_page[1], non_running_in_example)
+            self.assertTrue(ext_exited.inline_sealed_by_page[1], non_running_in_example)
+
 
 if __name__ == "__main__":
     if WORKER_FIXTURE_MODE:

@@ -439,6 +439,7 @@ function isSectionSealedExit(stripped: string, isMarkdownHeading: boolean): bool
 }
 
 function isTitledPublicContainer(stripped: string): boolean {
+  if (isRunningPageHeading(stripped, false)) return false;
   const chinese = CHINESE_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   const prefix = chinese ?? ENGLISH_CONTAINER_PREFIX_RE.exec(stripped)?.[0];
   if (!prefix) return false;
@@ -450,6 +451,7 @@ function isTitledPublicContainer(stripped: string): boolean {
 }
 
 function isGenericPublicMarkdownHeading(stripped: string): boolean {
+  if (isRunningPageHeading(stripped, false)) return false;
   return /^\p{L}/u.test(stripped) && !/[=<>≈]|[.!?;。！？；]$/u.test(stripped)
     && !ENGLISH_REFERENCE_VERB_RE.test(stripped) && !ENGLISH_REFERENCE_CLAUSE_RE.test(stripped)
     && !CHINESE_REFERENCE_CLAUSE_RE.test(stripped)

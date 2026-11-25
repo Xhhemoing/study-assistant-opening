@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v57-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v58-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -4344,6 +4344,22 @@ describe("bounded resumable PDF parser", () => {
       const state = makeState();
       expect(sealTextWithState(`1. Find x.\n${label}`, state), label).toBe("1. Find x.");
       expect(state.mode, label).toBe("inline_sealed");
+    }
+
+    const workedExample = "Worked Example 1: Solve x = 2.";
+    for (const running of ["Chapter 2: Algebra (第2张)", "Chapter 2 (Page 5)", "第二章 代数（第2张）", "Chapter 2: 第2张", "## Algebra | 第2张"]) {
+      const state = makeState();
+      const input = `${workedExample}\n${running}\nSolution: 2张`;
+      expect(sealTextWithState(input, state), running).toBe(input);
+      expect(state.inWorkedExample, running).toBe(true);
+      expect(state.mode, running).toBe("none");
+    }
+    for (const nonRunning of ["Chapter 2: Groups (Lagrange)", "Chapter 2: Linear Maps (Part 1)"]) {
+      const state = makeState();
+      expect(sealTextWithState(`${workedExample}\n${nonRunning}\nSolution: 2张`, state), nonRunning)
+        .toBe(`${workedExample}\n${nonRunning}`);
+      expect(state.inWorkedExample, nonRunning).toBe(false);
+      expect(state.mode, nonRunning).toBe("inline_sealed");
     }
   });
 });

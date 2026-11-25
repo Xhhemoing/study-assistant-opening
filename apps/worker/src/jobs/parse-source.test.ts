@@ -1482,5 +1482,31 @@ describe("parse source handler", () => {
     ]);
     expect((doclingPublicPrefixLiveProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
       .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
+
+    // Round 64 P2 #1: Worked example interrupted by running container headings keeps internal Solution: public.
+    const workedExample = "Worked Example 1: Factor the quadratic polynomial x^2 - 1 over the integers.";
+    const examplePages: PdfSegmentPage[] = [
+      { page: 1, text: `${workedExample}\nChapter 2: Algebra (第2张)\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+      { page: 2, text: `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+      { page: 3, text: `${workedExample}\nChapter 2: 第2张\nSolution: 2张`, imagePath: null, visualKinds: [], inWorkedExampleAtEnd: true },
+    ];
+    const runningExampleRun = await deps({
+      segmentPages: 3,
+      segments: makeSegments(),
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: examplePages.length }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const end = Number(argv[argv.indexOf("--page-end") + 1]);
+        return { exitCode: 0, stdout: JSON.stringify({ pages: examplePages.slice(start - 1, end) }) };
+      },
+    });
+    await expect(runningExampleRun.handler({ ...job, claimToken: "claim-r64-p2-1" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 3 });
+    expect((runningExampleRun.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([
+        [1, `${workedExample}\nChapter 2: Algebra (第2张)\nSolution: 2张`],
+        [2, `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`],
+        [3, `${workedExample}\nChapter 2: 第2张\nSolution: 2张`],
+      ]);
   });
 });

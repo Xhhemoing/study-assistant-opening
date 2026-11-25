@@ -770,6 +770,8 @@ def _is_worked_example_heading(stripped: str) -> bool:
 
 
 def _is_titled_non_answer_chapter(stripped: str) -> bool:
+    if _is_running_page_heading(stripped, bare_containers_are_counters=False):
+        return False
     chinese = _CHINESE_CONTAINER_PREFIX_RE.match(stripped)
     m = chinese or _ENGLISH_CONTAINER_PREFIX_RE.match(stripped)
     if not m:

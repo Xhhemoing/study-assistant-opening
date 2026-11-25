@@ -252,15 +252,25 @@ function stripArchivePairedEmphasis(line: string): string {
   return stripArchivePairedEmphasisLine(afterUnder, "**", "*");
 }
 
-type ArchivePdfLine = { atx: boolean; line: string; unstarredLine: string; contentLine: boolean };
+type ArchivePdfLine = {
+  atx: boolean;
+  emptyAtx: boolean;
+  line: string;
+  unstarredLine: string;
+  runningHeading: boolean;
+  contentLine: boolean;
+};
+type ArchivePrimaryEvent = ArchivePdfLine | { blank: true };
 
 function parseArchivePdfBlocks(text: string): {
   primary: ArchivePdfLine[];
+  primaryEvents: ArchivePrimaryEvent[];
   blocks: ArchivePdfLine[][];
   hasUnconditionalLabel: boolean;
 } {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ");
   const primary: ArchivePdfLine[] = [];
+  const primaryEvents: ArchivePrimaryEvent[] = [];
   const blocks = [primary];
   let block = primary;
   let hasUnconditionalLabel = false;
@@ -285,18 +295,33 @@ function parseArchivePdfBlocks(text: string): {
     } else if (jsVisionTranscription.test(rawUnstarred)) {
       block = primary;
     }
-    if (jsPdfLeadingTextWrappers.test(line) || !line.trim() || (atx && jsEmptyAtxHeading.test(unstarredLine))) continue;
+    if (jsPdfLeadingTextWrappers.test(line)) continue;
+    if (!line.trim()) {
+      if (block === primary) primaryEvents.push({ blank: true });
+      continue;
+    }
+    if (atx && jsEmptyAtxHeading.test(unstarredLine)) {
+      if (block === primary) {
+        primaryEvents.push({ atx: true, emptyAtx: true, line, unstarredLine, runningHeading: false, contentLine: false });
+      }
+      continue;
+    }
     if (answerLabel.test(unstarredLine) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) {
       hasUnconditionalLabel = true;
     }
-    block.push({
+    const runningHeading = isArchiveRunningHeading(line);
+    const entry: ArchivePdfLine = {
       atx,
+      emptyAtx: false,
       line,
       unstarredLine,
-      contentLine: !isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line),
-    });
+      runningHeading,
+      contentLine: !runningHeading || jsStandaloneAssessmentItem.test(line),
+    };
+    block.push(entry);
+    if (block === primary) primaryEvents.push(entry);
   }
-  return { primary, blocks, hasUnconditionalLabel };
+  return { primary, primaryEvents, blocks, hasUnconditionalLabel };
 }
 
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
@@ -431,6 +456,20 @@ const inlineTerminator = String.raw`(?:${proofTerminatorPattern}|${answerSection
 const terminatorTokenCore = String.raw`(?:${proofEndCore}|${sectionEndCore})`;
 const adjacentEmphasisTerminator = String.raw`(?:[*_]${terminatorTokenCore}|${terminatorTokenCore}[.。]?[*_])[.。*_!?！？;；)）\]】 ]*$`;
 const inlineFallbackBlocked = String.raw`(?:${inlineContinues}|${adjacentEmphasisTerminator})`;
+const jsNumberedExerciseInstruction = new RegExp(asJsPattern(numberedExerciseInstruction), "u");
+const jsExerciseSectionException = new RegExp(exerciseSectionException, "iu");
+const jsExerciseInlineAnswer = new RegExp(exerciseInlineAnswer, "iu");
+const jsExerciseInlineAnswerWithBody = new RegExp(exerciseInlineAnswer + "[^ ]", "iu");
+const jsStandaloneInlineAnswer = new RegExp(standaloneInlineAnswer, "iu");
+const jsExerciseInlineAnswerPeriod = new RegExp(exerciseInlineAnswerPeriod, "u");
+const jsAppendixHeading = new RegExp(appendixHeading, "iu");
+const jsBareContainerSuffix = new RegExp(bareContainerSuffix, "u");
+const jsBareAnswerCounter = new RegExp(bareAnswerCounter, "iu");
+const jsInlineTerminal = new RegExp(inlineTerminal, "iu");
+const jsAnswerSectionEnd = new RegExp(asJsPattern(answerSectionEnd), "iu");
+const jsInlineTerminator = new RegExp(asJsPattern(inlineTerminator), "iu");
+const jsInlineFallbackBlocked = new RegExp(asJsPattern(inlineFallbackBlocked), "iu");
+const jsLineStart = new RegExp(lineStart, "u");
 
 /** Legacy markers predate the explicit publication receipt. New markers are
  * settled only by the chunk transaction, even if a retry updates source status. */
@@ -611,7 +650,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
          lag(line) OVER (PARTITION BY source_id,source_version,content_line,auxiliary_chunk,auxiliary_block
            ORDER BY page,created_at,id,line_number) ~ ${numberedQuestion},false)
         AS numbered_solution_candidate,
-       qualified_solution,wrapper,auxiliary_block,content_line
+       qualified_solution,wrapper,auxiliary_chunk,auxiliary_block,content_line
     FROM (
       SELECT *, line ~ ${answerPeriodLine} AS period_answer, line ~ ${solutionPeriodLine} AS period_solution,
         line ~* ${qualifiedSolutionLabel} AS qualified_solution,
@@ -665,8 +704,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND lead(numbered_solution_candidate AND section_without_numbered) OVER content_order
         THEN lead(position) OVER content_order END AS next_numbered_section,
       lead(page) OVER content_order AS next_content_page,
-      bool_or(sealed_explanation AND NOT numbered_solution_candidate OR auxiliary AND inline_opener) OVER (PARTITION BY id)
-        OR bool_or(auxiliary AND inline_opener) OVER (PARTITION BY source_id,source_version,page) AS withheld_numbered_context,
+      bool_or(sealed_explanation AND NOT numbered_solution_candidate OR auxiliary AND inline_opener)
+        OVER (PARTITION BY source_id,source_version,page) AS withheld_numbered_context,
       COALESCE(max(position) FILTER (WHERE section_answer) OVER preceding_lines,0)
         > COALESCE(max(position) FILTER (WHERE section_terminator OR reopens_section) OVER preceding_lines,0)
         AND NOT reopens_section AS in_sealed_section
@@ -810,39 +849,41 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                      CASE WHEN NOT inline_opener AND line ~* ${bareAnswerCounter}
                        AND NOT (in_exercise AND NOT atx AND line ~ ${String.raw`^ *\d+[.。] *$`}) THEN '' ELSE candidate_body END AS lane_body,
                      count(*) FILTER (WHERE inline_opener)
-                     OVER (PARTITION BY id,auxiliary_block,transcription ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
+                     OVER (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription ORDER BY position ROWS UNBOUNDED PRECEDING) AS auxiliary_opener
                    FROM pdf_archive_inline_bodies
                  ) with_openers
-                 WINDOW prior_answer AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener,lane_body<>''
+                 WINDOW prior_answer AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener,lane_body<>''
                    ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
-                  lane_prior AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener ORDER BY position
+                  lane_prior AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener ORDER BY position
                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)
                ) with_prior_answer
              ) with_reopenings
              WINDOW auxiliary_progress AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS UNBOUNDED PRECEDING),
                auxiliary_prior AS (PARTITION BY id,auxiliary_block,auxiliary_opener ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
-               answer_lanes AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener)
+               answer_lanes AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener)
               ) with_proof_closes
             ) with_answer_content
-            WINDOW answer_sequence AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
+            WINDOW answer_sequence AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener
               ORDER BY position ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING),
-              answer_body AS (PARTITION BY id,auxiliary_block,transcription,auxiliary_opener
+              answer_body AS (PARTITION BY source_id,source_version,page,auxiliary_chunk,auxiliary_block,transcription,auxiliary_opener
                 ORDER BY (lane_body='' OR NOT auxiliary AND NOT answer_content),position DESC
                 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
           ) with_answer_text
           WINDOW auxiliary_block_lines AS (PARTITION BY id,auxiliary_block),
-            chunk_lines AS (PARTITION BY id),
-            native_answer AS (PARTITION BY id ORDER BY NOT (native_line AND inline_opener),position DESC)
+            chunk_lines AS (PARTITION BY source_id,source_version,page),
+            native_answer AS (PARTITION BY source_id,source_version,page ORDER BY NOT (native_line AND inline_opener),position DESC)
         ) with_auxiliary_body
       ) with_sentence_end
-      WINDOW chunk_lines AS (PARTITION BY id)
+      WINDOW chunk_lines AS (PARTITION BY source_id,source_version,page)
     ) with_completion
     WINDOW earlier_on_page AS (PARTITION BY source_id,source_version,page ORDER BY position
         ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
       previous_page AS (PARTITION BY source_id,source_version ORDER BY page GROUPS BETWEEN 1 PRECEDING AND 1 PRECEDING)
   ), pdf_archive_inline_groups AS (
     -- An opener and its continuation lines share a group until the next explicit boundary.
-    SELECT *, CASE WHEN NOT auxiliary OR first_value(starts_inline) OVER inline_origin
+    SELECT *, first_value(starts_inline) OVER inline_origin AS in_inline_group,
+      min(page) FILTER (WHERE starts_inline) OVER (PARTITION BY source_id,source_version,inline_group) AS group_first_page,
+      CASE WHEN NOT auxiliary OR first_value(starts_inline) OVER inline_origin
         AND id=first_value(id) OVER inline_origin
         AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
       THEN lane_body ELSE '' END AS body_line,
@@ -857,7 +898,8 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND first_value(starts_inline) OVER inline_origin
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline
     FROM (
-      SELECT *, count(*) FILTER (WHERE starts_inline OR section_answer OR opens_exercise OR opens_public)
+      SELECT *, count(*) FILTER (WHERE starts_inline OR section_answer OR opens_exercise OR opens_public
+          OR (NOT auxiliary AND lane_reopening))
         OVER (PARTITION BY source_id,source_version ORDER BY position ROWS UNBOUNDED PRECEDING) AS inline_group
       FROM pdf_archive_inline_starts
     ) grouped_lines
@@ -877,7 +919,11 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM pdf_archive_inline_groups
   ), pdf_archive_inline_closes AS (
     SELECT *, min(position) FILTER (WHERE closes_after_blank OR explicit_inline_close)
-        OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_inline_close
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_inline_close,
+      bool_or(closes_after_blank)
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS group_closed_after_blank,
+      min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof)
+        OVER (PARTITION BY source_id,source_version,inline_group,page) AS first_proof_close
     FROM (
       SELECT *, (NOT auxiliary AND btrim(line)='' AND position>first_body AND next_body IS NOT NULL
           AND (first_proof IS NULL OR next_body<first_proof)
@@ -889,7 +935,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_inline_pages AS (
     SELECT source_id,source_version,inline_group,page,max(max_source_page) AS max_source_page,bool_or(starts_inline) AS starts_inline,
       min(position) AS first_position,
-      bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public)) AS primary_boundary,
+      bool_or(NOT auxiliary AND (starts_inline OR section_answer OR opens_exercise OR opens_public OR lane_reopening)) AS primary_boundary,
       min(position) FILTER (WHERE position=first_proof) AS proof_position,
       min(position) FILTER (WHERE NOT auxiliary AND position=first_proof) AS primary_proof_position,
       min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close AND position>=first_proof) AS primary_proof_close,
@@ -903,7 +949,6 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position)) AS unclosed_adjacent_auxiliary_proof,
       min(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS first_primary_terminator,
       max(position) FILTER (WHERE NOT auxiliary AND explicit_inline_close) AS primary_terminator,
-      bool_or(starts_inline AND NOT (unconditional_answer OR sealed_explanation)) AS hide_opening_page,
       (array_agg(body_line ORDER BY position DESC) FILTER (WHERE body_line<>''))[1] AS last_body,
       bool_or(closes_after_blank) AS closed_after_blank,
       bool_or(first_proof<=position) AS in_sealed_proof,
@@ -923,7 +968,6 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_inline_ranges AS (
     -- A finished answer affects later pages only up to its first closing page.
     SELECT *, min(page) FILTER (WHERE starts_inline) OVER answer AS first_page,
-      bool_or(hide_opening_page) OVER answer AS hide_first_page,
       COALESCE(min(page) FILTER (WHERE closed_after_blank
         OR (terminator_position IS NOT NULL AND (in_sealed_proof IS TRUE
           OR terminator_position<last_body_position OR continues_into_proof IS NOT TRUE))
@@ -1012,14 +1056,20 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       WHERE section_answer OR section_ends_here OR (NOT answer_label AND reopens_section)
     ) events WHERE section_answer
     UNION ALL
-    SELECT source_id,source_version,first_page,last_page+1,NULL::uuid
-    FROM pdf_archive_inline_ranges WHERE starts_inline AND (first_page<last_page OR hide_first_page)
+    SELECT source_id,source_version,first_page+1,last_page+1,NULL::uuid
+    FROM pdf_archive_inline_ranges WHERE starts_inline AND first_page<last_page
     UNION ALL
     SELECT source_id,source_version,page,proof_end+1,NULL::uuid
     FROM pdf_archive_proof_ranges WHERE proof_start IS NOT NULL
     UNION ALL
     SELECT DISTINCT source_id,source_version,page,page+1,id
-    FROM pdf_archive_line_events WHERE sealed_explanation OR (auxiliary AND inline_opener)
+    FROM pdf_archive_inline_closes
+    WHERE sealed_explanation OR unconditional_answer OR (auxiliary AND inline_opener)
+      OR starts_inline
+      OR (in_inline_group AND page=group_first_page AND NOT auxiliary AND btrim(line)<>''
+        AND (first_inline_close IS NULL OR position<=first_inline_close
+          OR (NOT group_closed_after_blank AND first_proof IS NOT NULL AND position>=first_proof
+            AND (first_proof_close IS NULL OR position<=first_proof_close))))
   ), pdf_archive_sealed_pages AS MATERIALIZED (
     -- A page is sealed if any span started by that page is unbounded or ends later.
     SELECT source_id,source_version,page FROM (
@@ -1072,38 +1122,246 @@ export function isPublicSourceChunk(row: Record<string, unknown>): boolean {
   return row.mime !== "application/pdf" || !containsPdfAnswerLabel(row.text as string, { checkContext: row.page == null });
 }
 
+function classifyArchivePdfLine(entry: ArchivePdfLine, assessmentSolutions: boolean) {
+  if (entry.emptyAtx) {
+    return {
+      opensExercise: false, opensWorkedExample: false, opensPublic: false, reopensSection: false,
+      opensSection: false, unconditionalAnswer: false, expLabel: false, qualifiedSol: false,
+      periodInline: false, sectionTerminator: false, exerciseException: false,
+    };
+  }
+  const { atx, line, unstarredLine, runningHeading } = entry;
+  const englishContainer = jsEnglishContainer.exec(line);
+  const chineseContainer = jsChineseContainer.exec(line);
+  const publicContainer = Boolean((englishContainer && acceptsPdfHeading(line, englishContainer, jsEnglishProse)
+    || chineseContainer && acceptsPdfHeading(line, chineseContainer, jsChineseProse))
+    && !jsBlockedReopening.test(line));
+  const englishNumbered = jsBlockReference.exec(line);
+  const chineseNumbered = jsChineseNumberedBlock.exec(line);
+  const publicNumbered = Boolean(englishNumbered && acceptsPdfHeading(line, englishNumbered, jsEnglishProse)
+    || chineseNumbered && acceptsPdfHeading(line, chineseNumbered, jsChineseProse));
+  const englishExample = jsEnglishExample.exec(line);
+  const chineseExample = jsChineseExample.exec(line);
+  const publicExample = jsWorkedExample.test(line)
+    && (!englishExample || acceptsPdfHeading(line, englishExample, jsEnglishProse))
+    && (!chineseExample || acceptsPdfHeading(line, chineseExample, jsChineseProse));
+  const dotted = jsDottedSection.exec(line);
+  const dottedTitle = dotted ? line.slice(dotted[0].length) : "";
+  const publicDotted = Boolean(dotted
+    && (jsLatinTitle.test(dottedTitle) && /[A-Za-z]{2}/u.test(dottedTitle)
+      || jsCjkTitle.test(dottedTitle) && !jsCjkSectionUnits.test(dottedTitle))
+    && !jsSectionProse.test(dottedTitle) && !jsBlockedReopening.test(line));
+  const otherReopening = Boolean((jsBackMatter.test(line)
+    || atx && jsMarkdownTitle.test(line)
+      && !dotted && !englishContainer && !chineseContainer && !englishNumbered && !chineseNumbered
+      && !englishExample && !chineseExample && !jsEnglishBlock.test(line)
+      && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line) && !jsMarkdownProse.test(line))
+    && !jsBlockedReopening.test(line));
+  const proofHeading = jsProofHeading.test(line);
+  const qualifiedSol = jsQualifiedSolution.test(line);
+  const periodAnswer = jsAnswerPeriod.test(line);
+  const periodSolution = jsSolutionPeriod.test(line);
+  const periodInline = periodAnswer || periodSolution;
+  const hasAnswerLabel = answerLabel.test(unstarredLine);
+  const hasExplanationLabel = explanationLabel.test(line);
+  const unconditionalAnswer = hasAnswerLabel || qualifiedSol || periodAnswer || assessmentSolutions;
+  const expLabel = hasExplanationLabel || periodSolution;
+  const inlinePub = jsPublicHeading.test(line);
+  const opensExercise = jsExerciseHeading.test(line);
+  const opensWorkedExample = publicExample && !runningHeading;
+  const opensPublic = (inlinePub || publicExample || publicNumbered || publicContainer || publicDotted || otherReopening)
+    && !runningHeading && !proofHeading && !qualifiedSol && !hasAnswerLabel && !hasExplanationLabel;
+  const containerSuffix = englishContainer ? line.slice(englishContainer[0].length)
+    : chineseContainer ? line.slice(chineseContainer[0].length) : null;
+  const reopensSection = (otherReopening || publicDotted || publicExample || publicNumbered || inlinePub
+    || publicContainer && (jsAppendixHeading.test(line)
+      || containerSuffix !== null && !jsBareContainerSuffix.test(containerSuffix)))
+    && !runningHeading && !proofHeading && !jsCaptionPrefix.test(line) && !jsChineseCaptionPrefix.test(line);
+  const opensSection = jsSectionAnswer.test(unstarredLine) || assessmentSolutions;
+  const sectionTerminator = jsAnswerSectionEnd.test(line);
+  const exerciseException = jsExerciseSectionException.test(line);
+  return {
+    opensExercise, opensWorkedExample, opensPublic, reopensSection, opensSection,
+    unconditionalAnswer, expLabel, qualifiedSol, periodInline, sectionTerminator, exerciseException,
+  };
+}
+
 export function filterPublicSamePagePdfChunks<T extends { text: string; page?: number | null }>(rows: readonly T[]): T[] {
   if (!rows.length) return [];
   if (rows.length === 1 || rows[0]?.page == null) {
     return rows.filter(row => isPublicSourceChunk({ ...row, mime: "application/pdf" }));
   }
-  const parsed = rows.map((row, chunkIndex) => {
-    const info = parseArchivePdfBlocks(row.text);
-    const individuallySealed = info.hasUnconditionalLabel
-      || info.blocks.some(lines => {
-        const content = lines.filter(entry => entry.contentLine);
-        return content.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
-          && jsAssessmentSolutionsContext.test(content[index + 1]?.line ?? ""));
-      });
-    return { chunkIndex, primaryContent: info.primary.filter(entry => entry.contentLine), individuallySealed };
-  });
-  const pagePrimary = parsed.flatMap(({ chunkIndex, primaryContent }) =>
-    primaryContent.map(entry => ({ chunkIndex, line: entry.line })));
-  if (pagePrimary.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
-    && jsAssessmentSolutionsContext.test(pagePrimary[index + 1]?.line ?? ""))) {
-    return [];
-  }
-  const crossChunkSealed = new Set<number>();
-  for (let index = 0; index + 1 < pagePrimary.length; index++) {
-    const current = pagePrimary[index]!;
-    const next = pagePrimary[index + 1]!;
-    if (current.chunkIndex !== next.chunkIndex
-      && jsNumberedQuestion.test(current.line)
-      && jsStandaloneNumberedSolution.test(next.line)) {
-      crossChunkSealed.add(next.chunkIndex);
+  const parsed = rows.map(row => parseArchivePdfBlocks(row.text));
+  const pagePrimaryContent = parsed.flatMap(info => info.primary.filter(entry => entry.contentLine));
+  const assessmentSolutionsSet = new Set<ArchivePdfLine>();
+  const assessmentContextSet = new Set<ArchivePdfLine>();
+  for (let index = 0; index + 1 < pagePrimaryContent.length; index++) {
+    const current = pagePrimaryContent[index]!;
+    const next = pagePrimaryContent[index + 1]!;
+    if (jsAssessmentSolutionsHeading.test(current.line) && jsAssessmentSolutionsContext.test(next.line)) {
+      assessmentSolutionsSet.add(current);
+      assessmentContextSet.add(next);
     }
   }
-  return rows.filter((_, index) => !parsed[index]!.individuallySealed && !crossChunkSealed.has(index));
+
+  const chunkSealed = new Set<number>();
+  let inExercise = false;
+  let inWorkedExample = false;
+  let previousNumberedQuestion = false;
+  let mode: "none" | "section" | "inline" | "inline_proof" = "none";
+  let lastInlineBody = "";
+  let blankPending = false;
+
+  for (let chunkIndex = 0; chunkIndex < parsed.length; chunkIndex++) {
+    const info = parsed[chunkIndex]!;
+    if (info.hasUnconditionalLabel) chunkSealed.add(chunkIndex);
+
+    for (const event of info.primaryEvents) {
+      if ("blank" in event) {
+        if (mode === "inline" && lastInlineBody !== "") blankPending = true;
+        continue;
+      }
+      const { atx, emptyAtx, line, runningHeading, contentLine } = event;
+      const followsNumberedQuestion = contentLine && previousNumberedQuestion;
+      const numberedSolutionCandidate = followsNumberedQuestion && jsStandaloneNumberedSolution.test(line);
+      if (contentLine) previousNumberedQuestion = jsNumberedQuestion.test(line);
+
+      const assessmentSolutions = assessmentSolutionsSet.has(event);
+      const isAssessmentContextLine = assessmentContextSet.has(event);
+      const flags = classifyArchivePdfLine(event, assessmentSolutions);
+      const sectionWithoutNumbered = flags.opensSection && !(inExercise && flags.exerciseException)
+        && !(inWorkedExample && flags.expLabel);
+      const sectionAnswer = sectionWithoutNumbered && !numberedSolutionCandidate;
+      const sealedExplanation = flags.expLabel && (!inWorkedExample || numberedSolutionCandidate);
+      const inlineOpener = !emptyAtx
+        && (numberedSolutionCandidate || flags.qualifiedSol || flags.periodInline
+          || jsExerciseInlineAnswer.test(line)
+            && (inExercise
+              || (flags.unconditionalAnswer || flags.expLabel) && jsStandaloneInlineAnswer.test(line)
+              || (flags.unconditionalAnswer || !inWorkedExample) && jsExerciseInlineAnswerWithBody.test(line)))
+        && (!flags.opensSection || flags.exerciseException || numberedSolutionCandidate)
+        && (flags.unconditionalAnswer || !inWorkedExample || !flags.expLabel || numberedSolutionCandidate);
+
+      const candidateBody = inlineOpener && flags.qualifiedSol ? line.replace(jsQualifiedSolution, "").trim()
+        : inlineOpener && flags.periodInline ? line.replace(jsExerciseInlineAnswerPeriod, "").trim()
+        : inlineOpener ? line.replace(jsExerciseInlineAnswer, "").trim()
+        : emptyAtx || runningHeading ? ""
+        : atx ? line.replace(jsLineStart, "").trim()
+        : line.trim();
+      const candidateProof = candidateBody !== "" && jsProofHeading.test(candidateBody);
+      const candidateTerminator = candidateBody !== "" && jsInlineTerminator.test(candidateBody);
+      const laneBody = !inlineOpener && jsBareAnswerCounter.test(line)
+        && !(inExercise && !atx && /^ *\d+[.。] *$/u.test(line)) ? "" : candidateBody;
+
+      if (mode === "section") {
+        if (!isAssessmentContextLine && flags.reopensSection && !sectionAnswer) {
+          mode = "none";
+        } else {
+          chunkSealed.add(chunkIndex);
+          if (flags.sectionTerminator) mode = "none";
+          if (flags.opensExercise) inExercise = true;
+          else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+          if (flags.opensWorkedExample) inWorkedExample = true;
+          else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+            inWorkedExample = false;
+          }
+          continue;
+        }
+      }
+
+      if (mode === "inline" && blankPending && (laneBody !== "" || sectionAnswer) && !candidateProof) {
+        mode = "none";
+        blankPending = false;
+        lastInlineBody = "";
+      }
+
+      if ((mode === "inline" || mode === "inline_proof") && candidateProof && !inlineOpener && !sectionAnswer) {
+        blankPending = false;
+        mode = "inline_proof";
+        chunkSealed.add(chunkIndex);
+        lastInlineBody = laneBody;
+        if (candidateTerminator) {
+          mode = "none";
+          lastInlineBody = "";
+        }
+        if (flags.opensExercise) inExercise = true;
+        else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+        if (flags.opensWorkedExample) inWorkedExample = true;
+        else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+          inWorkedExample = false;
+        }
+        continue;
+      }
+
+      const numberedExerciseAfterAnswer = mode === "inline" && !inlineOpener
+        && jsNumberedExerciseInstruction.test(line)
+        && (jsInlineTerminator.test(lastInlineBody)
+          || jsInlineTerminal.test(lastInlineBody) && !jsInlineFallbackBlocked.test(lastInlineBody));
+      if ((mode === "inline" || mode === "inline_proof") && !sectionAnswer && !inlineOpener
+        && (flags.opensExercise || flags.opensPublic || numberedExerciseAfterAnswer)) {
+        mode = "none";
+        blankPending = false;
+        lastInlineBody = "";
+      }
+
+      if (sectionAnswer) {
+        mode = flags.sectionTerminator ? "none" : "section";
+        blankPending = false;
+        lastInlineBody = "";
+        chunkSealed.add(chunkIndex);
+      } else if (inlineOpener) {
+        chunkSealed.add(chunkIndex);
+        blankPending = false;
+        lastInlineBody = laneBody;
+        if (candidateProof) mode = candidateTerminator ? "none" : "inline_proof";
+        else if (candidateTerminator) mode = "none";
+        else mode = "inline";
+      } else if (flags.unconditionalAnswer || sealedExplanation) {
+        chunkSealed.add(chunkIndex);
+      } else if (mode === "inline" || mode === "inline_proof") {
+        chunkSealed.add(chunkIndex);
+        if (laneBody !== "") lastInlineBody = laneBody;
+        if (candidateTerminator) {
+          mode = "none";
+          blankPending = false;
+          lastInlineBody = "";
+        }
+      }
+
+      if (flags.opensExercise) inExercise = true;
+      else if ((flags.opensSection && !flags.exerciseException) || flags.opensPublic) inExercise = false;
+      if (flags.opensWorkedExample) inWorkedExample = true;
+      else if (flags.unconditionalAnswer || numberedSolutionCandidate || flags.opensExercise || flags.opensPublic) {
+        inWorkedExample = false;
+      }
+    }
+
+    // Auxiliary Vision blocks remain strictly isolated within their own chunk.
+    for (const auxLines of info.blocks.slice(1)) {
+      const auxContent = auxLines.filter(entry => entry.contentLine);
+      if (auxContent.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
+        && jsAssessmentSolutionsContext.test(auxContent[index + 1]?.line ?? ""))) {
+        chunkSealed.add(chunkIndex);
+        break;
+      }
+      for (const auxEntry of auxLines) {
+        const auxFlags = classifyArchivePdfLine(auxEntry, false);
+        const auxInlineOpener = auxFlags.qualifiedSol || auxFlags.periodInline
+          || jsExerciseInlineAnswer.test(auxEntry.line)
+            && (inExercise
+              || (auxFlags.unconditionalAnswer || auxFlags.expLabel) && jsStandaloneInlineAnswer.test(auxEntry.line)
+              || (auxFlags.unconditionalAnswer || !inWorkedExample) && jsExerciseInlineAnswerWithBody.test(auxEntry.line));
+        if (auxFlags.unconditionalAnswer || auxFlags.opensSection
+          || (auxFlags.expLabel && !inWorkedExample)
+          || (auxInlineOpener && (!inWorkedExample || !auxFlags.expLabel || auxFlags.unconditionalAnswer))) {
+          chunkSealed.add(chunkIndex);
+          break;
+        }
+      }
+    }
+  }
+
+  return rows.filter((_, index) => !chunkSealed.has(index));
 }
 
 type ArchivedSealSpan = { first_page: number; reopen_page: number | null; chunk_id: string | null };

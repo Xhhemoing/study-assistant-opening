@@ -158,6 +158,69 @@ describe("source content self-read versus additional PDF retry access", () => {
     ];
     await expect(readOpeningSourceContent(database(source, isolatedAuxiliary), scope, "source", { page: 1 }))
       .resolves.toMatchObject({ pages: [1], text: "Chapter 1\n[图片描述]\nSolutions\n\n1. Find x." });
+
+    for (const [lead, label] of [
+      ["1. Find x.", "Solution:"],
+      ["Chapter 2", "Answer:"],
+      ["Problem 1.", "Official Solution:"],
+    ] as const) {
+      const threeChunkAnswer = [
+        { id: "c0", page: 1, text: lead, characters: lead.length, readable: true },
+        { id: "c1", page: 1, text: label, characters: label.length, readable: true },
+        { id: "c2", page: 1, text: "x = 2", characters: 5, readable: true },
+      ];
+      await expect(readOpeningSourceContent(database(source, threeChunkAnswer), scope, "source", { page: 1 }))
+        .resolves.toMatchObject({ pages: [1], characters: lead.length, text: lead });
+    }
+
+    for (const opener of ["Answer:", "Solutions", "Official Solution:"]) {
+      const allSealed = [
+        ...defaultChunks,
+        { id: "a0", page: 2, text: opener, characters: opener.length, readable: true },
+        { id: "a1", page: 2, text: "1. The result is 42.", characters: 20, readable: true },
+        { id: "a2", page: 2, text: "2. Next answer.", characters: 15, readable: true },
+      ];
+      await expect(readOpeningSourceContent(database(source, allSealed), scope, "source", { page: 2 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+
+    const workedExampleChunks = [
+      { id: "w0", page: 1, text: "Worked Example 1: Factor x^2 - 1.", characters: 33, readable: true },
+      { id: "w1", page: 1, text: "Solution:", characters: 9, readable: true },
+      { id: "w2", page: 1, text: "(x - 1)(x + 1).", characters: 15, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, workedExampleChunks), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({
+        pages: [1],
+        text: "Worked Example 1: Factor x^2 - 1.\n\nSolution:\n\n(x - 1)(x + 1).",
+      });
+
+    const reopenedTheorem = [
+      { id: "t0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+      { id: "t1", page: 1, text: "Solution: x = 2.", characters: 16, readable: true },
+      { id: "t2", page: 1, text: "## Theorem 2.1\nEvery cyclic group is abelian.", characters: 45, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, reopenedTheorem), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({
+        pages: [1],
+        text: "1. Find x.\n\n## Theorem 2.1\nEvery cyclic group is abelian.",
+      });
+
+    const reopenedExercise = [
+      { id: "e0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+      { id: "e1", page: 1, text: "Solution:\nx = 2.", characters: 16, readable: true },
+      { id: "e2", page: 1, text: "2. Find y.", characters: 10, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, reopenedExercise), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1], text: "1. Find x.\n\n2. Find y." });
+
+    const unlabeledContinuation = [
+      { id: "u0", page: 1, text: "1. Find x.", characters: 10, readable: true },
+      { id: "u1", page: 1, text: "Solution:\nx = 2.", characters: 16, readable: true },
+      { id: "u2", page: 1, text: "Therefore x = 2.", characters: 16, readable: true },
+    ];
+    await expect(readOpeningSourceContent(database(source, unlabeledContinuation), scope, "source", { page: 1 }))
+      .resolves.toMatchObject({ pages: [1], text: "1. Find x." });
   });
 
   it("does not convert owner/source lookup failures or future versions into readable content", async () => {

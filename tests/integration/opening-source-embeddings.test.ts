@@ -2367,4 +2367,132 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     }
     expect(await backfilledPages(pdf)).toEqual(expectedSingleChunkPages);
   });
+
+  it("seals 3-chunk same-page answer continuations, preserves worked examples across running container headings, and honors same-page reopenings across reader and retrieval", async () => {
+    const workedExample = "Worked Example 1: Solve x = 2.";
+    const singleChunkPages = [
+      `${workedExample}\nChapter 2: Algebra (第2张)\nSolution: 2张`,
+      `${workedExample}\n第二章 代数（第2张）\nSolution: 2张`,
+      `${workedExample}\nChapter 2: 第2张\nSolution: 2张`,
+      `${workedExample}\nChapter 2: Groups (Lagrange)\nSolution: 2张`,
+      "Chapter 3: Public Summary\nEvery field is an integral domain.",
+    ];
+    const pdf = await seed(singleChunkPages);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+
+    // Pages 6..13 carry multi-chunk same-page topologies:
+    // page 6: ["1. Find x.", "Solution:", "x = 2"] -> only "1. Find x." stays public;
+    // page 7: ["Chapter 4", "Answer:", "x = 2"] -> only "Chapter 4" stays public;
+    // page 8: ["Problem 1.", "Official Solution:", "x = 2"] -> only "Problem 1." stays public;
+    // page 9: ["Answer:", "1. The result is 42.", "2. Next answer."] -> entire page sealed;
+    // page 10: ["1. Find x.", "Solution: x = 2.", "## Theorem 2.1\nEvery cyclic group is abelian."] -> chunks 0 & 2 public;
+    // page 11: ["1. Find x.", "Solution:\nx = 2.", "2. Find y."] -> chunks 0 & 2 public;
+    // page 12: ["1. Find x.", "Solution:\nx = 2.", "Therefore x = 2."] -> only "1. Find x." public;
+    // page 13: ["Worked Example 1: Factor x^2 - 1.", "Solution:", "(x - 1)(x + 1)."] -> all 3 chunks public.
+    await f.sql`ALTER TABLE opening_source_chunks DROP CONSTRAINT opening_source_chunks_source_id_source_version_page_key`;
+    try {
+      const extraSpecs: Array<[string, number, string, number]> = [
+        ["00000000-0000-4000-8000-000000006401", 6, "1. Find x.", 1],
+        ["00000000-0000-4000-8000-000000006402", 6, "Solution:", 2],
+        ["00000000-0000-4000-8000-000000006403", 6, "x = 2", 3],
+        ["00000000-0000-4000-8000-000000006404", 7, "Chapter 4", 4],
+        ["00000000-0000-4000-8000-000000006405", 7, "Answer:", 5],
+        ["00000000-0000-4000-8000-000000006406", 7, "x = 2", 6],
+        ["00000000-0000-4000-8000-000000006407", 8, "Problem 1.", 7],
+        ["00000000-0000-4000-8000-000000006408", 8, "Official Solution:", 8],
+        ["00000000-0000-4000-8000-000000006409", 8, "x = 2", 9],
+        ["00000000-0000-4000-8000-000000006410", 9, "Answer:", 10],
+        ["00000000-0000-4000-8000-000000006411", 9, "1. The result is 42.", 11],
+        ["00000000-0000-4000-8000-000000006412", 9, "2. Next answer.", 12],
+        ["00000000-0000-4000-8000-000000006416", 10, "1. Find x.", 13],
+        ["00000000-0000-4000-8000-000000006417", 10, "Solution: x = 2.", 14],
+        ["00000000-0000-4000-8000-000000006418", 10, "## Theorem 2.1\nEvery cyclic group is abelian.", 15],
+        ["00000000-0000-4000-8000-000000006419", 11, "1. Find x.", 16],
+        ["00000000-0000-4000-8000-000000006420", 11, "Solution:\nx = 2.", 17],
+        ["00000000-0000-4000-8000-000000006421", 11, "2. Find y.", 18],
+        ["00000000-0000-4000-8000-000000006422", 12, "1. Find x.", 19],
+        ["00000000-0000-4000-8000-000000006423", 12, "Solution:\nx = 2.", 20],
+        ["00000000-0000-4000-8000-000000006424", 12, "Therefore x = 2.", 21],
+        ["00000000-0000-4000-8000-000000006413", 13, "Worked Example 1: Factor x^2 - 1.", 22],
+        ["00000000-0000-4000-8000-000000006414", 13, "Solution:", 23],
+        ["00000000-0000-4000-8000-000000006415", 13, "(x - 1)(x + 1).", 24],
+      ];
+      for (const [id, page, text, ms] of extraSpecs) {
+        await f.sql`INSERT INTO opening_source_chunks(id,source_id,source_version,page,text,created_at)
+          VALUES(${id}::uuid,${pdf.sourceId},1,${page},${text},now() + (${ms} * interval '1 millisecond'))`;
+        await f.sql`INSERT INTO opening_source_embeddings(chunk_id,source_id,source_version,model_key,dimensions,segment_index,text,embedding)
+          VALUES(${id}::uuid,${pdf.sourceId},1,${model.modelKey},${model.dimensions},0,${text},'[1,0,0]'::vector)`;
+      }
+
+      const expectedPages = [1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13];
+      const chunks = createOpeningSourceChunksRepository(f.sql);
+      const t0 = performance.now();
+      const listed = await chunks.listChunks(f.scope, pdf.sourceId);
+      const forSources = await chunks.listForSources(f.scope, [pdf.sourceId]);
+      const atVersion = await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1);
+      const searched = await pdf.repository.search(f.scope, { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] });
+      expect(performance.now() - t0).toBeLessThan(1000);
+
+      expect(forSources).toEqual(listed);
+      expect(atVersion).toEqual(listed);
+      expect([...new Set(listed.map(c => c.page))]).toEqual(expectedPages);
+      expect(listed.filter(c => c.page === 6).map(c => c.text)).toEqual(["1. Find x."]);
+      expect(listed.filter(c => c.page === 7).map(c => c.text)).toEqual(["Chapter 4"]);
+      expect(listed.filter(c => c.page === 8).map(c => c.text)).toEqual(["Problem 1."]);
+      expect(listed.filter(c => c.page === 9)).toEqual([]);
+      expect(listed.filter(c => c.page === 10).map(c => c.text)).toEqual([
+        "1. Find x.", "## Theorem 2.1\nEvery cyclic group is abelian.",
+      ]);
+      expect(listed.filter(c => c.page === 11).map(c => c.text)).toEqual(["1. Find x.", "2. Find y."]);
+      expect(listed.filter(c => c.page === 12).map(c => c.text)).toEqual(["1. Find x."]);
+      expect(listed.filter(c => c.page === 13).map(c => c.text)).toEqual([
+        "Worked Example 1: Factor x^2 - 1.", "Solution:", "(x - 1)(x + 1).",
+      ]);
+
+      const searchedIds = new Set(searched.map(s => s.chunk.id));
+      expect(searchedIds).toEqual(new Set(listed.map(c => c.id)));
+      expect(searchedIds.has("00000000-0000-4000-8000-000000006402")).toBe(false);
+      expect(searchedIds.has("00000000-0000-4000-8000-000000006403")).toBe(false);
+
+      for (const blockedPage of [4, 9]) {
+        await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
+          .rejects.toMatchObject({ code: "NOT_FOUND" });
+      }
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 6 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 10 }))
+        .resolves.toMatchObject({
+          pages: expectedPages,
+          text: "1. Find x.\n\n## Theorem 2.1\nEvery cyclic group is abelian.",
+        });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 11 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x.\n\n2. Find y." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 12 }))
+        .resolves.toMatchObject({ pages: expectedPages, text: "1. Find x." });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 13 }))
+        .resolves.toMatchObject({
+          pages: expectedPages,
+          text: "Worked Example 1: Factor x^2 - 1.\n\nSolution:\n\n(x - 1)(x + 1).",
+        });
+
+      // Verify owner/privacy/version isolation on the multi-chunk PDF (< 1s).
+      const isoStart = performance.now();
+      await expect(readOpeningSourceContent(f.sql, { ...f.scope, ownerUserId: randomUUID() }, pdf.sourceId, { page: 6 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { version: 2, page: 6 }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await f.sql`INSERT INTO opening_privacy_exclusions(workspace_id,source_id) VALUES(${f.scope.workspaceId},${pdf.sourceId})`;
+      try {
+        expect(await pdf.repository.search(f.scope, { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0] })).toEqual([]);
+      } finally {
+        await f.sql`DELETE FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId} AND source_id=${pdf.sourceId}`;
+      }
+      expect(performance.now() - isoStart).toBeLessThan(1000);
+    } finally {
+      await f.sql`DELETE FROM opening_source_embeddings WHERE source_id=${pdf.sourceId} AND chunk_id IN (
+        SELECT id FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=6)`;
+      await f.sql`DELETE FROM opening_source_chunks WHERE source_id=${pdf.sourceId} AND page>=6`;
+      await f.sql`ALTER TABLE opening_source_chunks ADD CONSTRAINT opening_source_chunks_source_id_source_version_page_key UNIQUE (source_id, source_version, page)`;
+    }
+  });
 });
