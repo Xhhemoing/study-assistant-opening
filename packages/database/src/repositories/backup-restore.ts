@@ -118,11 +118,11 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
     },
 
     async restoreWorkspace(input) {
+      const forbidden = findForbiddenBackupTable(input.packed);
+      if (forbidden) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${forbidden}`);
       const workspaceId = String(lowerUuid(input.workspaceId));
       const ownerUserId = String(lowerUuid(input.ownerUserId));
       const normalizedPacked = normalizeNativeBackupPackageUuids(input.packed);
-      const forbidden = findForbiddenBackupTable(normalizedPacked);
-      if (forbidden) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${forbidden}`);
       await assertBackupWorkspaceOwner(sql, workspaceId, ownerUserId);
       try {
         const compatibleMigrationIds = await listMigrationFiles();
