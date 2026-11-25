@@ -49,14 +49,13 @@ function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<strin
   }
   const record = asObject(node);
   if (!record) return;
-  if (!inPub) {
-    for (const [key, child] of Object.entries(record)) {
-      collectPublicationCardIds(child, key === "publicationCardIds", out);
+  if (inPub) {
+    for (const candidate of [record.id, record.cardId]) {
+      if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
     }
-    return;
   }
-  for (const candidate of [record.id, record.cardId]) {
-    if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
+  for (const [key, child] of Object.entries(record)) {
+    collectPublicationCardIds(child, key === "publicationCardIds", out);
   }
 }
 

@@ -101,18 +101,18 @@ function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<strin
     return;
   }
   if (inPub && typeof node === "string") {
-    out.add(node);
+    const id = node.trim().toLowerCase();
+    if (id) out.add(id);
     return;
   }
   if (!isRecord(node)) return;
-  if (!inPub) {
-    for (const [key, child] of Object.entries(node)) {
-      collectPublicationCardIds(child, key === "publicationCardIds", out);
+  if (inPub) {
+    for (const candidate of [node.id, node.cardId]) {
+      if (typeof candidate === "string" && candidate.trim()) out.add(candidate.trim().toLowerCase());
     }
-    return;
   }
-  for (const id of [node.id, node.cardId]) {
-    if (typeof id === "string") out.add(id);
+  for (const [key, child] of Object.entries(node)) {
+    collectPublicationCardIds(child, key === "publicationCardIds", out);
   }
 }
 

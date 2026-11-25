@@ -6,7 +6,9 @@ import { OPENING_DATASET_POLICY_VERSION } from "@aistudy/contracts";
 import { createCardRepository, createCourseMembershipRepository, createLibraryRepository, createOpeningBudgetRepository,
   createOpeningEphemeralProvenanceRepository, createOpeningPrivacyRepository, createOpeningMemoryRepository,
   createOpeningNoteRepository, createOpeningStudyNoteRepository, readOpeningBackupRecords } from "@aistudy/database";
-import { cardLinkedToNotePublication } from "../../packages/database/src/repositories/card-sources";
+import { cardLinkedToNotePublication, cardReadable, notePublicationCardIds } from "../../packages/database/src/repositories/card-sources";
+import { noteContextSourceRefsIncluded, parseNoteContextProvenanceRefs, parseNoteContextSourceRefs } from "../../packages/database/src/repositories/opening-context-provenance";
+import { openingNoteReadable } from "../../packages/database/src/repositories/opening-note-provenance";
 import { createEphemeralTutorService } from "../../apps/web/src/features/opening/tutor/ephemeral-service";
 import { replyEphemeralSystemQuery } from "../../apps/web/src/features/opening/tutor/ephemeral-system-query";
 import { createDbSystemQueryService } from "../../apps/worker/src/runtime/system-query";
@@ -716,6 +718,18 @@ describe("synthetic deidentified dataset repository", () => {
       const targetCard = await cardRepo.createCard({ ...scope, front: "Target", back: "Answer" });
       const cleanCard = await cardRepo.createCard({ ...scope, front: "Clean", back: "Answer" });
 
+      const nestArray = (value: unknown, depth: number) => {
+        let current = value;
+        for (let i = 0; i < depth; i += 1) current = [current];
+        return current;
+      };
+      const deep33Padded = [{ publicationCardIds: nestArray(`\t\r\n\u00a0${targetCard.id.toUpperCase()}\ufeff\v\f`, 33) }];
+      const deep64NestedObj = [{
+        publicationCardIds: [{
+          other: { publicationCardIds: nestArray(`\t${targetCard.id.toUpperCase()}\n`, 64) },
+        }],
+      }];
+
       const probeRows = await sql<{ label: string; matched: boolean }[]>`
         SELECT probe.label, ${cardLinkedToNotePublication(sql)} AS matched
         FROM cards c
@@ -727,18 +741,21 @@ describe("synthetic deidentified dataset repository", () => {
             ('string', '"scalar"'::jsonb),
             ('empty_obj', '{}'::jsonb),
             ('empty_arr', '[]'::jsonb),
+            ('whitespace_only', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(U&'\\0009\\000a\\000d\\00a0\\feff')))),
             ('top_object_scalar', jsonb_build_object('publicationCardIds', upper(c.id::text))),
             ('nested_array', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(jsonb_build_array(' ' || upper(c.id::text) || ' '))))),
+            ('deep_33_padded', ${sql.json(deep33Padded as never)}::jsonb),
+            ('deep_64_nested_obj', ${sql.json(deep64NestedObj as never)}::jsonb),
             ('mixed_array', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(c.id::text, jsonb_build_object('bad', 1))))),
-            ('id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(jsonb_build_object('id', c.id::text))))),
-            ('card_id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_object('cardId', c.id::text)))),
+            ('id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_array(jsonb_build_object('id', U&'\\0009' || upper(c.id::text) || U&'\\000a'))))),
+            ('card_id_object', jsonb_build_array(jsonb_build_object('publicationCardIds', jsonb_build_object('cardId', U&'\\00a0' || c.id::text || U&'\\feff')))),
             ('nested_outer', jsonb_build_array(jsonb_build_array(jsonb_build_object('publicationCardIds', c.id::text))))
         ) AS np(label, context_source_refs)
         JOIN LATERAL (SELECT np.label) probe ON TRUE
         WHERE c.id=${targetCard.id}`;
       expect(Object.fromEntries(probeRows.map(r => [r.label, r.matched]))).toEqual({
-        null: false, json_null: false, number: false, string: false, empty_obj: false, empty_arr: false,
-        top_object_scalar: true, nested_array: true, mixed_array: true,
+        null: false, json_null: false, number: false, string: false, empty_obj: false, empty_arr: false, whitespace_only: false,
+        top_object_scalar: true, nested_array: true, deep_33_padded: true, deep_64_nested_obj: true, mixed_array: true,
         id_object: true, card_id_object: true, nested_outer: true,
       });
 
@@ -758,14 +775,16 @@ describe("synthetic deidentified dataset repository", () => {
       for (const malformed of [
         [{ publicationCardIds: targetCard.id }],
         [{ publicationCardIds: [[targetCard.id.toUpperCase()]] }],
+        deep33Padded,
+        deep64NestedObj,
         [{ publicationCardIds: [targetCard.id, { bad: 1 }] }],
-        [{ publicationCardIds: [{ id: targetCard.id }] }],
+        [{ publicationCardIds: [{ id: `\t${targetCard.id.toUpperCase()}\r\n` }] }],
         [[{ publicationCardIds: targetCard.id }]],
         [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: targetCard.id }],
         [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: [targetCard.id] }],
         [{ sourceId: noteSourceId, sourceVersion: 0, nested: [[{ publicationCardIds: [targetCard.id] }]] }],
       ]) {
-        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed)} WHERE document_id=${doc.id}`;
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed as never)} WHERE document_id=${doc.id}`;
         expect(await queryCards()).toEqual([cleanCard.id]);
         await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: targetCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
         expect((await readOpeningBackupRecords(sql, scope)).tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
@@ -780,6 +799,115 @@ describe("synthetic deidentified dataset repository", () => {
     } finally {
       await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
       await fixture.sql`DELETE FROM opening_teaching_units WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
+  }, 30_000);
+
+  it("rejects note provenance elements containing nested arrays across SQL, application parsers, backup, and dataset export while keeping planner costs below 10,000", async () => {
+    const fixture = await createOpeningFixture();
+    try {
+      const { sql, scope, otherScope } = fixture;
+      const validSourceId = await insertSource(sql, scope);
+      await backupRows(sql, scope).chunk(validSourceId, 0);
+      const unknownSourceId = randomUUID();
+
+      const library = createLibraryRepository(sql);
+      const cardRepo = createCardRepository(sql);
+      const doc = await library.createDocument({
+        workspaceId: scope.workspaceId, title: "Nested array lineage note", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "PRIVATE_NESTED_LINEAGE" } }],
+      });
+      await publishSnippet(fixture, doc.id);
+      const linkedCard = await cardRepo.createCard({ ...scope, sourceDocumentId: doc.id, front: "Linked", back: "Answer" });
+      const cleanCard = await cardRepo.createCard({ ...scope, front: "Clean", back: "Answer" });
+
+      // Cross-workspace publication link at depth 40 with tab/newline/NBSP padding must also withhold card from dataset export.
+      const foreignDoc = await library.createDocument({
+        workspaceId: otherScope.workspaceId, title: "Foreign publication", lifecycle: "confirmed",
+        blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Foreign" } }],
+      });
+      const crossWsCard = await cardRepo.createCard({ ...scope, front: "CrossWs", back: "Answer" });
+      let deep40CrossWs: unknown = `\t\u00a0${crossWsCard.id.toUpperCase()}\r\n`;
+      for (let i = 0; i < 40; i += 1) deep40CrossWs = [deep40CrossWs];
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${foreignDoc.id},${otherScope.workspaceId},${sql.json([{ publicationCardIds: deep40CrossWs } as never])})`;
+      const crossWsVariant = await insertTestTeachingActivity(sql, scope);
+      await sql`UPDATE opening_teaching_activities SET intent_kind='question', generate_status='ready',
+        create_intent=${sql.json({ kind: "card_review_variant", cardId: crossWsCard.id })} WHERE id=${crossWsVariant}`;
+
+      await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+        VALUES(${doc.id},${scope.workspaceId},${sql.json([{ sourceId: validSourceId, sourceVersion: 0 }])})`;
+
+      const datasets = createOpeningDatasetRepository(sql);
+      await datasets.grantConsent(scope, { policyVersion: OPENING_DATASET_POLICY_VERSION, consented: true,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+      const readQuery = createScopedOpeningSystemQueryReader(sql, scope);
+      const signal = new AbortController().signal;
+
+      expect((await datasets.read(scope)).coursePackageQuality).toHaveLength(1);
+
+      for (const malformed of [
+        [{ sourceId: validSourceId, sourceVersion: 0, legacy: [{ sourceId: unknownSourceId, sourceVersion: 0 }] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, extra: [] }],
+        [{ sourceId: validSourceId, sourceVersion: 0, deep: { nested: [1] } }],
+      ]) {
+        expect(parseNoteContextProvenanceRefs(malformed)).toBeNull();
+        expect(parseNoteContextSourceRefs(malformed)).toBeNull();
+        await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed as never)} WHERE document_id=${doc.id}`;
+
+        const [sqlState] = await sql<{ included_live: boolean; included_hist: boolean; readable: boolean }[]>`
+          SELECT
+            ${noteContextSourceRefsIncluded(sql, scope.workspaceId, () => sql`np.context_source_refs`, false)} AS included_live,
+            ${noteContextSourceRefsIncluded(sql, scope.workspaceId, () => sql`np.context_source_refs`, true)} AS included_hist,
+            ${openingNoteReadable(sql, scope.workspaceId, sql`np.document_id`)} AS readable
+          FROM opening_note_provenance np
+          WHERE np.document_id=${doc.id}`;
+        expect(sqlState).toEqual({ included_live: false, included_hist: false, readable: false });
+
+        await expect(library.getDocument({ workspaceId: scope.workspaceId, documentId: doc.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: linkedCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        expect((await readQuery({ name: "notes", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([]);
+        expect((await readQuery({ name: "cards", arguments: { limit: 10, offset: 0 } }, signal)).data.map(r => r.id)).toEqual([cleanCard.id]);
+
+        const backup = await readOpeningBackupRecords(sql, scope);
+        expect(backup.tables.library_documents.map(r => r.id)).not.toContain(doc.id);
+        expect(backup.tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
+        expect((await datasets.read(scope)).coursePackageQuality).toEqual([]);
+      }
+
+      const parseMaxCost = (rows: readonly Record<string, unknown>[]) => {
+        const match = /\(cost=[0-9.]+\.\.([0-9.]+)/.exec(String(rows[0]?.["QUERY PLAN"] ?? ""));
+        return match ? Number(match[1]) : Number.POSITIVE_INFINITY;
+      };
+      const cardReadablePlan = await sql`EXPLAIN (COSTS ON)
+        SELECT c.id FROM cards c WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+          AND NOT c.archived AND ${cardReadable(sql, scope.workspaceId)}`;
+      const datasetCardsPlan = await sql`EXPLAIN (COSTS ON)
+        SELECT c.id FROM cards c WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+          AND NOT COALESCE(c.id::text = ANY(ARRAY(
+            SELECT pub.card_id FROM (
+              SELECT np.context_source_refs FROM opening_note_provenance np
+              WHERE np.workspace_id<>${scope.workspaceId} AND np.context_source_refs IS NOT NULL
+                AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+            ) np
+            CROSS JOIN LATERAL ${notePublicationCardIds(sql, () => sql`np.context_source_refs`)} AS pub(card_id)
+          )), false)`;
+      const systemQueryPubPlan = await sql`EXPLAIN (COSTS ON)
+        WITH pub_links AS MATERIALIZED (
+          SELECT np.document_id, pub.card_id FROM (
+            SELECT np.document_id, np.context_source_refs FROM opening_note_provenance np
+            WHERE np.workspace_id=${scope.workspaceId} AND np.context_source_refs IS NOT NULL
+              AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+          ) np
+          CROSS JOIN LATERAL ${notePublicationCardIds(sql, () => sql`np.context_source_refs`)} AS pub(card_id)
+        )
+        SELECT * FROM pub_links`;
+      expect(parseMaxCost(cardReadablePlan)).toBeLessThan(10_000);
+      expect(parseMaxCost(datasetCardsPlan)).toBeLessThan(10_000);
+      expect(parseMaxCost(systemQueryPubPlan)).toBeLessThan(10_000);
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
       await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
       await fixture.close();
     }

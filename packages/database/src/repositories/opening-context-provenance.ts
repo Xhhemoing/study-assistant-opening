@@ -249,6 +249,24 @@ export function noteContextSourceRefsIncluded(
   return db`EXISTS (
     SELECT 1 FROM (SELECT ${noteContextSourceRefs(db, rawRefs)} AS refs OFFSET 0) AS note_lineage
     WHERE ${contextSourceRefsIncluded(db, workspaceId, () => db`note_lineage.refs`, allowHistoricalVersions, requireAvailability)}
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(ARRAY(SELECT jsonb_array_elements(
+          CASE WHEN jsonb_typeof(note_lineage.refs) = 'array' THEN note_lineage.refs ELSE '[]'::jsonb END
+        ))) AS provenance_ref
+        WHERE NOT (
+            provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
+            AND jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+            AND provenance_ref->'memoryDependencyIds' <> '[]'::jsonb
+            AND NOT EXISTS (
+              SELECT 1 FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(provenance_ref->'memoryDependencyIds') = 'array'
+                  THEN provenance_ref->'memoryDependencyIds' ELSE '[]'::jsonb END
+              ) AS dep(value)
+              WHERE dep.value IS NULL OR dep.value !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            )
+          )
+          AND COALESCE(jsonb_path_exists(provenance_ref, 'strict $.** ? (@.type() == "array")'), false)
+      )
   )`;
 }
 

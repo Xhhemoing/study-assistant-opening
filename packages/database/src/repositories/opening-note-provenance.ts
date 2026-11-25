@@ -34,7 +34,15 @@ export function openingNoteReadable(db: Db, workspaceId: string, documentId: Ret
               THEN ref->'memoryDependencyIds' ELSE '[]'::jsonb END) AS dep(id)
               WHERE dep.id IS NULL OR dep.id !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
           ) ELSE (
-            jsonb_typeof(ref->'sourceId')='string'
+            jsonb_typeof(ref)='object'
+            AND NOT COALESCE(jsonb_path_exists(ref, 'strict $.** ? (@.type() == "array")'), false)
+            AND NOT COALESCE(jsonb_path_exists(ref, '$.**.publicationCardIds'), false)
+            AND NOT COALESCE(jsonb_path_exists(ref, '$.**.answerKeyBlockIds'), false)
+            AND NOT COALESCE(jsonb_path_exists(ref, '$.**.originTurnIds'), false)
+            AND NOT COALESCE(jsonb_path_exists(ref, '$.**.snippetLineageVersion'), false)
+            AND NOT COALESCE(jsonb_path_exists(ref, '$.**.memoryDependencyIds'), false)
+            AND jsonb_typeof(ref->'sourceId')='string'
+            AND (ref->>'sourceId') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
             AND CASE WHEN jsonb_typeof(ref->'sourceVersion')='number' AND ref->>'sourceVersion' ~ '^[0-9]+$'
               THEN (ref->>'sourceVersion')::numeric <= 9007199254740991 ELSE false END
             AND (NOT ref ? 'memoryOnly' OR jsonb_typeof(ref->'memoryOnly')='boolean')

@@ -13,18 +13,30 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
 }
 /** Extract normalized publication card IDs from any depth without recursive CTE planner fanout. */
 export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
-  return db`(SELECT DISTINCT lower(btrim(linked.id)) AS card_id
+  return db`(SELECT DISTINCT normalized.card_id
     FROM (SELECT ${refs()} AS val) AS root
     CROSS JOIN LATERAL unnest(ARRAY(
-      SELECT jsonb_array_elements(
-        CASE WHEN root.val IS NOT NULL AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
-          THEN jsonb_path_query_array(
+      SELECT jsonb_array_elements(COALESCE((
+        WITH RECURSIVE pub_arr(arr) AS (
+          SELECT jsonb_path_query_array(
             jsonb_path_query_array(jsonb_build_array(root.val), 'strict $.**.publicationCardIds', '{}'::jsonb, true),
-            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
+            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
           )
-          ELSE '[]'::jsonb
-        END
-      )
+          WHERE root.val IS NOT NULL
+            AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
+          UNION ALL
+          SELECT jsonb_path_query_array(
+            pub_arr.arr,
+            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
+          )
+          FROM pub_arr
+          WHERE COALESCE(jsonb_path_exists(pub_arr.arr, 'strict $[*] ? (@.type() == "array")'), false)
+        )
+        SELECT pub_arr.arr
+        FROM pub_arr
+        WHERE NOT COALESCE(jsonb_path_exists(pub_arr.arr, 'strict $[*] ? (@.type() == "array")'), false)
+        LIMIT 1
+      ), '[]'::jsonb))
     )) AS leaf(val)
     CROSS JOIN LATERAL (
       VALUES
@@ -32,9 +44,13 @@ export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
         (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'id')='string' THEN leaf.val->>'id' END),
         (CASE WHEN jsonb_typeof(leaf.val)='object' AND jsonb_typeof(leaf.val->'cardId')='string' THEN leaf.val->>'cardId' END)
     ) AS linked(id)
+    CROSS JOIN LATERAL (
+      SELECT lower(btrim(linked.id, U&'\\0009\\000a\\000b\\000c\\000d\\0020\\00a0\\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200a\\2028\\2029\\202f\\205f\\3000\\feff')) AS card_id
+      WHERE linked.id IS NOT NULL
+    ) AS normalized
     WHERE root.val IS NOT NULL
       AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
-      AND linked.id IS NOT NULL AND btrim(linked.id)<>'')`;
+      AND normalized.card_id<>'')`;
 }
 
 /** Historical publication links survive reassignment of the card or its teaching spec. */

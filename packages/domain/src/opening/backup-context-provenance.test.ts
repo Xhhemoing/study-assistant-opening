@@ -3,8 +3,13 @@ import {
   projectOpeningBackupCardSources,
   projectOpeningBackupProvenance,
 } from "../../../database/src/repositories/opening-backup-library";
+import {
+  parseNoteContextProvenanceRefs,
+  parseNoteContextSourceRefs,
+} from "../../../database/src/repositories/opening-context-provenance";
 import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
+import { projectPrivacyGuardedOpeningDataset } from "./deidentified-dataset";
 import {
   noteProvenanceSourceReferences,
   sourceReferences,
@@ -280,6 +285,40 @@ describe("context provenance at the backup boundary", () => {
       name: "mixed source ref with memoryDependencyIds alongside publicationCardIds",
       refs: [{ sourceId, sourceVersion: 1, memoryDependencyIds: [turnId] }, { publicationCardIds: [candidateId] }],
     },
+    {
+      name: "33-level nested array publicationCardIds with tab/newline/NBSP/BOM whitespace",
+      refs: [{
+        publicationCardIds: Array.from({ length: 33 }).reduce<unknown>(
+          acc => [acc],
+          `\t\r\n\u00a0${candidateId.toUpperCase()}\ufeff\v\f`,
+        ),
+      }],
+    },
+    {
+      name: "64-level nested array publicationCardIds inside nested publicationCardIds object",
+      refs: [{
+        publicationCardIds: [{
+          other: {
+            publicationCardIds: Array.from({ length: 64 }).reduce<unknown>(acc => [acc], `\t${candidateId.toUpperCase()}\n`),
+          },
+        }],
+      }],
+    },
+    {
+      name: "valid source ref with extra array-valued legacy property",
+      refs: [
+        { sourceId, sourceVersion: 1, legacy: [{ sourceId: otherSourceId, sourceVersion: 1 }] },
+        { publicationCardIds: [candidateId] },
+      ],
+    },
+    {
+      name: "valid source ref with empty array property",
+      refs: [{ sourceId, sourceVersion: 1, extra: [] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "valid source ref with deeply nested array property",
+      refs: [{ sourceId, sourceVersion: 1, deep: { nested: [1] } }, { publicationCardIds: [candidateId] }],
+    },
   ])("fails closed on $name so linked root-null and observation cards are excluded from backup", ({ refs }) => {
     const docId = "99999999-9999-4999-8999-999999999999";
     const obsCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -313,6 +352,8 @@ describe("context provenance at the backup boundary", () => {
       context_source_refs: refs,
     };
 
+    expect(parseNoteContextProvenanceRefs(refs)).toBeNull();
+    expect(parseNoteContextSourceRefs(refs)).toBeNull();
     expect(noteProvenanceSourceReferences(provenanceRow)).toBeNull();
     expect(projectOpeningBackupCardSources({
       cards: [rootNullCard, observationCard, cleanCard],
@@ -323,5 +364,37 @@ describe("context provenance at the backup boundary", () => {
       opening_teaching_activity_specs: [{ activity_id: activityId, document_id: docId, source_refs: [] }],
     }, [provenanceRow])).toEqual([cleanCard]);
     expect(projectOpeningBackupProvenance([provenanceRow], new Set([candidateId, obsCardId]))).toEqual([provenanceRow]);
+
+    const datasetResult = projectPrivacyGuardedOpeningDataset({
+      scope: { workspaceId, ownerUserId: ownerId },
+      privacyEpoch: 0,
+      mode: "solo",
+      role: "learner",
+      tables: {
+        cards: [{ ...rootNullCard, owner_user_id: ownerId }, { ...cleanCard, owner_user_id: ownerId }],
+        library_documents: [],
+        opening_sources: [{ id: sourceId, workspace_id: workspaceId, upload_state: "uploaded" }],
+        opening_teaching_activities: [
+          {
+            id: activityId,
+            workspace_id: workspaceId,
+            owner_user_id: ownerId,
+            generate_status: "ready",
+            source_ids: [sourceId],
+            create_intent: { kind: "card_review_variant", cardId: candidateId },
+          },
+          {
+            id: obsId,
+            workspace_id: workspaceId,
+            owner_user_id: ownerId,
+            generate_status: "ready",
+            source_ids: [sourceId],
+            create_intent: { kind: "card_review_variant", cardId: keepCardId },
+          },
+        ],
+        opening_note_provenance: [{ ...provenanceRow, snippet_origin: false }],
+      },
+    }, (kind, id) => `${kind}:${id}`);
+    expect(datasetResult.dataset.coursePackageQuality.map(item => item.identity)).toEqual([`activity:${obsId}`]);
   });
 });
