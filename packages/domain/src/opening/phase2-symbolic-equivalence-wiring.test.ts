@@ -431,6 +431,202 @@ function incorrectEquality(claim: string, feedback = "The equality is incorrect.
   return result;
 }
 
+describe("symbolic proof feedback Round 11", () => {
+  function sequence(...claims: string[]): ProofFeedback {
+    const result = proof(claims[0]!, "correct");
+    const first = result.steps[0]!;
+    result.steps.push(...claims.slice(1).map((claim, index) => ({ ...first, stepIndex: index + 2, claim })));
+    return result;
+  }
+
+  function expectOutcome(
+    outcome: "correct" | "incorrect", feedback: ProofFeedback, expected: typeof outcome | "unverified",
+    context?: ProposalContext,
+  ) {
+    const proposal = gradingProposal(outcome, feedback, context);
+    const observed = { ...observation, observationId: "observation-1", outcome };
+    const evaluation: AiEvaluation = {
+      ...proposal, observationId: observed.observationId, attemptId: observed.attemptId!,
+      problemId: observed.problemId!, itemVersionId: observed.itemVersionId!,
+      requirementKey: observed.requirementKey!, evaluatorVersion: "ai-rubric-v1", modelLabel: null,
+      evaluatedAt: "2026-10-21T08:00:00Z",
+    };
+    const reasons = new Set<EvidenceEligibilityReasonCode>();
+    expect(evaluateAiCorrectness(observed, evaluation, reasons)).toBe("unknown");
+    expect({
+      allowed: proofFeedbackAllowsOutcome(outcome, feedback, proposal),
+      accepted: acceptedAiGradingOutcome(proposal),
+      reasons: [...reasons],
+    }).toEqual(expected === "unverified"
+      ? { allowed: false, accepted: expected, reasons: ["ai_evaluation_criteria_inconsistent"] }
+      : { allowed: true, accepted: expected, reasons: [
+        expected === "correct" ? "ai_graded_correct" : "ai_graded_incorrect", "ai_evaluation_uncalibrated",
+      ] });
+  }
+
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each(["1+1=0", "Step 1: $1+1=0$.", "x+1=x+2"])(
+    "1. keeps a transcribed later switch out of the step %s", claim => {
+      expectOutcome("correct", sequence(claim, "Now switch to F₂."), "unverified", {
+        transcription: "Work over ℝ. 1+1=0. Now switch to F₂.",
+      });
+    },
+  );
+
+  it("1. uses the transcribed finite field for steps after the switch", () => {
+    expectOutcome("correct", sequence("1+1=2", "Now switch to F₂.", "1+1=0"), "correct", {
+      transcription: "Work over ℝ. 1+1=2. Now switch to F₂. 1+1=0.",
+    });
+  });
+
+  it.each<ProposalContext>([
+    { transcription: "Work over ℝ. Step 2: Work over F₂." },
+    { feedback: "Work over ℝ. 第 2 步切换到 F₂。" },
+    { transcription: "Work over ℝ. Step 2: Work over F₂. 1+1=0. Continue." },
+  ])("1. defers a numbered domain clause in %o", context => {
+    expectOutcome("correct", sequence("1+1=0", "Continue."), "unverified", context);
+  });
+
+  it.each([
+    "Work over ℝ. What would change over F₂?",
+    "Work over ℝ, and check whether it holds over F₂.",
+    "Work over ℝ. Consider what would change over F₂.",
+    "Work over ℝ. If we instead worked over F₂, the result could differ.",
+    "Work over ℝ. “Does it hold over F₂？”",
+  ])("2. ignores a question or hypothetical domain in %s", feedback => {
+    expectOutcome("correct", proof("1+1=0", "correct"), "unverified", { feedback });
+  });
+
+  it("2. recognizes a transcribed question before cutting at a matched equation", () => {
+    expectOutcome("correct", proof("1+1=0", "correct"), "unverified", {
+      transcription: "Work over ℝ. Would F₂ give 1+1=0?",
+    });
+  });
+
+  it.each([
+    "Have we obtained a contradiction at x=1.5?",
+    "“Have we obtained a contradiction at $x=1.5$?”",
+    "（是否在 $$x=1.5$$ 时得出矛盾？）",
+  ])("3. keeps a decimal inside the contradiction question %s", feedback => {
+    const steps = sequence("Assume x is positive.", "1=0");
+    steps.steps[1]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it("3. recognizes a contradiction asserted at a decimal value after a question", () => {
+    const steps = sequence("Assume x is positive.", "1=0");
+    steps.steps[1]!.feedback = "“Does it hold at x=2?” At x=1.5, we obtain a contradiction.";
+    expectOutcome("correct", steps, "correct");
+  });
+
+  it.each([
+    "We seek a contradiction.", "A contradiction might follow.", "This may be a contradiction.",
+    "We could reject the hypothesis.", "可能得出矛盾。", "矛盾也许会出现。",
+  ])("4. requires discharge when feedback only says %s", feedback => {
+    const steps = sequence("Assume x is positive.", "1=0");
+    steps.steps[1]!.feedback = feedback;
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it("4. does not exempt a single false calculation with bare intent", () => {
+    const steps = sequence("1=0");
+    steps.steps[0]!.feedback = "We seek a contradiction.";
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it.each([
+    "There is no circular reasoning.", "Did you use circular reasoning at x=1.5?",
+    "We avoided assuming the conclusion.", "You didn't divide by x without proving it was nonzero.",
+    "没有缺少推导。", "Your proof is free of missing steps.", "You did not skip any intermediate steps.",
+  ])("5. rejects a negated or interrogative critique in %s", feedback => {
+    const steps = incorrectEquality(identity, feedback);
+    steps.steps[0]!.repairPrompt = "The equality is incorrect.";
+    expectOutcome("incorrect", steps, "unverified");
+  });
+
+  it.each(["There is no justification.", "The conclusion does not follow.", "You divided by x without justification."])(
+    "5. retains the affirmative inference critique %s", feedback => {
+      const steps = incorrectEquality(identity, feedback);
+      steps.steps[0]!.repairPrompt = "The equality is incorrect.";
+      expectOutcome("incorrect", steps, "incorrect");
+    },
+  );
+
+  it.each(["Work over ℂ, a field of characteristic 0.", "Work over ℂ. char(K) = 0."])(
+    "6. preserves the non-real domain in %s", transcription => {
+      expectOutcome("incorrect", incorrectEquality("abs(x)^2=x^2"), "incorrect", { transcription });
+    },
+  );
+
+  it("6. treats a field explicitly not of characteristic zero as non-real", () => {
+    expectOutcome("correct", proof("1+1=0", "correct"), "correct", { feedback: "K is not of characteristic 0." });
+  });
+
+  it("7. retains pending inner rejection across a neutral step", () => {
+    const steps = sequence("Assume P.", "Assume Q.", "1=0", "Record that result.",
+      "Reject the inner assumption.", "1=0", "Reject the outer assumption.");
+    steps.steps[2]!.feedback = "This is the derived contradiction.";
+    expectOutcome("correct", steps, "correct");
+  });
+
+  it("7. does not let a pending inner discharge swallow an explicit outer rejection", () => {
+    const steps = sequence("Assume P.", "1=0", "Assume Q.", "1=0", "Reject the outer assumption.");
+    steps.steps[3]!.feedback = "This is the derived contradiction.";
+    expectOutcome("correct", steps, "correct");
+  });
+
+  it("7. does not pop the bottom frame for a named inner rejection", () => {
+    const steps = sequence("Assume P.", "1=0", "Reject the inner assumption.");
+    expectOutcome("correct", steps, "unverified");
+  });
+
+  it.each([
+    "You assumed the two expressions do not equal zero without justification.",
+    "You assumed that both values do not equal $1$ without justification.",
+    "未经证明就声称等式两边不等于零。",
+  ])("8. preserves inference feedback involving a shared operand in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity, feedback), "incorrect");
+  });
+
+  it("9. accepts a proposal-level critique alongside a step equality dispute", () => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback: "Circular reasoning." });
+  });
+
+  it.each([
+    "The equality is incorrect and you used circular reasoning.",
+    "The equality is incorrect, moreover you skipped the proof.",
+    "等式不成立并且使用了循环论证。",
+  ])("9. recognizes an independent critique in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity, feedback), "incorrect");
+  });
+
+  it.each([
+    ["\\frac{d}{dx}(x^3) = 3x^2", "The left side ≠ the right side."],
+    ["\\int 2x\\,dx = x^2 + C", "等号左边不等于等号右边。"],
+    ["\\frac{d}{dx}(x^3) = 3x^2", "The claim is \\frac{d}{dx}(x^3) \\neq 3x^2."],
+    ["\\int 2x\\,dx = x^2 + C", "The claim is \\int 2x\\,dx \\neq x^2 + C."],
+  ])("10. recognizes a denial of %s in %s", (claim, feedback) => {
+    expect(verifyStandaloneProofEquationClaim(claim).unconditional).toBe(true);
+    expectOutcome("incorrect", incorrectEquality(claim, feedback), "unverified");
+  });
+
+  it("handles 6,000-character domain and inference inputs with repeated near matches", () => {
+    const characteristic = "Work over ℝ. characteristic of ";
+    const domainSwitch = ". Work over ℝ.";
+    const domains = "not where ℝ and F₂ ".repeat(320).slice(0, 6_000 - domainSwitch.length);
+    expectOutcome("correct", proof("1+1=0", "correct"), "unverified", {
+      feedback: domains + domainSwitch,
+    });
+    expectOutcome("correct", proof("1+1=0", "correct"), "unverified", {
+      feedback: characteristic + " ".repeat(6_000 - characteristic.length - 2) + "K.",
+    });
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", {
+      feedback: "等式仅在".repeat(1_500),
+    });
+  });
+});
+
 describe("symbolic proof feedback", () => {
   it.each([
     "$1+1=0$.", "$$1+1=0$$.", "1+1=0。", "1+1=0.", "x+1=x+2;", "Step 1: $1=0$；：",
@@ -456,7 +652,7 @@ describe("symbolic proof feedback", () => {
     ["Work over ℝ, avoid the finite field F₂.", "unverified"],
     ["Work over ℝ, the finite field F₂ is excluded.", "unverified"],
     ["Work over F₂ but characteristic zero is excluded.", "correct"],
-    ["Work over F₂. Now char(K) = 0.", "unverified"],
+    ["Work over F₂. Now char(K) = 0.", "correct"],
     ["Work over F₂. Now work over ℝ instead of ℂ.", "unverified"],
     ["先在 F₂ 上运算，而后切换到实数域，有限域除外。", "unverified"],
   ])("tracks positive domain selections in %s", (domain, expected) => {

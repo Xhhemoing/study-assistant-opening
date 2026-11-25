@@ -1,6 +1,7 @@
 import type { AiGradingProposal, ProofFeedback } from "@aistudy/contracts";
 import {
-  counterfactualProofSteps, feedbackDeniesProvenEquality, proofStepUsesRealScalar, verifyStandaloneProofEquationClaim,
+  assertiveProseSentences, counterfactualProofSteps, feedbackDeniesProvenEquality, proofStepUsesRealScalar,
+  verifyStandaloneProofEquationClaim,
 } from "./symbolic-answer-bridge";
 
 type ProofContext = Partial<Pick<AiGradingProposal, "feedback" | "criteria" | "transcription">>;
@@ -26,8 +27,9 @@ const RESTRICTED_EQUALITY = [
   new RegExp(String.raw`\b(?:${EQUALITY_SUBJECT}|sides?)\s+${RESTRICTED_PREDICATE}`, "iu"),
   new RegExp(String.raw`\b${EQUALITY_SUBJECT}\s+(?:(?:${HOLDS}\s+(?:but|and)\s+)?fails?\s+(?:when|if|for|at|outside)|(?:do(?:es)?\s+not\s+hold|(?:is|are)\s+not\s+(?:true|valid|equal))\s+${GENERALITY})\b`, "iu"),
   /\bnot\s+an\s+identity\b/iu,
-  /(?:仅|只)(?:在|当)[^。！？；\r\n]*成立|(?:等式|恒等式|两边相等)[^。！？；\r\n]*除非|不恒成立|并非恒等式/u,
+  /不恒成立|并非恒等式/u,
 ];
+const RESTRICTED_CHINESE_CLAUSE = /[。！？；\r\n]/u;
 const INFERENCE_CRITIQUE = [
   /\b(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\s+(?:(?:was|is)\s+to\s+be\s+proved|you\s+(?:had|were\s+asked|need(?:ed)?)\s+to\s+prove))|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result))\b/iu,
   /\b(?:(?:miss(?:ing|es)?|lack(?:s|ing)?|without|no|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|an?\s+explicit|necessary|required|intermediate)\s+)*(?:justification|reasoning|proof|derivation|steps?)|(?:do(?:es)?\s+not|doesn['’]t|don['’]t)\s+follow|(?:disallowed|forbidden|unauthori[sz]ed|not\s+allowed\s+to\s+use)\s+(?:the\s+)?(?:theorem|method|rule))\b/iu,
@@ -36,12 +38,30 @@ const INFERENCE_CRITIQUE = [
 ];
 const VARIABLE_DIVISION = /\bdivid(?:e[sd]?|ing)\s+by\s+\$?(?:x|a\s+variable)\b/iu;
 const DIVISION_DEFECT = /\b(?:without|before)\s+(?:first\s+)?(?:prov|show|establish|justify|check|verify|ensur)\w*\b|\bfails?\s+(?:when|if|for|at|outside)\b/iu;
+const NEGATED_INFERENCE_CRITIQUE = [
+  /\b(?:no|not|never|neither|nor|without|free\s+of|avoid\w*|[a-z]+n['’]t)\b(?:\s+[\w'’-]+){0,4}\s+(?:circular\s+(?:reasoning|argument|proof)|beg(?:s|ging)?\s+the\s+question|assum\w*\s+(?:(?:the|your)\s+)?(?:conclusion|identity|result|what\b)|restat\w*\s+(?:the\s+)?(?:target|conclusion|goal|identity|result)|(?:miss(?:ing|es)?|lack(?:s|ing)?|skip\w*|omit\w*)\s+(?:(?:the|a|any|an|explicit|necessary|required|intermediate)\s+)*(?:justification|proof|derivation|reasoning|steps?)|(?:disallowed|forbidden|unauthori[sz]ed)\s+(?:the\s+)?(?:theorem|method|rule)|(?:divid(?:e[sd]?|ing)|division)\s+by)\b/giu,
+  /(?:无|没有|并未|并非|不存在|未见|避免(?:了)?|不曾)[^，。！？；：,.!?;:]{0,12}(?:循环论证|未证先用|直接假设|重述结论|缺少(?:证明|推导|理由|依据)|未经证明|跳步|除以)/gu,
+];
+
+function positiveInferenceClauses(text: string): string[] {
+  return assertiveProseSentences(text).flatMap(sentence =>
+    sentence.split(/[;；\r\n]|\b(?:and|but|yet|while|whereas|though|although|also|moreover|furthermore)\b|而且|并且|同时|此外|另外|但(?:是)?|不过/iu)
+      .map(clause => NEGATED_INFERENCE_CRITIQUE.reduce((value, pattern) => value.replace(pattern, " "), clause)),
+  );
+}
 
 function disputesEquality(text: string | undefined, claim: string): boolean {
   if (!text) return false;
   const assertion = text.replace(NEGATED_MATH_ERROR, " ").replace(/\b(?:doesn['’]t|don['’]t)\b/giu, "does not");
+  const pronoun = assertion.matchAll(PRONOUN_RESTRICTION).next().value;
   if (RESTRICTED_EQUALITY.some(pattern => pattern.test(assertion)) ||
-      [...assertion.matchAll(PRONOUN_RESTRICTION)].some(match => !PROOF_SUBJECT.test(assertion.slice(0, match.index)))) return true;
+      (pronoun && !PROOF_SUBJECT.test(assertion.slice(0, pronoun.index))) ||
+      assertion.split(RESTRICTED_CHINESE_CLAUSE).some(clause => {
+        const only = clause.search(/(?:仅|只)(?:在|当)/u);
+        const equality = clause.search(/等式|恒等式|两边相等/u);
+        return (only !== -1 && clause.indexOf("成立", only) !== -1) ||
+          (equality !== -1 && clause.indexOf("除非", equality) !== -1);
+      })) return true;
   if (EQUALITY_AFFIRMATION.test(assertion)) return false;
   return IMPLICIT_DISPUTE.test(assertion) || EQUALITY_DISPUTE.some(pattern => pattern.test(assertion)) ||
     feedbackDeniesProvenEquality(assertion, claim);
@@ -53,10 +73,8 @@ function critiquesInference(text: string | undefined): boolean {
 }
 
 function hasIndependentInferenceCritique(text: string | undefined, claim: string): boolean {
-  if (!text || !critiquesInference(text)) return false;
-  if (!disputesEquality(text, claim)) return true;
-  return text.split(/[;；。!?！？\r\n]|(?<!\d)\.|\.(?!\d)|[,，]\s*(?:but\s+|但(?:是)?)/iu)
-    .some(clause => critiquesInference(clause) && !disputesEquality(clause, claim));
+  if (!text) return false;
+  return positiveInferenceClauses(text).some(clause => critiquesInference(clause) && !disputesEquality(clause, claim));
 }
 
 /** Recognizes explicit task commands only, rather than guessing every proof-shaped answer. */
@@ -69,8 +87,8 @@ export function proofFeedbackAllowsOutcome(
 ) {
   if (!proof || outcome === "unverified") return true;
   const required = proof.steps.filter(step => step.required);
-  const stepUsesRealScalar = proofStepUsesRealScalar(proof.steps, [
-    context?.transcription, context?.feedback,
+  const stepUsesRealScalar = proofStepUsesRealScalar(proof.steps, context?.transcription, [
+    context?.feedback,
     ...context?.criteria?.flatMap(criterion => [criterion.label, criterion.feedback]) ?? [],
   ]);
   if (outcome === "correct") {
@@ -84,10 +102,9 @@ export function proofFeedbackAllowsOutcome(
   return incorrectRequired.some(step => {
     const { claim, feedback, repairPrompt } = step;
     if (!stepUsesRealScalar.get(step) || !verifyStandaloneProofEquationClaim(claim).unconditional) return true;
-    if ([feedback, repairPrompt, ...incorrectCriteria.map(criterion => criterion.feedback)]
+    if ([feedback, repairPrompt, context?.feedback, ...incorrectCriteria.map(criterion => criterion.feedback)]
       .some(text => hasIndependentInferenceCritique(text, claim))) return true;
     if (disputesEquality(feedback, claim) || disputesEquality(repairPrompt, claim)) return false;
-    if (hasIndependentInferenceCritique(context?.feedback, claim)) return true;
     const criterionDisputes = incorrectCriteria.map(criterion => disputesEquality(criterion.feedback, claim));
     const proposalDisputes = disputesEquality(context?.feedback, claim);
     return incorrectRequired.length > 1 && criterionDisputes.length > 0
