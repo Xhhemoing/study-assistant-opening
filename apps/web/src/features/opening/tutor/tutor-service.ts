@@ -21,7 +21,7 @@ import type {
   OpeningSourceChunksRepository,
 } from "@aistudy/database";
 import {
-  buildConversationResume, revalidateSavedSelection,
+  buildBoundedHistory, buildConversationResume, revalidateSavedSelection,
   toConversationSummary,
 } from "./conversation-continuity";
 import {
@@ -152,8 +152,8 @@ export function createTutorService(deps: {
       }
       const returnedTurns = built.resume.boundedHistory.length ? turns.slice(-built.resume.boundedHistory.length) : [];
       const returnedIds = returnedTurns.flatMap(turn => turn.id ? [turn.id] : []);
-      if (deps.conversations.releaseReturnedTurnIds) await deps.conversations.releaseReturnedTurnIds(scope, conversationId, returnedIds);
-      return built.resume;
+      const current = await deps.conversations.releaseReturnedTurnIds?.(scope, conversationId, returnedIds);
+      return current ? { ...built.resume, boundedHistory: buildBoundedHistory(current).boundedHistory } : built.resume;
     },
 
     async listTurns(
@@ -197,18 +197,27 @@ export function createTutorService(deps: {
         });
       }
       const existing = await deps.conversations.findTurnByClientKey(scope, request.clientKey, request.conversationId);
+      const examHelp = request.contextAnchor?.purpose === "exam_help";
       let queryHistory: QueryHistory = [];
       if (!existing?.mode && isRecordFollowup(composerMessageText(request.text))) {
-        queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+        queryHistory = examHelp
+          ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, undefined, { userOnly: true })
+          : await deps.conversations.loadContinuityTurns(scope, request.conversationId);
       } else if (!existing?.mode && request.mode === undefined && requestsFinalAnswer(request.text)) {
         const anchor = request.contextAnchor;
         const attemptId = request.attemptId ?? anchor?.attemptId;
-        if (!attemptId && !anchor) queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
-        else if (attemptId || anchor?.blockId) {
+        if (!attemptId && !anchor) {
+          queryHistory = examHelp
+            ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, undefined, { userOnly: true })
+            : await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+        } else if (attemptId || anchor?.blockId) {
           // A second request belongs to the same issued question, never a different block or attempt.
-          queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId, {
+          const question = {
             attemptId, activityId: anchor?.activityId, blockId: anchor?.blockId, contentVersion: anchor?.contentVersion,
-          });
+          };
+          queryHistory = examHelp
+            ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, question, { userOnly: true })
+            : await deps.conversations.loadContinuityTurns(scope, request.conversationId, question);
         }
       }
       const resolved = inferComposerIntent({ ...request, history: queryHistory,
@@ -225,15 +234,34 @@ export function createTutorService(deps: {
         resolved.purpose = existing.purpose ?? "answer";
         resolved.querySystem = existing.querySystem === true || ["query", "explain_state"].includes(resolved.purpose);
       }
-      const purpose = retryIntent ? retryIntent.purpose ?? undefined
+      const requestedPurpose = retryIntent ? retryIntent.purpose ?? undefined
         : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
+      const purpose = examHelp && !retryIntent && resolved.querySystem && requestedPurpose !== "explain_state"
+        ? "query" : requestedPurpose;
       let input = { ...request, mode: resolved.mode, purpose };
-      if (resolved.querySystem) {
+      const queryIntent = resolved.querySystem ? {
+        text: composerMessageText(input.text), mode: input.mode,
+        sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
+        purpose: (requestedPurpose === "explain_state" ? "explain_state" : "query") as "explain_state" | "query",
+        currentPage: input.currentPage ?? null,
+      } : undefined;
+      const examHelpReplay = examHelp && !retryIntent ? {
+        requested: { purpose: request.purpose, querySystem: request.querySystem }, legacyPurpose: requestedPurpose,
+        legacyQuery: queryIntent,
+      } : undefined;
+      if (examHelpReplay && existing?.querySystem) {
+        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId,
+          text: input.text, mode: input.mode, clientKey: input.clientKey, contextAnchor: input.contextAnchor,
+          sourceIds: input.sourceIds, learningSessionId: null, currentPage: input.currentPage ?? null, chunkId: null,
+          examHelpReplay: { ...examHelpReplay, replayOnly: true },
+        });
+        return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null, replayed: true };
+      }
+      if (!examHelp && queryIntent) {
         if (!deps.systemQueryEnabled?.()) throw new TutorServiceError("VALIDATION", "系统记录查询暂未开启。", 409);
-        const saved = await deps.conversations.appendSavedTurn({ scope, conversationId: input.conversationId, text: composerMessageText(input.text), mode: input.mode,
-          clientKey: input.clientKey, privacy: "saved", querySystem: true, sourceIds: input.sourceSelection !== "none" && /哪页|原文|材料|source|page/i.test(input.text) ? input.sourceIds : [],
-          contextAnchor: input.contextAnchor, purpose: input.purpose === "explain_state" ? "explain_state" : "query",
-          learningSessionId: null, attemptId: null, currentPage: input.currentPage ?? null, chunkId: null });
+        const saved = await deps.conversations.appendSavedTurn({ ...queryIntent, scope, conversationId: input.conversationId,
+          clientKey: input.clientKey, privacy: "saved", querySystem: true, contextAnchor: input.contextAnchor,
+          learningSessionId: null, attemptId: null, chunkId: null });
         return { jobId: saved.jobId, turnId: saved.turnId, learningSessionId: null, replayed: Boolean(existing) };
       }
       if (request.mode === undefined && !existing?.mode && deps.studyContext) {
@@ -294,8 +322,8 @@ export function createTutorService(deps: {
         learningSessionId = null;
       }
 
-      // Replays keep their original job; only a new turn is refused before it is queued.
-      if (!existing && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
+      // Replays keep their original job, and exam guidance does not need a model.
+      if (!existing && !examHelp && deps.tutorModelReady && !await deps.tutorModelReady(scope, input.mode)) {
         throw new TutorServiceError("AI_MODEL_UNAVAILABLE", TUTOR_MODEL_SETUP_MESSAGE, 409);
       }
       const saved = await deps.conversations.appendSavedTurn({
@@ -312,12 +340,14 @@ export function createTutorService(deps: {
         currentPage: input.currentPage ?? input.contextAnchor?.page ?? null,
         chunkId: input.chunkId ?? input.contextAnchor?.chunkId ?? null,
         strategyTemplateId: input.strategyTemplateId ?? null,
+        ...(examHelpReplay ? { examHelpReplay } : {}),
       });
 
       return {
         jobId: saved.jobId,
         turnId: saved.turnId,
-        learningSessionId, replayed: Boolean(existing),
+        learningSessionId: saved.learningSessionId === undefined ? learningSessionId : saved.learningSessionId,
+        replayed: saved.replayed ?? Boolean(existing),
       };
     },
   };

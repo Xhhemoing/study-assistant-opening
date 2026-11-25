@@ -19,13 +19,19 @@ function fixture(rows: ReturnType<typeof turn>[], options: { ownerMissing?: bool
     const sql = parts.join("?").replace(/\s+/g, " ").trim();
     // Fragment construction is inert; actual SQL rows are preset, not a SQL evaluator.
     if (!sql.trim()) return "fragment";
-    if (!sql.includes("SELECT") || sql.startsWith("EXISTS") || sql.startsWith("NOT EXISTS") || sql.startsWith("CASE")) return "fragment";
+    if (!sql.startsWith("SELECT id, title, course_id") && !sql.startsWith("SELECT t.id, t.conversation_id")
+      && !sql.startsWith("SELECT t.id,t.role")) return "fragment";
     queryCalls.push({ sql, values });
     if (sql.includes("SELECT id, title, course_id")) return Promise.resolve(options.ownerMissing ? [] : [{ id: conversation, title: "fixture", course_id: null, updated_at: time }]);
-    if (sql.includes("FROM opening_turns t")) return options.turnsFailure ? Promise.reject(options.turnsFailure) : Promise.resolve(rows);
+    if (sql.startsWith("SELECT t.id,t.role") || sql.startsWith("SELECT t.id, t.conversation_id")) {
+      const turns = rows.map(row => ({ ...row, pending_exposure_ids: row.role === "assistant"
+        && row.status === "complete" && row.exposure_receipt && !row.exposure_receipt.released_at ? [row.exposure_receipt.id] : [] }));
+      return options.turnsFailure ? Promise.reject(options.turnsFailure) : Promise.resolve(turns);
+    }
+
     throw new Error(`Unsupported fixture query: ${sql}`);
   });
-  const tx = vi.fn();
+  const tx = Object.assign(vi.fn((...args: Parameters<typeof query>) => query(...args)), { unsafe: () => "fragment" });
   const sql = Object.assign(query, { unsafe: () => "fragment", begin: async (fn: (tx: unknown) => Promise<unknown>) => { beginCount++; if (options.beginFailure) throw options.beginFailure; return fn(tx); } });
   return { repo: createOpeningConversationRepository(sql as unknown as Sql), sql, tx, queryCalls, get beginCount() { return beginCount; } };
 }

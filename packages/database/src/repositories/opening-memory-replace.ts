@@ -1,8 +1,9 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { assertCourseInWorkspace, assertSourceTurnsOwned, lockOwnedWorkspace } from "./opening-memory-admission";
+import { assertCourseInWorkspace, assertSourceTurnsOwned, lockOwnedWorkspace, readBareUserOrigins } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { sourceTurnsAllowMisconceptionMemory } from "./v3-bitemporal-misconception-memory";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
@@ -45,6 +46,10 @@ export function replaceOwnedMemory(
     const rows = await tx`
       SELECT * FROM opening_memories
       WHERE id = ${input.id} AND workspace_id = ${scope.workspaceId}
+        AND (course_id IS NULL OR EXISTS (
+          SELECT 1 FROM courses c WHERE c.id = opening_memories.course_id
+            AND c.workspace_id = opening_memories.workspace_id AND c.archived_at IS NULL FOR SHARE
+        ))
       FOR UPDATE`;
     if (!rows.length) throw new OpeningMemoryError("NOT_FOUND", "memory not found");
     const current = rows[0] as Record<string, unknown>;
@@ -52,8 +57,7 @@ export function replaceOwnedMemory(
     const replay = await tx`
       SELECT * FROM opening_memories
       WHERE workspace_id = ${scope.workspaceId} AND last_decision_client_key = ${input.clientKey}
-      ORDER BY created_at DESC LIMIT 10
-      FOR UPDATE`;
+      ORDER BY created_at DESC LIMIT 10`;
     if (replay.length) {
       const prior = replay.find((item) => String((item as Record<string, unknown>).id) === input.id) as Record<string, unknown> | undefined;
       const replayedRow = replay.find((item) => {
@@ -73,7 +77,15 @@ export function replaceOwnedMemory(
     if (currentMemory.status !== "active" || currentMemory.kind !== "confirmed") {
       throw new OpeningMemoryError("CONFLICT", "only an active confirmed memory can be replaced");
     }
+    const bareOrigins = await readBareUserOrigins(tx, scope, input.sourceTurnIds);
+    const nonBareOrigins = input.sourceTurnIds.filter(id => !bareOrigins.has(id.toLowerCase()));
+    const assertMisconceptionOrigins = async () => {
+      if (!await sourceTurnsAllowMisconceptionMemory(tx, scope, nonBareOrigins, currentMemory.courseId)) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency misconception is unavailable");
+      }
+    };
     await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id, currentMemory.courseId);
+    await assertMisconceptionOrigins();
     await assertCourseInWorkspace(tx, scope, currentMemory.courseId, true);
     const superseded = await tx`
       UPDATE opening_memories
@@ -95,6 +107,7 @@ export function replaceOwnedMemory(
     await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
     // The Tutor job row lock can outlast a temporary ancestor's eligibility.
     await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id, currentMemory.courseId);
+    await assertMisconceptionOrigins();
     return mapMemoryRow(inserted[0] as Record<string, unknown>);
   });
 }

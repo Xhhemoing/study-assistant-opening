@@ -12,9 +12,12 @@ const scope={workspaceId:id(1),ownerUserId:id(2)},conversationId=id(3),receiptId
 const receipt={id:receiptId,release_key:'assistant:delivery',context_anchor:{purpose:'learning_help',courseId:null,activityId:null,attemptId:null,itemVersionId:null},exposure_origin:'assistant',support_domain:'unknown',generated_at:at,released_at:null,acknowledged_at:null,history_revision:0};
 function turn(patch:Record<string,unknown>={}){return {id:turnId,conversation_id:conversationId,role:'assistant',status:'complete',text:'saved answer',mode:'hint',created_at:at,citations:[],exposure_receipt:receipt,...patch}}
 function fixture(rows:Record<string,unknown>[],options:{owned?:boolean;summary?:boolean;preview?:string|null}={}){
+ const summary = {id:conversationId,title:'saved',course_id:null,updated_at:at,
+  pending_exposure_ids:options.preview===null ? [] : [receiptId],
+  last_turn_preview:options.preview===undefined ? 'saved preview' : options.preview};
  const pool=sqlSimulation(q=>{
   if(q.text.startsWith('SELECT id, title, course_id, updated_at'))return options.owned===false?[]:[{id:conversationId,title:'saved',course_id:null,updated_at:at}];
-  if(q.text.startsWith('SELECT c.id,'))return [{id:conversationId,title:'saved',course_id:null,updated_at:at,preview_turn_id:turnId,last_turn_preview:options.preview===undefined?'saved preview':options.preview}];
+  if(q.text.startsWith('SELECT c.id,'))return [summary];
   if(q.text.startsWith('SELECT t.id, t.conversation_id')||q.text.startsWith('SELECT t.id,t.role')||q.text.startsWith('SELECT t.role,t.status'))return rows;
   return unexpected(q);
  });
@@ -22,6 +25,8 @@ function fixture(rows:Record<string,unknown>[],options:{owned?:boolean;summary?:
   if(q.text.startsWith('SELECT id FROM workspaces'))return [{id:scope.workspaceId}];
   if(q.text.startsWith('INSERT INTO opening_workspace_history_revisions'))return [];
   if(q.text.startsWith('SELECT revision FROM opening_workspace_history_revisions'))return [{revision:1}];
+  if(q.text.startsWith('SELECT c.id,'))return [summary];
+  if(q.text.startsWith('SELECT t.id, t.conversation_id'))return rows;
   return unexpected(q);
  });
  const begin=vi.fn(async(fn:(value:typeof tx.sql)=>unknown)=>fn(tx.sql));const sql=Object.assign(pool.sql,{begin}) as unknown as Sql;
@@ -33,7 +38,7 @@ describe('F11: public saved-conversation reads own release selection, continuity
   const f=fixture([turn()]);const result=await f.repository.listTurns(scope,conversationId);
   expect(ports.release).toHaveBeenCalledExactlyOnceWith(f.tx.sql,scope,receiptId);expect(f.begin).toHaveBeenCalledOnce();
   expect(result[0]).toMatchObject({id:turnId,text:'saved answer',exposureReceipt:{id:receiptId,releasedAt:at,historyRevision:7}});
-  expect(f.tx.queries.at(-1)?.text).toContain('FOR UPDATE');
+  expect(f.tx.queries.find(q=>q.text.startsWith('SELECT revision FROM opening_workspace_history_revisions'))?.text).toContain('FOR UPDATE');
  });
  it.each([
   ['user',{role:'user'}],['pending assistant',{status:'pending'}],['failed assistant',{status:'failed'}],['missing receipt',{exposure_receipt:null}],['already released',{exposure_receipt:{...receipt,released_at:at}}],
@@ -57,7 +62,9 @@ describe('F11: public saved-conversation reads own release selection, continuity
  it('summary preview releases the returned preview turn id before mapping summaries',async()=>{
   const f=fixture([turn()],{summary:true});const result=await f.repository.listSummaries(scope);expect(result[0]).toMatchObject({id:conversationId,lastTurnPreview:'saved preview'});
   expect(ports.release).toHaveBeenCalledExactlyOnceWith(f.tx.sql,scope,receiptId);
-  const selection=f.pool.queries.find(q=>q.text.startsWith('SELECT t.role,t.status'))!;expect(selection.values).toContainEqual([turnId]);
+  const selection=f.tx.queries.find(q=>q.text.startsWith('SELECT c.id,'))!;
+  expect(selection.text).toContain('pending_exposure_ids');
+  expect(selection.values).toContain(scope.ownerUserId);
  });
  it('empty preview does not release a hidden turn',async()=>{
   const f=fixture([turn()],{preview:null});await f.repository.listSummaries(scope);expect(f.pool.queries).toHaveLength(1);expect(ports.release).not.toHaveBeenCalled();

@@ -6,6 +6,10 @@ import { readTutorAttemptContext, assertTutorAttemptContext, tutorAttemptFence, 
 export { tutorAttemptFence, tutorAttemptFenceSchema } from "./opening-tutor-attempt-context";
 export type { TutorAttemptContext, TutorAttemptFence } from "./opening-tutor-attempt-context";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
+import { assertTutorLearnerMisconceptionSnapshotInTx, lockMisconceptionContext, mergeTutorMisconceptionLineages, parseTutorMisconceptionLineage,
+  readActiveTutorMisconceptionLineages, readMemoryMisconceptionAuthorities, readSavedTutorMisconceptionLineage, readTurnMisconceptionMemoryStatus,
+  turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
+  type TutorMisconceptionLineage, type TutorMisconceptionSnapshot } from "./v3-bitemporal-misconception-memory";
 import { generateOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 import { insertOpeningDeliveredHelp } from "./opening-learning-help";
 import { randomUUID } from "node:crypto";
@@ -69,9 +73,12 @@ export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJob
 type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
   materialPurposePin?: OpeningMaterialPurposePin;
+  misconceptionSnapshot?: TutorMisconceptionSnapshot;
+  historyMisconceptionLineage?: TutorMisconceptionLineage;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
   historyCourseBindings?: readonly HistoryCourseBinding[];
+  temporaryMemoryExpiresAt?: string;
 };
 
 type StreamTurnBinding = {
@@ -107,6 +114,33 @@ function boundTurnCourseId(turn: StreamTurnBinding): string | null {
   return courseId.toLowerCase();
 }
 
+async function assertBoundMisconceptions(
+  tx: TransactionSql, scope: OpeningScope, courseId: string | null, context: {
+    misconceptionSnapshot?: TutorMisconceptionSnapshot;
+    historyMisconceptionLineage?: TutorMisconceptionLineage;
+  },
+  memoryMisconceptionLineage?: TutorMisconceptionLineage,
+): Promise<void> {
+  const { misconceptionSnapshot, historyMisconceptionLineage } = context;
+  if (misconceptionSnapshot) {
+    if ((misconceptionSnapshot.courseId?.toLowerCase() ?? null) !== courseId) {
+      throw Object.assign(new Error("learner misconception course binding changed"), { code: "CONFLICT" });
+    }
+    await assertTutorLearnerMisconceptionSnapshotInTx(tx, scope, misconceptionSnapshot);
+  }
+  const history = historyMisconceptionLineage === undefined ? undefined : parseTutorMisconceptionLineage(historyMisconceptionLineage);
+  if (history === null || (history?.courseId != null && history.courseId !== courseId)
+    || (memoryMisconceptionLineage?.courseId != null && memoryMisconceptionLineage.courseId !== courseId)) {
+    throw Object.assign(new Error("history misconception course binding changed"), { code: "CONFLICT" });
+  }
+  const lineage = mergeTutorMisconceptionLineages(history, memoryMisconceptionLineage);
+  if (!lineage) return;
+  if (!misconceptionSnapshot) await lockMisconceptionContext(tx, scope.workspaceId);
+  if (!(await readActiveTutorMisconceptionLineages(tx, scope, [lineage])).has(0)) {
+    throw Object.assign(new Error("history misconception context changed"), { code: "CONFLICT" });
+  }
+}
+
 function boundTurnAttemptId(turn: StreamTurnBinding) {
   return turn.attempt_id ?? (turn.context_anchor as StudyContextAnchor | null)?.attemptId;
 }
@@ -138,9 +172,12 @@ type SendAuthorizationContext = {
   executionId?: string;
   contextSourceRefs: ContextSourceRef[];
   materialPurposePin?: OpeningMaterialPurposePin;
+  misconceptionSnapshot?: TutorMisconceptionSnapshot;
+  historyMisconceptionLineage?: TutorMisconceptionLineage;
   memoryLineageSourceIds?: readonly string[];
   globalMemoryIds?: readonly string[];
   historyCourseBindings?: readonly HistoryCourseBinding[];
+  temporaryMemoryExpiresAt?: string;
   attemptContext?: TutorAttemptContext;
 };
 
@@ -150,24 +187,35 @@ async function assertGlobalMemoriesUnexpiredInTx(
   scope: OpeningScope,
   globalMemoryIds: readonly string[] | undefined,
   courseId: string | null,
-): Promise<void> {
-  if (!globalMemoryIds?.length) return;
+): Promise<number> {
+  if (!globalMemoryIds?.length) return Infinity;
   const ids = [...new Set(globalMemoryIds.map(id => {
     if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
       throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
     }
     return id.toLowerCase();
   }))].sort();
-  const active = await tx`SELECT id FROM opening_memories
-    WHERE workspace_id=${scope.workspaceId}
-      AND id=ANY(${ids}::uuid[])
-      AND status='active'
-      AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
-      AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-    ORDER BY id`;
+  const active = await tx<{ id: string | { memoryId: string; expiresAt: string | Date } }[]>`SELECT id FROM opening_memories AS gm(memory_id)
+    CROSS JOIN LATERAL (SELECT CASE WHEN gm.kind='temporary'
+      THEN jsonb_build_object('memoryId', gm.memory_id, 'expiresAt', gm.expires_at)
+      ELSE to_jsonb(gm.memory_id) END AS id) entry
+    WHERE gm.workspace_id=${scope.workspaceId}
+      AND gm.memory_id=ANY(${ids}::uuid[])
+      AND gm.status='active'
+      AND ${memoryCourseAllows(tx, () => tx`gm.course_id`, () => tx`${courseId}::uuid`, () => tx`gm.workspace_id`)}
+      AND (gm.kind='confirmed' OR (gm.kind='temporary' AND gm.expires_at IS NOT NULL AND gm.expires_at > clock_timestamp()))
+    ORDER BY gm.memory_id`;
   if (active.length !== ids.length) {
     throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
   }
+  let earliest = Infinity;
+  for (const row of active) {
+    if (typeof row.id === "object" && row.id !== null && "expiresAt" in row.id && row.id.expiresAt != null) {
+      const ms = new Date(row.id.expiresAt).getTime();
+      if (!Number.isNaN(ms)) earliest = Math.min(earliest, ms);
+    }
+  }
+  return earliest;
 }
 
 function memoryExpiry(nodes: readonly MemoryDependencyStatus[]): number {
@@ -179,6 +227,49 @@ function assertHistoryMemoryUnexpired(expiresAt: number) {
   if (!(expiresAt > Date.now())) {
     throw Object.assign(new Error("history memory is no longer active"), { code: "CONFLICT" });
   }
+}
+
+function assertTemporaryMemoryUnexpired(expiresAt: string | undefined) {
+  if (expiresAt !== undefined && !(Date.parse(expiresAt) > Date.now())) {
+    throw Object.assign(new Error("stream temporary memory is no longer active"), { code: "CONFLICT" });
+  }
+}
+
+function hasConsumedMisconceptionMemories(
+  resolvedMemoryIds: readonly string[],
+  historyMemoryIdsByCourse: ReadonlyMap<string | null, ReadonlySet<string>>,
+): boolean {
+  if (resolvedMemoryIds.length > 0) return true;
+  for (const ids of historyMemoryIdsByCourse.values()) {
+    if (ids.size > 0) return true;
+  }
+  return false;
+}
+
+async function assertConsumedMisconceptionMemoriesCurrentInTx(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  courseId: string | null,
+  resolvedMemoryIds: readonly string[],
+  historyMemoryIdsByCourse: ReadonlyMap<string | null, ReadonlySet<string>>,
+): Promise<number> {
+  let earliestExpiresAt = Infinity;
+  for (const [bindingCourse, ids] of historyMemoryIdsByCourse) {
+    if (!ids.size) continue;
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, [...ids], bindingCourse);
+    if (active.size !== ids.size) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    for (const auth of active.values()) earliestExpiresAt = Math.min(earliestExpiresAt, auth.earliestExpiresAtMs);
+  }
+  if (resolvedMemoryIds.length) {
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, resolvedMemoryIds, courseId);
+    if (active.size !== resolvedMemoryIds.length) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    for (const auth of active.values()) earliestExpiresAt = Math.min(earliestExpiresAt, auth.earliestExpiresAtMs);
+  }
+  return earliestExpiresAt;
 }
 
 async function assertStreamMaterialAdmission(
@@ -196,10 +287,13 @@ async function assertStreamMaterialAdmission(
     globalMemoryIds?: readonly string[];
     historyCourseBindings?: readonly HistoryCourseBinding[];
     historicalUserTurnId?: string;
+    skipPriorMisconceptions?: boolean;
     attemptLockScope?: { sourceIds: string[]; courseIds: string[] };
   } = {},
 ): Promise<{ courseId: string | null; deferredCourseId: string | null; resolvedMemoryIds: string[];
-  historyExpiresAt: number; lockedSourceVersions: ReadonlyMap<string, number>; memorySourceRefs: ContextSourceRef[] }> {
+  historyMemoryIdsByCourse: Map<string | null, Set<string>>;
+  historyExpiresAt: number; lockedSourceVersions: ReadonlyMap<string, number>; memorySourceRefs: ContextSourceRef[];
+  memoryMisconceptionLineage?: TutorMisconceptionLineage }> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = boundTurnCourseId(turn);
   const materialUse = boundTurnMaterialUse(turn);
@@ -304,7 +398,8 @@ async function assertStreamMaterialAdmission(
   const collectSourceIds = new Set<string>();
   const historyConflict = () => Object.assign(new Error("stream history is no longer available"), { code: "CONFLICT" });
   if (historicalUserTurnId && !await readTutorHistoryAncestors(tx, scope, historicalUserTurnId, {
-    collectSourceIds, collectCourseIds: originCourseIds,
+    collectSourceIds, collectCourseIds: originCourseIds, checkCurrentMisconceptions: false,
+    skipPriorMisconceptions: admissionOptions.skipPriorMisconceptions,
   })) throw historyConflict();
   const memoryBindings = historyBindings.filter(binding => binding.memoryIds?.length || binding.memoryBackings?.length);
   const roots = { citation: new Set<string>(), practice: new Set<string>() };
@@ -360,6 +455,7 @@ async function assertStreamMaterialAdmission(
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
     const status = await readTutorHistoryAncestorStatus(tx, scope, historicalUserTurnId, {
       lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+      checkCurrentMisconceptions: false, skipPriorMisconceptions: admissionOptions.skipPriorMisconceptions,
       // A legacy caller supplied no record of which exchanges were selected. Treat
       // session and activity material in the saved prefix as potentially selected.
       requireDestinationSessionMaterials: admissionOptions.historyCourseBindings === undefined,
@@ -368,10 +464,14 @@ async function assertStreamMaterialAdmission(
       || [...currentSources].some(id => !lockedSourceIds.includes(id))) throw historyConflict();
     historyExpiresAt = status.earliestExpiresAtMs;
   }
+  const historyMemoryIdsByCourse = new Map<string | null, Set<string>>();
   for (const binding of memoryBindings) {
     const nodes = resolveMemoryDependencyStatus(graphs!.get(binding.materialUse)!,
       binding.memoryIds ?? [], binding.memoryBackings ?? [], binding.courseId);
     if (!nodes) throw Object.assign(new Error("history memory is no longer active"), { code: "CONFLICT" });
+    const ids = historyMemoryIdsByCourse.get(binding.courseId) ?? new Set<string>();
+    for (const node of nodes) ids.add(node.dep_id);
+    historyMemoryIdsByCourse.set(binding.courseId, ids);
     historyExpiresAt = Math.min(historyExpiresAt, memoryExpiry(nodes));
   }
   if (historyBindings.length) {
@@ -467,7 +567,31 @@ async function assertStreamMaterialAdmission(
     }
     return { sourceId, sourceVersion, memoryOnly: true };
   });
-  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyExpiresAt, lockedSourceVersions, memorySourceRefs };
+  for (const [bindingCourse, ids] of historyMemoryIdsByCourse) {
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, [...ids], bindingCourse);
+    if (active.size !== ids.size) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    for (const auth of active.values()) historyExpiresAt = Math.min(historyExpiresAt, auth.earliestExpiresAtMs);
+  }
+  let memoryMisconceptionLineage: TutorMisconceptionLineage | undefined;
+  if (globalMemoryIdList.length) {
+    const active = await readMemoryMisconceptionAuthorities(tx, scope, globalMemoryIdList, courseId);
+    if (active.size !== globalMemoryIdList.length) {
+      throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+    }
+    const transitiveIds = new Set(globalMemoryIdList);
+    for (const auth of active.values()) {
+      historyExpiresAt = Math.min(historyExpiresAt, auth.earliestExpiresAtMs);
+      for (const dep of auth.dependencies) {
+        if (dep.courseId === null || dep.courseId === (courseId?.toLowerCase() ?? null)) transitiveIds.add(dep.id);
+      }
+    }
+    globalMemoryIdList = [...transitiveIds].sort();
+    memoryMisconceptionLineage = mergeTutorMisconceptionLineages(...[...active.values()].map(auth => auth.lineage));
+  }
+  return { courseId, deferredCourseId, resolvedMemoryIds: globalMemoryIdList, historyMemoryIdsByCourse, historyExpiresAt,
+    lockedSourceVersions, memorySourceRefs, memoryMisconceptionLineage };
 }
 
 /** Collect the source set for both the attempt and its nested study-context reads. */
@@ -611,7 +735,7 @@ async function assertStreamSources(
 }
 
 type UserTurnIntentInput = { userTurnId: string; jobId: string; claimToken?: string };
-async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput) {
+async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput, { allowReadOnlyExam = false } = {}) {
   await lockWorkspaceLearningHistory(tx, scope);
   const [row] = await tx`SELECT t.*,j.assistant_turn_id FROM opening_tutor_jobs j
     JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
@@ -622,16 +746,18 @@ async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input
       AND c.owner_user_id=${scope.ownerUserId} AND j.status='running'
       AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR SHARE OF j FOR UPDATE OF t`;
   if (!row) throw new Error("study intent job lease is no longer current");
-  if (row.query_system === true || row.composer_purpose && row.composer_purpose !== "answer" && row.composer_purpose !== "teach"
-    || (row.context_anchor as StudyContextAnchor | null)?.purpose === "language_support") {
+  const anchorPurpose = (row.context_anchor as StudyContextAnchor | null)?.purpose;
+  const purpose = row.composer_purpose;
+  const readOnly = row.query_system === true || Boolean(purpose && purpose !== "answer" && purpose !== "teach") || anchorPurpose === "language_support";
+  if (readOnly && !(allowReadOnlyExam && anchorPurpose === "exam_help")) {
     throw new Error("read-only or proposal composer purpose cannot change study intent");
   }
-  return row;
+  return { row, readOnly };
 }
 
 async function applyUserTurnIntentInTx(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput,
   saved?: Record<string, unknown>): Promise<Pick<StudyIntentEvent, "intent" | "action"> | null> {
-  const row = saved ?? await lockIntentUserTurn(tx, scope, input);
+  const row = saved ?? (await lockIntentUserTurn(tx, scope, input)).row;
   const attemptId = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId ?? null;
   const [attempt] = attemptId ? await tx`SELECT id,session_id FROM opening_learning_attempts WHERE id=${String(attemptId)}
     AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}` : [];
@@ -742,7 +868,7 @@ async function readCompletedCandidateEvidence(db: Sql | TransactionSql, input: C
 }
 
 /** Optional metadata consumes exactly the saved answer's still-authorized context. */
-async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: CompletedCandidateTarget) {
+async function findCompletedCandidateTarget(db: TransactionSql, input: CompletedCandidateTarget) {
   const workspaceId = input.scope.workspaceId;
   const standaloneSessions = () => db`${turnHasStandaloneSession(db, () => db`t`, () => db`w.owner_user_id`)}
     AND ${turnHasStandaloneSession(db, () => db`u`, () => db`w.owner_user_id`)}
@@ -773,7 +899,9 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
     WITH candidate_target AS MATERIALIZED (
       SELECT j.conversation_id, j.user_turn_id, j.mode, t.text AS answer, u.text AS question,
         (COALESCE(u.query_system, false) OR COALESCE(t.query_system, false) OR t.system_query IS NOT NULL) AS query_system,
-        t.context_source_refs, u.context_source_refs AS user_context_source_refs, w.privacy_epoch,
+        t.context_source_refs, t.intent_hash AS assistant_intent_hash, u.context_source_refs AS user_context_source_refs,
+        ${turnHasMisconceptionMemoryDependencies(db)} AS has_misconception_memories,
+        w.privacy_epoch, c.course_id AS conversation_course_id,
         u.source_ids || user_pins.source_ids
           || ${turnSessionMaterialIds(db, () => db`u`, () => db`c.owner_user_id`)} AS user_material_ids,
         t.source_ids || assistant_pins.source_ids
@@ -798,6 +926,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       CROSS JOIN LATERAL ${savedPins("user")} user_pins
       WHERE j.id=${input.jobId} AND j.workspace_id=${workspaceId}
         AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
+        AND NOT (${turnUsesInactiveMisconception(db, "t")})
         AND jsonb_typeof(u.citations)='array' AND jsonb_typeof(t.citations)='array'
         AND jsonb_typeof(u.source_versions)='object' AND jsonb_typeof(t.source_versions)='object'
         AND ${turnHasOwnedSession(db, () => db`u`, () => db`c.owner_user_id`)}
@@ -818,7 +947,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       FOR SHARE OF j
     )
     SELECT t.conversation_id, t.user_turn_id, t.mode, t.answer, t.question, t.context_source_refs,
-      t.privacy_epoch, t.course_id, t.assistant_course_id, t.query_system,
+      t.privacy_epoch, t.course_id, t.assistant_course_id, t.query_system, t.assistant_intent_hash, t.conversation_course_id,
+      t.has_misconception_memories,
       (SELECT jsonb_agg(to_jsonb(evidence_row) ORDER BY evidence_row.origin) FROM (VALUES
         (1, t.context_source_refs, t.assistant_material_ids, t.assistant_version_refs,
           t.assistant_course_id, t.assistant_material_use, t.standalone_sessions, t.assistant_source_ids),
@@ -836,12 +966,27 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
     ) AND ${savedMemoryRootsActive("user")} AND ${savedMemoryRootsActive("assistant")}`;
   const [target] = await readTarget();
   if (!target) return;
+  let savedMisconceptionExpiry = Infinity;
+  const checkSavedMemories = async () => {
+    if (!target.has_misconception_memories) return true;
+    const status = await readTurnMisconceptionMemoryStatus(db, input.scope, [input.assistantTurnId]);
+    savedMisconceptionExpiry = status.earliestExpiresAtMs;
+    return status.invalid.size === 0;
+  };
+  if (!await checkSavedMemories()) return;
   const checkAncestors = target.query_system === false;
   const collectCourseIds = new Set<string>([target.course_id, target.assistant_course_id].filter(id => typeof id === "string"));
+  const misconception = readSavedTutorMisconceptionLineage(target.assistant_intent_hash);
+  if (target.assistant_intent_hash != null && !misconception) return;
+  if (misconception?.courseId != null) {
+    if (misconception.courseId !== target.conversation_course_id) return;
+    collectCourseIds.add(misconception.courseId);
+  }
   const collectSourceIds = new Set<string>();
   const turnExpiry = target.memory_temporary_expires_at;
-  let earliestExpiresAtMs = turnExpiry == null ? Infinity : new Date(turnExpiry).getTime();
-  if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { collectCourseIds, collectSourceIds })) return;
+  let earliestExpiresAtMs = Math.min(turnExpiry == null ? Infinity : new Date(turnExpiry).getTime(), savedMisconceptionExpiry);
+  const ancestorRules = { checkCurrentMisconceptions: false, skipPriorMisconceptions: misconception !== null };
+  if (checkAncestors && !await readTutorHistoryAncestors(db, input.scope, target.user_turn_id, { ...ancestorRules, collectCourseIds, collectSourceIds })) return;
   const readEvidence = async (lockedSourceIds?: string[]) => {
     if (!target.evidence) return true;
     const rows = await readCompletedCandidateEvidence(db, input, target.evidence);
@@ -854,9 +999,15 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       const graph = await readMemoryDependencyStatus(db, input.scope, [...exactIds, ...row.backings.map(backing => backing.id)],
         { materialUse: row.material_use, collectSourceIds, collectCourseIds: currentCourses, lockedSourceIds });
       if (!lockedSourceIds) continue;
+      const nodesById = new Map([...new Set([...exactIds, ...row.backings.map(backing => backing.id)])]
+        .map(id => [id, resolveMemoryDependencyStatus(graph, [id], [], row.course_id)]));
+      const resolvedIds = [...new Set([...nodesById.values()].flatMap(nodes => nodes?.map(node => node.dep_id) ?? []))];
+      const activeAuthorities = await readMemoryMisconceptionAuthorities(db, input.scope, resolvedIds, row.course_id);
       const expiryFor = (id: string) => {
-        const nodes = resolveMemoryDependencyStatus(graph, [id], [], row.course_id);
-        return nodes ? memoryExpiry(nodes) : -Infinity;
+        const nodes = nodesById.get(id);
+        return nodes?.every(node => activeAuthorities.has(node.dep_id))
+          ? Math.min(memoryExpiry(nodes), ...nodes.map(node => activeAuthorities.get(node.dep_id)!.earliestExpiresAtMs))
+          : -Infinity;
       };
       for (const id of exactIds) {
         const expiry = expiryFor(id);
@@ -898,14 +1049,19 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
   if (checkAncestors) {
     const currentSources = new Set<string>(), currentCourses = new Set<string>();
     const history = await readTutorHistoryAncestorStatus(db, input.scope, target.user_turn_id, {
-      lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
+      ...ancestorRules, lockedSourceIds, collectSourceIds: currentSources, collectCourseIds: currentCourses,
     });
     if (!history.valid || [...currentSources].some(id => !locked.has(id)) || [...currentCourses].some(id => !collectCourseIds.has(id))) return;
     earliestExpiresAtMs = Math.min(earliestExpiresAtMs, history.earliestExpiresAtMs);
   }
   // Compare both saved origins again while their courses and materials are locked.
   const [currentTarget] = await readTarget();
-  if (isDeepStrictEqual(target, currentTarget) && await readEvidence(lockedSourceIds)) return { row: target, earliestExpiresAtMs };
+  if (!isDeepStrictEqual(target, currentTarget) || !await readEvidence(lockedSourceIds) || !await checkSavedMemories()) return;
+  if (misconception) {
+    await lockMisconceptionContext(db, input.scope.workspaceId);
+    if (!(await readActiveTutorMisconceptionLineages(db, input.scope, [misconception])).has(0)) return;
+  }
+  return { row: target, earliestExpiresAtMs };
 }
 
 /** Dispatch admission uses the same course and material locks as candidate append. */
@@ -1219,7 +1375,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
       }
       const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
-      const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+      const { courseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
@@ -1236,9 +1392,19 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           job.source_versions as Record<string, unknown> | null | undefined,
         );
       }
+      if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
+        await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
+      }
+      const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+        ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+            tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+          )
+        : Infinity;
+      const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
       await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
-      beforeStartSend?.();
       assertHistoryMemoryUnexpired(historyExpiresAt);
+      assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
+      beforeStartSend?.();
       inFlight = startSend();
       void inFlight.catch(() => undefined);
     });
@@ -1438,7 +1604,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
           }
           const attemptLockScope = context.attemptContext ? await discoverBoundAttemptMaterials(tx, scope, job) : undefined;
-          const { courseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+          const { courseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
@@ -1455,11 +1621,21 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               job.source_versions as Record<string, unknown> | null | undefined,
             );
           }
+          if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
+            await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
+          }
+          const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+            ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+                tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+              )
+            : Infinity;
+          const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
           await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
           try {
             publicationStarted = true;
             publishPromise = Promise.resolve().then(() => {
               assertHistoryMemoryUnexpired(historyExpiresAt);
+              assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
               return publish();
             });
             void publishPromise.catch(() => undefined);
@@ -1525,9 +1701,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       exposureReceiptId: string | null;
       attemptFence?: TutorAttemptFence;
       attemptSourceRefs?: readonly ContextSourceRef[];
-      temporaryMemoryExpiresAt?: string;
     }, commitAuthorized?: (job: OpeningTutorJobRecord) => void, canDeliver?: () => boolean): Promise<OpeningTutorJobRecord | null> {
-      const verifyInTx = async (tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE"): Promise<OpeningTutorJobRecord | null> => {
+      const verifyInTx = async (
+        tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE",
+      ): Promise<{ job: OpeningTutorJobRecord | null; earliestDeadlineMs: number }> => {
         if (lockMode === "FOR UPDATE") await lockWorkspaceLearningHistory(tx, scope);
         else if (context.attemptFence !== undefined) await shareAttemptHistory(tx, scope);
         const [workspace] = lockMode === "FOR UPDATE"
@@ -1535,8 +1712,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`
           : await tx`SELECT privacy_epoch FROM workspaces
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        if (!workspace) return null;
-        const hasPriorExchanges = () => tx`NOT COALESCE(t.query_system, false) AND EXISTS (
+        if (!workspace) return { job: null, earliestDeadlineMs: Infinity };
+        const hasPriorExchanges = () => tx`NOT COALESCE(t.query_system, false)
+          AND (NOT ${context.historyMisconceptionLineage !== undefined}
+            OR t.context_anchor->>'purpose' IS DISTINCT FROM 'exam_help') AND EXISTS (
           SELECT 1 FROM opening_tutor_jobs prior_job
           JOIN LATERAL (
             SELECT 1 FROM opening_turns prior_u
@@ -1553,6 +1732,18 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             OFFSET 0
           ) prior ON true
           WHERE prior_job.workspace_id=j.workspace_id AND prior_job.conversation_id=j.conversation_id
+          UNION ALL
+          SELECT 1 FROM opening_turns prior_a
+          LEFT JOIN opening_tutor_jobs prior_j ON prior_j.assistant_turn_id=prior_a.id
+            AND prior_j.workspace_id=prior_a.workspace_id AND prior_j.conversation_id=prior_a.conversation_id
+          LEFT JOIN opening_turns prior_u ON prior_u.id=prior_j.user_turn_id
+            AND prior_u.workspace_id=prior_a.workspace_id AND prior_u.conversation_id=prior_a.conversation_id
+            AND prior_u.role='user' AND prior_u.status='complete'
+          WHERE prior_a.workspace_id=j.workspace_id AND prior_a.conversation_id=j.conversation_id
+            AND prior_a.role='assistant' AND prior_a.status='complete'
+            AND NOT prior_a.query_system AND prior_a.system_query IS NULL
+            AND prior_u.id IS NULL
+            AND (prior_a.created_at, prior_a.id) < (t.created_at, t.id)
         )`;
         const [row] = lockMode === "FOR UPDATE"
           ? await tx`SELECT j.*,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,t.learning_session_id,c.course_id,
@@ -1565,9 +1756,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
-        if (!row) return null;
+        if (!row) return { job: null, earliestDeadlineMs: Infinity };
         const job = mapJob(row as Record<string, unknown>);
-        if (job.status !== "running") return job;
+        if (job.status !== "running") return { job, earliestDeadlineMs: Infinity };
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
@@ -1587,13 +1778,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           attemptRefs = context.attemptSourceRefs ?? attemptLockScope.refs;
         }
         const historicalUserTurnId = row.has_prior_exchanges ? String(row.user_turn_id) : undefined;
-        const { courseId, deferredCourseId, resolvedMemoryIds, historyExpiresAt } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
+        const { courseId, deferredCourseId, resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt: admittedHistoryExpiresAt, memoryMisconceptionLineage } = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, attemptRefs, {
             streamReplay: true,
             memoryLineageSourceIds: context.memoryLineageSourceIds,
             globalMemoryIds: context.globalMemoryIds,
             historyCourseBindings: context.historyCourseBindings,
             historicalUserTurnId,
+            skipPriorMisconceptions: context.misconceptionSnapshot !== undefined || context.historyMisconceptionLineage !== undefined,
             attemptLockScope,
           });
         if (attemptFence) {
@@ -1607,12 +1799,23 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           tx, scope, context.contextSourceRefs, attemptRefs,
           row.source_versions as Record<string, unknown> | null | undefined, deferredCourseId,
         );
-        await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
-        assertHistoryMemoryUnexpired(historyExpiresAt);
-        if (context.temporaryMemoryExpiresAt !== undefined && !(Date.parse(context.temporaryMemoryExpiresAt) > Date.now())) {
-          throw new Error("stream temporary memory is no longer active");
+        if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
+          await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
         }
-        return job;
+        const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+          ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+              tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+            )
+          : Infinity;
+        const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
+        const globalExpiresAt = await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+        assertHistoryMemoryUnexpired(historyExpiresAt);
+        assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
+        const contextExpiresAt = context.temporaryMemoryExpiresAt !== undefined
+          ? Date.parse(context.temporaryMemoryExpiresAt)
+          : Infinity;
+        const earliestDeadlineMs = Math.min(historyExpiresAt, globalExpiresAt, contextExpiresAt);
+        return { job, earliestDeadlineMs };
       };
 
       // Phase 1: Durable exposure commit (only when an exposure receipt exists, or for
@@ -1620,7 +1823,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       let phase1ExecutionId: string | undefined;
       if (context.exposureReceiptId || !commitAuthorized) {
         const phase1Job = await sql.begin(async tx => {
-          const job = await verifyInTx(tx, "FOR UPDATE");
+          const { job, earliestDeadlineMs } = await verifyInTx(tx, "FOR UPDATE");
           if (!job || job.status !== "running") return job;
           if (context.exposureReceiptId) {
             const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
@@ -1628,7 +1831,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
             if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
             if (canDeliver && !canDeliver()) throw new Error("stream closed before delivery");
-            await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+            const released = Number.isFinite(earliestDeadlineMs)
+              ? await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId, {
+                  expiresAt: new Date(earliestDeadlineMs).toISOString(),
+                })
+              : await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+            if (released === null) {
+              throw Object.assign(new Error("temporary memory expired before delivery"), { code: "CONFLICT" });
+            }
           }
           return job;
         }) as OpeningTutorJobRecord | null;
@@ -1639,7 +1849,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       // Phase 2: Pure read-only FOR SHARE transaction holding row locks synchronously
       // across commitAuthorized (controller.enqueue) with zero DB writes.
       return sql.begin(async tx => {
-        const job = await verifyInTx(tx, "FOR SHARE");
+        const { job } = await verifyInTx(tx, "FOR SHARE");
         if (!job || job.status !== "running") return job;
         if (phase1ExecutionId !== undefined && job.executionId !== phase1ExecutionId) {
           throw new Error("stream execution changed");
@@ -1709,7 +1919,19 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         }
         const resolved = resolveMemoryDependencyStatus(graph, ids, [], courseId);
         if (!resolved) throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
-        const resolvedMemoryIds = [...new Set(resolved.map(memory => memory.dep_id))].sort();
+        let resolvedMemoryIds = [...new Set(resolved.map(memory => memory.dep_id))].sort();
+        const active = await readMemoryMisconceptionAuthorities(tx, scope, resolvedMemoryIds, courseId);
+        if (active.size !== resolvedMemoryIds.length) {
+          throw Object.assign(new Error("stream memory misconception source is no longer active"), { code: "CONFLICT" });
+        }
+        const transitiveIds = new Set(resolvedMemoryIds);
+        for (const auth of active.values()) {
+          assertHistoryMemoryUnexpired(auth.earliestExpiresAtMs);
+          for (const dep of auth.dependencies) {
+            if (dep.courseId === null || dep.courseId === (courseId?.toLowerCase() ?? null)) transitiveIds.add(dep.id);
+          }
+        }
+        resolvedMemoryIds = [...transitiveIds].sort();
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
       });
     },
@@ -1757,9 +1979,12 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       enqueueMetadata?: boolean;
     }, options?: {
       materialPurposePin?: OpeningMaterialPurposePin;
+      misconceptionSnapshot?: TutorMisconceptionSnapshot;
+      historyMisconceptionLineage?: TutorMisconceptionLineage;
       memoryLineageSourceIds?: readonly string[];
       globalMemoryIds?: readonly string[];
       historyCourseBindings?: readonly HistoryCourseBinding[];
+      temporaryMemoryExpiresAt?: string;
       attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext };
     }): Promise<void> {
       await sql.begin(async (tx) => {
@@ -1796,7 +2021,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (input.expectedPrivacyEpoch !== undefined) {
           const currentEpoch = Number(workspace[0]!.privacy_epoch);
           if (currentEpoch !== input.expectedPrivacyEpoch) {
-            throw new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
+            const error = new Error(`privacy epoch drift: expected ${input.expectedPrivacyEpoch} current ${currentEpoch}`);
+            throw options?.misconceptionSnapshot ? Object.assign(error, { code: "PRIVACY_EPOCH_MISMATCH" }) : error;
           }
         }
         const attempt = options?.attemptContext;
@@ -1819,6 +2045,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const attemptLockScope = attempt ? await discoverBoundAttemptMaterials(tx, input.scope, boundTurn) : undefined;
         let lockedSourceVersions: ReadonlyMap<string, number> | undefined;
         let memorySourceRefs: ContextSourceRef[] = [];
+        let memoryMisconceptionLineage: TutorMisconceptionLineage | undefined;
+        let resolvedMemoryIds: readonly string[] = [];
+        let historyMemoryIdsByCourse = new Map<string | null, Set<string>>();
+        let historyExpiresAt = Infinity;
         if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
           || options?.memoryLineageSourceIds !== undefined || options?.historyCourseBindings !== undefined
           || options?.attemptContext !== undefined
@@ -1838,7 +2068,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               attemptLockScope,
             },
           );
-          const { courseId, resolvedMemoryIds, historyExpiresAt } = admission;
+          ({ resolvedMemoryIds, historyMemoryIdsByCourse, historyExpiresAt, memoryMisconceptionLineage } = admission);
           lockedSourceVersions = admission.lockedSourceVersions;
           memorySourceRefs = admission.memorySourceRefs;
           if (attempt) {
@@ -1848,11 +2078,41 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             await assertStreamSources(tx, input.scope, refs, options?.attemptContext?.snapshot.sourceRefs,
               boundTurn.source_versions as Record<string, unknown> | null | undefined);
           }
-          await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, resolvedMemoryIds, courseId);
-          assertHistoryMemoryUnexpired(historyExpiresAt);
         } else if (boundCourseId !== null) {
           await lockStreamCourse(tx, input.scope, boundCourseId);
         }
+        let assistantIntentHash: string | null = null;
+        let allowMetadata = true;
+        const snapshot = options?.misconceptionSnapshot;
+        const suppliedLineage = options?.historyMisconceptionLineage;
+        if (snapshot || suppliedLineage !== undefined || memoryMisconceptionLineage) {
+          await assertBoundMisconceptions(tx, input.scope, boundCourseId,
+            { misconceptionSnapshot: snapshot, historyMisconceptionLineage: suppliedLineage }, memoryMisconceptionLineage);
+        }
+        const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+          ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+              tx, input.scope, boundCourseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+            )
+          : Infinity;
+        historyExpiresAt = Math.min(historyExpiresAt, recheckedExpiry);
+        const historyLineage = mergeTutorMisconceptionLineages(suppliedLineage, memoryMisconceptionLineage);
+        if (suppliedLineage !== undefined || historyLineage || snapshot || resolvedMemoryIds.length) {
+          const snapshotCourseId = snapshot?.effectiveCourseId === undefined
+            ? (snapshot?.revisionIds.length ? snapshot.courseId : null) : snapshot.effectiveCourseId;
+          const lineage = parseTutorMisconceptionLineage({ kind: "v3_misconception_lineage",
+            courseId: snapshotCourseId ?? historyLineage?.courseId ?? null,
+            revisionIds: [...new Set([...(snapshot?.revisionIds ?? []), ...(historyLineage?.revisionIds ?? [])])],
+          });
+          if (!lineage) {
+            throw Object.assign(new Error("learner misconception lineage invalid"), { code: "CONFLICT" });
+          }
+          // Assistant intent_hash survives backup without changing the saved anchor or material reference format.
+          assistantIntentHash = JSON.stringify(lineage);
+          allowMetadata = boundTurn.course_id != null || lineage.courseId === null;
+        }
+        await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, resolvedMemoryIds, boundCourseId);
+        assertHistoryMemoryUnexpired(historyExpiresAt);
+        assertTemporaryMemoryUnexpired(options?.temporaryMemoryExpiresAt);
         const claimed = await tx`
           UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()
           WHERE id = ${input.jobId}
@@ -1892,13 +2152,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         const assistant = await tx`
           UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
             system_query=${receipt ? tx.json(receipt as never) : null},
-            context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)}, status = 'complete'
-          WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND (${receipt === null} OR query_system)
+            context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)},
+            intent_hash = ${assistantIntentHash}, status = 'complete'
+          WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND role = 'assistant' AND (${receipt === null} OR query_system)
             AND id = (SELECT j.assistant_turn_id FROM opening_tutor_jobs j WHERE j.id = ${input.jobId})
           RETURNING id
         `;
         if (!assistant.length) throw new Error("assistant turn was not persisted");
-        for (const candidate of input.candidates) {
+        for (const candidate of allowMetadata ? input.candidates : []) {
           await tx`
             INSERT INTO opening_assistant_candidates (
               id, workspace_id, conversation_id, source_turn_id, source_ids, payload
@@ -1912,7 +2173,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         }
         if (input.helpExposure) await insertOpeningDeliveredHelp(tx, input.scope, input.helpExposure, { generatedOnly: true });
         if (input.generatedExposure) await generateOpeningStudyExposure(tx, input.scope, input.generatedExposure);
-        if (input.enqueueMetadata) {
+        if (input.enqueueMetadata && allowMetadata) {
           const jobId = randomUUID();
           const payload = { tutorJobId: input.jobId, assistantTurnId: input.assistantTurnId, tutorClaimToken: input.claimToken ?? null };
           const queued = await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
@@ -1980,13 +2241,13 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     /** Freeze before external calls; first intent application and snapshot commit are atomic. */
     async freezeHelpInputSnapshot(scope: OpeningScope, input: UserTurnIntentInput): Promise<HelpInputSnapshot> {
       return sql.begin(async tx => {
-        const row = await lockIntentUserTurn(tx, scope, input);
+        const { row, readOnly } = await lockIntentUserTurn(tx, scope, input, { allowReadOnlyExam: true });
         if (row.help_input_snapshot != null) {
           const frozen = helpInputSnapshotSchema.parse(row.help_input_snapshot);
           if (frozen.userTurnId !== input.userTurnId || frozen.assistantTurnId !== row.assistant_turn_id) throw new Error("help input snapshot job pair mismatch");
           return frozen;
         }
-        const applied = await applyUserTurnIntentInTx(tx, scope, input, row);
+        const applied = readOnly ? null : await applyUserTurnIntentInTx(tx, scope, input, row);
         const snapshot = helpInputSnapshotSchema.parse({ userTurnId: input.userTurnId, assistantTurnId: row.assistant_turn_id, tutorMode: row.mode,
           studyIntent: applied ? { intent: applied.intent, action: applied.action } : null });
         await tx`UPDATE opening_turns SET help_input_snapshot=${tx.json(snapshot)} WHERE id=${input.userTurnId} AND workspace_id=${scope.workspaceId}`;

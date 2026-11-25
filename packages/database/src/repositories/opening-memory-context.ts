@@ -9,6 +9,8 @@ import {
 import type { OpeningScope } from "./opening-sources";
 import { bareUserOrigin, lockAndReadMemoryOrigins, lockOwnedWorkspace } from "./opening-memory-admission";
 import { mapMemoryRow } from "./opening-memory-types";
+import { mergeTutorMisconceptionLineages, readMemoryMisconceptionAuthorities,
+  type TutorMisconceptionLineage } from "./v3-bitemporal-misconception-memory";
 
 type Db = Sql | TransactionSql;
 
@@ -17,6 +19,7 @@ export type LoadedMemoryContext = {
   sourceRefs: ContextSourceRef[];
   temporaryMemoryExpiresAt?: string;
   dependencyMemoryIds?: string[];
+  misconceptionLineage?: TutorMisconceptionLineage;
 };
 
 /**
@@ -28,11 +31,13 @@ async function readMemoryContextInTx(
   activeCourseId: string | null,
   materialUse: "citation" | "practice" | "origin",
   excludedSourceIds?: readonly string[],
+  asOf?: string,
 ): Promise<Array<{
   memory: MemoryItem;
   sourceRefs: ContextSourceRef[];
   ancestorTemporaryExpiresAt?: string;
   ancestorMemoryIds: string[];
+  misconceptionLineage?: TutorMisconceptionLineage;
 }>> {
   await lockOwnedWorkspace(db, scope);
   const activeCourses = activeCourseId === null ? [] : await db`SELECT id FROM courses
@@ -126,28 +131,64 @@ async function readMemoryContextInTx(
   const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin",
     includeSourceRefs: true };
   const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
+  const rootIds = new Set<string>();
+  const authorityIds = [...new Set(originRows.flatMap(({ id }) => {
+    const origin = origins.get(id);
+    if (origin === null) return [];
+    rootIds.add(id.toLowerCase());
+    return [id, ...(origin?.ids ?? [])];
+  }))];
+  const misconceptionAuthorities = await readMemoryMisconceptionAuthorities(
+    db, scope, authorityIds, eligibleCourseId, { asOf, asOfRootIds: rootIds, allowCandidateRoots: asOf === undefined },
+  );
+  const normalizedEligibleCourse = eligibleCourseId?.toLowerCase() ?? null;
   return rows.flatMap(row => {
     const origin = origins.get(String(row.id));
     const savedRefs = parseContextSourceRefs(row.material_source_refs);
     if (origin === null || savedRefs === null) return [];
     const savedSourceIds = new Set(savedRefs.map(ref => ref.sourceId));
     const sourceRefs = mergeContextSourceRefs(savedRefs, (origin?.sourceRefs ?? []).filter(ref => !savedSourceIds.has(ref.sourceId)));
-    const expiry = Math.min(row.ancestor_temporary_expires_at == null
-      ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(), origin?.expiresAt ?? Infinity);
-    if (Number.isNaN(expiry)) return [];
-    const ancestorTemporaryExpiresAt = Number.isFinite(expiry) ? new Date(expiry).toISOString() : undefined;
-    const ancestorMemoryIds = [...new Set([
+    const directAncestorIds = [...new Set([
       ...(parseContextMemoryDependencyIds([{ memoryDependencyIds: row.ancestor_memory_ids }]) ?? []),
       ...(origin?.ids ?? []),
     ])].sort();
-    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs, ancestorTemporaryExpiresAt, ancestorMemoryIds }];
+    const id = String(row.id);
+    if (origins.has(id) && (!misconceptionAuthorities.has(id)
+      || directAncestorIds.some(ancestor => !misconceptionAuthorities.has(ancestor)))) return [];
+    const ownAuth = misconceptionAuthorities.get(id);
+    const ancestorAuths = directAncestorIds.map(ancestor => misconceptionAuthorities.get(ancestor));
+    const transitiveEarliest = Math.min(
+      ownAuth ? (row.kind === "temporary" && row.expires_at != null
+        ? Math.min(...[...ancestorAuths.map(a => a?.earliestExpiresAtMs ?? Infinity),
+            ...(ownAuth.dependencyIds.length ? [ownAuth.earliestExpiresAtMs] : [])])
+        : ownAuth.earliestExpiresAtMs) : Infinity,
+      ...ancestorAuths.map(a => a?.earliestExpiresAtMs ?? Infinity),
+    );
+    const expiry = Math.min(
+      row.ancestor_temporary_expires_at == null
+        ? Infinity : new Date(row.ancestor_temporary_expires_at as string | Date).getTime(),
+      origin?.expiresAt ?? Infinity,
+      transitiveEarliest,
+    );
+    if (Number.isNaN(expiry)) return [];
+    const ancestorTemporaryExpiresAt = Number.isFinite(expiry) ? new Date(expiry).toISOString() : undefined;
+    const extraDeps = [ownAuth, ...ancestorAuths].flatMap(auth => (auth?.dependencies ?? [])
+      .filter(dep => dep.courseId === null || dep.courseId === normalizedEligibleCourse)
+      .map(dep => dep.id));
+    const ancestorMemoryIds = [...new Set([...directAncestorIds, ...extraDeps])].filter(dep => dep !== id.toLowerCase()).sort();
+    const misconceptionLineage = mergeTutorMisconceptionLineages(
+      ownAuth?.lineage, ...ancestorAuths.map(auth => auth?.lineage),
+    );
+    return [{ memory: mapMemoryRow(row as Record<string, unknown>), sourceRefs,
+      ancestorTemporaryExpiresAt, ancestorMemoryIds, misconceptionLineage }];
   });
 }
 
 function readMemoryContext(
-  db: Db, scope: OpeningScope, activeCourseId: string | null, materialUse: "citation" | "practice" | "origin", excludedSourceIds?: readonly string[],
+  db: Db, scope: OpeningScope, activeCourseId: string | null, materialUse: "citation" | "practice" | "origin",
+  excludedSourceIds?: readonly string[], asOf?: string,
 ) {
-  const read = (tx: Db) => readMemoryContextInTx(tx, scope, activeCourseId, materialUse, excludedSourceIds);
+  const read = (tx: Db) => readMemoryContextInTx(tx, scope, activeCourseId, materialUse, excludedSourceIds, asOf);
   return "begin" in db && typeof db.begin === "function" ? db.begin(read) : read(db);
 }
 
@@ -155,7 +196,7 @@ export async function listMemoriesForContext(
   db: Db, scope: OpeningScope, activeCourseId: string | null, excludedSourceIds?: readonly string[], now?: string,
   materialUse?: "citation" | "practice",
 ): Promise<MemoryItem[]> {
-  const rows = await readMemoryContext(db, scope, activeCourseId, materialUse ?? "origin", excludedSourceIds);
+  const rows = await readMemoryContext(db, scope, activeCourseId, materialUse ?? "origin", excludedSourceIds, now);
   if (now === undefined) return rows.map((row) => row.memory);
   const nowMs = Date.parse(now);
   return rows
@@ -169,7 +210,7 @@ export async function loadMemoryContext(
   db: Db, scope: OpeningScope, activeCourseId: string | null, now: string, materialUse: "citation" | "practice" = "citation",
 ): Promise<LoadedMemoryContext> {
   const nowMs = Date.parse(now);
-  const eligible = (await readMemoryContext(db, scope, activeCourseId, materialUse))
+  const eligible = (await readMemoryContext(db, scope, activeCourseId, materialUse, undefined, now))
     .filter((row) => isMemoryEligible(row.memory, now)
       && (row.ancestorTemporaryExpiresAt === undefined
         || (!Number.isNaN(nowMs) && Date.parse(row.ancestorTemporaryExpiresAt) > nowMs)));
@@ -191,10 +232,12 @@ export async function loadMemoryContext(
     for (const id of row.ancestorMemoryIds) dependencyIds.add(id);
   }
   const dependencyMemoryIds = [...dependencyIds].sort();
+  const misconceptionLineage = mergeTutorMisconceptionLineages(...eligible.map(row => row.misconceptionLineage));
   return {
     memories: eligible.map((row) => row.memory),
     sourceRefs: mergeContextSourceRefs(...eligible.map((row) => row.sourceRefs)),
     ...(earliestTempExpiresAtIso ? { temporaryMemoryExpiresAt: earliestTempExpiresAtIso } : {}),
     ...(dependencyMemoryIds.length ? { dependencyMemoryIds } : {}),
+    ...(misconceptionLineage ? { misconceptionLineage } : {}),
   };
 }

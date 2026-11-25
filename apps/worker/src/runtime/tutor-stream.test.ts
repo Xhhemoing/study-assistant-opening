@@ -101,6 +101,32 @@ it("preserves an explicitly empty destination selection in cached history", asyn
   await expect(reader.read(id, id)).resolves.toMatchObject({ historyCourseBindings: [binding] });
 });
 
+it("round-trips misconception snapshots and rejects malformed or mismatched cache bindings", async () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  const renderedMarkdown = "- 待确认：检查定义";
+  const snapshot = { courseId: id, effectiveCourseId: id, privacyEpoch: 2, revisionIds: [id],
+    renderedMarkdown, byteLength: Buffer.byteLength(renderedMarkdown) };
+  const empty = { ...snapshot, effectiveCourseId: null, revisionIds: [], renderedMarkdown: "", byteLength: 0 };
+  const historyMisconceptionLineage = { kind: "v3_misconception_lineage" as const, courseId: id, revisionIds: [id] };
+  const context = { privacyEpoch: 2, contextSourceRefs: [], historyCourseBindings: [], exposureReceiptId: null, historyMisconceptionLineage };
+  const evalScript = vi.fn().mockResolvedValue(undefined);
+  const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);
+  for (const misconceptionSnapshot of [snapshot, empty]) await writer.begin(id, id, { ...context, misconceptionSnapshot });
+  const hgetall = vi.fn();
+  for (const call of evalScript.mock.calls) hgetall.mockResolvedValueOnce({ context: call[7], text: "buffered", sequence: "1" });
+  const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
+  for (const misconceptionSnapshot of [snapshot, empty]) {
+    await expect(reader.read(id, id)).resolves.toMatchObject({ text: "buffered", misconceptionSnapshot, historyMisconceptionLineage });
+  }
+  for (const misconceptionSnapshot of [null, { ...snapshot, courseId: "invalid" }, { ...snapshot, courseId: null },
+    { ...snapshot, effectiveCourseId: "invalid" }, { ...snapshot, privacyEpoch: 1 }, { ...snapshot, revisionIds: ["invalid"] },
+    { ...snapshot, renderedMarkdown: null }, { ...snapshot, byteLength: renderedMarkdown.length },
+    { ...snapshot, renderedMarkdown: "a".repeat(2049), byteLength: 2049 }]) {
+    hgetall.mockResolvedValueOnce({ context: JSON.stringify({ ...context, misconceptionSnapshot }), text: "buffered", sequence: "1" });
+    await expect(reader.read(id, id)).rejects.toThrow("invalid tutor stream cache");
+  }
+});
+
 it("parses temporaryMemoryExpiresAt and memoryOnly provenance refs and rejects invalid timestamps", async () => {
   const id = "10000000-0000-4000-8000-000000000001";
   const expiresAt = "2026-11-21T01:00:00.000Z";

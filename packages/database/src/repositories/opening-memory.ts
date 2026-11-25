@@ -5,8 +5,11 @@ import type { OpeningScope } from "./opening-sources";
 import {
   assertCourseInWorkspace,
   assertSourceTurnsOwned,
+  lockActiveMemoryCourses,
   lockOwnedWorkspace,
+  readBareUserOrigins,
 } from "./opening-memory-admission";
+import { sourceTurnsAllowMisconceptionMemory } from "./v3-bitemporal-misconception-memory";
 import { listMemoriesForContext, loadMemoryContext } from "./opening-memory-context";
 import { confirmOwnedMemory, rejectOwnedMemory } from "./opening-memory-decision";
 import { deleteOwnedMemory } from "./opening-memory-delete";
@@ -95,7 +98,26 @@ export function createOpeningMemoryRepository(
           throw error;
         }
         await lockOwnedWorkspace(tx, scope);
-        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
+        if (input.sourceTurnIds.length && courseId && !await lockActiveMemoryCourses(tx, scope, [courseId])) {
+          const ids = [...new Set(input.sourceTurnIds.map(id => id.toLowerCase()))];
+          const owned = await tx`SELECT t.id FROM opening_turns t
+            JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
+            WHERE t.id=ANY(${ids}::uuid[]) AND t.workspace_id=${scope.workspaceId}
+              AND c.owner_user_id=${scope.ownerUserId} AND t.status='complete'`;
+          if (owned.length !== ids.length) {
+            throw new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
+          }
+          throw new OpeningMemoryError("VALIDATION", "course is not in this workspace");
+        }
+        const assertOrigins = async () => {
+          const bareOrigins = courseId === null ? await readBareUserOrigins(tx, scope, input.sourceTurnIds) : new Set<string>();
+          const nonBareOrigins = input.sourceTurnIds.filter(id => !bareOrigins.has(id.toLowerCase()));
+          await assertSourceTurnsOwned(tx, scope, nonBareOrigins, null, courseId);
+          if (!await sourceTurnsAllowMisconceptionMemory(tx, scope, nonBareOrigins, courseId)) {
+            throw new OpeningMemoryError("VALIDATION", "memory source or dependency misconception is unavailable");
+          }
+        };
+        await assertOrigins();
         await assertCourseInWorkspace(tx, scope, courseId, true);
         const rejected = await tx`
           SELECT source_turn_ids, text FROM opening_memories
@@ -113,7 +135,7 @@ export function createOpeningMemoryRepository(
             ${randomUUID()}, ${scope.workspaceId}, ${courseId}, ${kind},
             ${text}, ${tx.json(input.sourceTurnIds as never)}, 0, ${input.expiresAt}, 'active'
           ) RETURNING *`;
-        if (input.sourceTurnIds.length) await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, null, courseId);
+        await assertOrigins();
         return mapMemoryRow(rows[0] as Record<string, unknown>);
       });
     },

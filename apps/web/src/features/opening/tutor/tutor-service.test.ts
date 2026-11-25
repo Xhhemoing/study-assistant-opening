@@ -18,6 +18,9 @@ function createService(opts?: {
   courseId?: string | null;
   listReadySourceIdsForCourse?: ReturnType<typeof vi.fn>;
   tutorModelReady?: ReturnType<typeof vi.fn>;
+  attempts?: Parameters<typeof createTutorService>[0]["attempts"];
+  systemQueryEnabled?: () => boolean;
+  readFailedTurnRetry?: Parameters<typeof createTutorService>[0]["readFailedTurnRetry"];
 }) {
   const conversations = {
     getOwned: vi.fn(async () => ({
@@ -27,7 +30,7 @@ function createService(opts?: {
       updatedAt: "2026-09-20T00:00:00.000Z",
     })),
     loadContinuityTurns: vi.fn(async () => []),
-    releaseReturnedTurnIds: vi.fn(async () => undefined),
+    releaseReturnedTurnIds: vi.fn<Parameters<typeof createTutorService>[0]["conversations"]["releaseReturnedTurnIds"]>(async () => undefined),
     appendSavedTurn: vi.fn(async () => ({ turnId: "77777777-7777-4777-8777-777777777777", jobId: "88888888-8888-4888-8888-888888888888", assistantTurnId: "99999999-9999-4999-8999-999999999999" })),
     findTurnByClientKey: vi.fn(async () => null),
   };
@@ -44,8 +47,11 @@ function createService(opts?: {
       conversations,
       sourceChunks,
       readSelection,
+      systemQueryEnabled: opts?.systemQueryEnabled,
+      readFailedTurnRetry: opts?.readFailedTurnRetry,
       ...(listReadySourceIdsForCourse ? { listReadySourceIdsForCourse } : {}),
       ...(opts?.tutorModelReady ? { tutorModelReady: opts.tutorModelReady } : {}),
+      attempts: opts?.attempts,
     }),
     conversations,
     sourceChunks,
@@ -399,6 +405,18 @@ it("releases only resume messages that actually fit in the returned history", as
   expect(conversations.releaseReturnedTurnIds).toHaveBeenCalledWith(scope, CONVERSATION, turns.slice(5).map(turn => turn.id));
 });
 
+it("returns the redacted version when a resume answer is withdrawn before receipt release", async () => {
+  const { service, conversations } = createService();
+  const turn = { id: "withdrawn-turn", role: "assistant" as const, text: "stale answer" };
+  const withdrawn = { ...turn, text: "关联学习记录已更新或撤回，此回答内容不再显示。", citations: [] };
+  conversations.loadContinuityTurns.mockResolvedValueOnce([{ ...turn, citations: [{ quote: "stale quote" }] }] as never);
+  conversations.releaseReturnedTurnIds.mockResolvedValueOnce([withdrawn]);
+  await expect(service.resumeConversation(scope, CONVERSATION)).resolves.toMatchObject({
+    boundedHistory: [{ role: "assistant", text: withdrawn.text, citations: [] }],
+  });
+  expect(conversations.releaseReturnedTurnIds).toHaveBeenCalledWith(scope, CONVERSATION, [turn.id]);
+});
+
 it("does not release resume help when sticky selection validation refuses the response", async () => {
   const { service, conversations } = createService();
   conversations.loadContinuityTurns.mockResolvedValueOnce([{ id: "unreleased-turn", role: "assistant", text: "a hint", citations: [] }]);
@@ -444,15 +462,155 @@ it("routes a continued saved query from prior user intent rather than assistant 
   expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
 });
 
+describe("exam-help admission", () => {
+  const attemptId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const request = { conversationId: CONVERSATION, text: "Help with this exam", sourceIds: [S], privacy: "saved",
+    clientKey: "exam-help-admission", currentPage: 4, chunkId: C, contextAnchor: { purpose: "exam_help", attemptId } };
+
+  it.each([
+    [{ text: "高数进度怎么样" }, "query"],
+    [{ querySystem: true }, "query"],
+    [{ purpose: "plan" }, "plan"],
+    [{ purpose: "query" }, "query"],
+    [{ purpose: "explain_state" }, "explain_state"],
+    [{ purpose: "answer" }, "answer"],
+    [{ purpose: "teach" }, "teach"],
+  ])("applies material and attempt admission to %j", async (intent, purpose) => {
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+
+    await expect(f.service.submitTurn(scope, { ...request, ...intent })).resolves.toMatchObject({ learningSessionId: S });
+    expect(f.sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S]);
+    expect(assertAccess).toHaveBeenCalledWith(scope, attemptId);
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId, learningSessionId: S, sourceIds: [S], currentPage: 4, chunkId: C, purpose,
+    }));
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalledWith(expect.objectContaining({ querySystem: true }));
+  });
+
+  it.each([
+    ["SOURCE_UNAVAILABLE", 422, { sourceIds: [COURSE] }],
+    ["page_not_in_sources", 422, { currentPage: 9 }],
+    ["NOT_FOUND", 404, {}],
+  ])("rejects a record-style exam request when admission fails with %s", async (code, status, changes) => {
+    const assertAccess = vi.fn(async () => null);
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+
+    await expect(f.service.submitTurn(scope, { ...request, ...changes, text: "高数进度怎么样" }))
+      .rejects.toMatchObject({ code, status });
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+
+  it("preserves the read-only plan purpose for new guidance and legacy replay", async () => {
+    const f = createService({ attempts: { assertAccess: vi.fn(async () => ({ id: attemptId, sessionId: S })) } });
+    await expect(f.service.submitTurn(scope, { ...request, purpose: "plan" })).resolves.toMatchObject({ replayed: false });
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ purpose: "plan",
+      examHelpReplay: expect.objectContaining({ requested: { purpose: "plan", querySystem: undefined }, legacyPurpose: "plan" }) }));
+  });
+
+  it.each([{ querySystem: true }, { purpose: "query" }, { purpose: "explain_state" },
+    { purpose: "query", querySystem: false }, { purpose: "explain_state", querySystem: false },
+  ])("replays a historical exam record query %j without starting a new query", async intent => {
+    const assertAccess = vi.fn(async () => null);
+    const systemQueryEnabled = vi.fn(() => false);
+    const f = createService({ systemQueryEnabled, attempts: { assertAccess } });
+    Object.assign(f.conversations, { findTurnByClientKey: vi.fn(async () => ({ mode: "hint", querySystem: true,
+      purpose: intent.purpose ?? "query", learningSessionId: null })) });
+    await expect(f.service.submitTurn(scope, { ...request, ...intent })).resolves.toMatchObject({ replayed: true, learningSessionId: null });
+    expect(assertAccess).not.toHaveBeenCalled();
+    expect(systemQueryEnabled).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ examHelpReplay: expect.objectContaining({ replayOnly: true,
+      legacyQuery: { purpose: intent.purpose ?? "query", text: request.text, mode: "hint", sourceIds: [], currentPage: 4 } }) }));
+  });
+
+  it("preserves a verified failed exam plan and repeats source, page and attempt admission", async () => {
+    const readFailedTurnRetry = vi.fn(async () => ({ text: request.text, purpose: "plan" as const, mode: "hint" as const,
+      currentPage: 4, chunkId: C, sourceIds: [S], sourceVersions: { [S]: 1 }, learningSessionId: S,
+      attemptId, strategyTemplateId: null, contextAnchor: { purpose: "exam_help" as const, attemptId } }));
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ readFailedTurnRetry, attempts: { assertAccess } });
+    const clientKey = `retry-${C}`;
+    await expect(f.service.submitTurn(scope, { ...request, clientKey, purpose: "query" })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(readFailedTurnRetry).toHaveBeenCalledExactlyOnceWith(scope, CONVERSATION, C);
+    expect(f.sourceChunks.listForSources).toHaveBeenCalledWith(scope, [S]);
+    expect(assertAccess).toHaveBeenCalledWith(scope, attemptId);
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ clientKey, purpose: "plan", chunkId: C, currentPage: 4 }));
+  });
+
+  it("loads user-only continuity for exam_help follow-ups without reading assistant memory authority", async () => {
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+    f.conversations.loadContinuityTurns.mockResolvedValueOnce([
+      { role: "user", text: "高数进度怎么样", citations: [] },
+    ] as never);
+    await expect(f.service.submitTurn(scope, {
+      ...request,
+      clientKey: "exam-followup-record",
+      text: "那练习情况呢",
+    })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(f.conversations.loadContinuityTurns).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      CONVERSATION,
+      undefined,
+      { userOnly: true },
+    );
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: "query",
+      examHelpReplay: expect.objectContaining({
+        legacyPurpose: "query",
+        legacyQuery: expect.objectContaining({ purpose: "query", text: "那练习情况呢" }),
+      }),
+    }));
+
+    f.conversations.loadContinuityTurns.mockClear();
+    f.conversations.loadContinuityTurns.mockResolvedValueOnce([
+      { role: "user", text: "给我完整答案", citations: [] },
+    ] as never);
+    await expect(f.service.submitTurn(scope, {
+      ...request,
+      clientKey: "exam-followup-answer",
+      text: "给我完整答案",
+    })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(f.conversations.loadContinuityTurns).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      CONVERSATION,
+      { attemptId, activityId: undefined, blockId: undefined, contentVersion: undefined },
+      { userOnly: true },
+    );
+    expect(f.conversations.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+      mode: "explain",
+    }));
+  });
+});
+
 describe("tutor model readiness at send time", () => {
   const send = { conversationId: CONVERSATION, text: "为什么？", sourceIds: [], sourceSelection: "none" as const, mode: "hint" as const, privacy: "saved" as const };
   it("refuses a new turn with AI_MODEL_UNAVAILABLE before queueing a job when no model can serve it", async () => {
     const tutorModelReady = vi.fn(async () => false);
     const f = createService({ tutorModelReady });
-    await expect(f.service.submitTurn(scope, { ...send, clientKey: "no-model-key-1" })).rejects.toMatchObject({
+    await expect(f.service.submitTurn(scope, { ...send, clientKey: "no-model-key-1", contextAnchor: { purpose: "learning_help" } })).rejects.toMatchObject({
       code: "AI_MODEL_UNAVAILABLE", status: 409, message: "还没有配置可用的 AI 模型，去设置里配置。",
     });
     expect(tutorModelReady).toHaveBeenCalledWith(scope, "hint");
+    expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
+  });
+  it.each([null, C])("queues exam guidance with attempt %s even when no model is configured", async attemptId => {
+    const tutorModelReady = vi.fn(async () => false);
+    const assertAccess = vi.fn(async () => ({ sessionId: S }));
+    const f = createService({ tutorModelReady, attempts: { assertAccess } });
+    const contextAnchor = { purpose: "exam_help", ...(attemptId ? { attemptId } : {}) };
+    await expect(f.service.submitTurn(scope, { ...send, sourceSelection: undefined, contextAnchor, clientKey: "exam-without-model" }))
+      .resolves.toMatchObject({ replayed: false, learningSessionId: attemptId ? S : null });
+    expect(assertAccess).toHaveBeenCalledTimes(attemptId ? 1 : 0);
+    expect(tutorModelReady).not.toHaveBeenCalled();
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ contextAnchor, attemptId }));
+  });
+  it("rejects an inaccessible exam attempt before enqueueing", async () => {
+    const tutorModelReady = vi.fn(async () => false);
+    const f = createService({ tutorModelReady, attempts: { assertAccess: vi.fn(async () => null) } });
+    await expect(f.service.submitTurn(scope, { ...send, sourceSelection: undefined, clientKey: "exam-bad-attempt",
+      contextAnchor: { purpose: "exam_help", attemptId: C } })).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+    expect(tutorModelReady).not.toHaveBeenCalled();
     expect(f.conversations.appendSavedTurn).not.toHaveBeenCalled();
   });
   it("never blocks a replay of an already-queued turn, and queues normally when a model is usable", async () => {

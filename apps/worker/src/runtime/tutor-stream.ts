@@ -3,7 +3,8 @@ import {
   isUnconfirmedStreamSealError, markUnconfirmedStreamSeal, parseContextSourceRefs, sealOpeningTutorStream,
   TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey,
   tutorStreamPreAnswerHeadKey, UnconfirmedStreamSealError, type ContextSourceRef, type TutorAttemptFence,
-  type OpeningTutorJobsRepository,
+  LEARNER_CONTEXT_MAX_BYTES, parseTutorMisconceptionLineage,
+  type OpeningTutorJobsRepository, type TutorMisconceptionLineage, type TutorMisconceptionSnapshot,
 } from "@aistudy/database";
 import { openingMaterialPurposePinSchema, uuidSchema, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 export { isUnconfirmedStreamSealError, UnconfirmedStreamSealError };
@@ -17,6 +18,8 @@ export type TutorStreamContext = {
   attemptFence?: TutorAttemptFence;
   attemptSourceRefs?: ContextSourceRef[];
   materialPurposePin?: OpeningMaterialPurposePin;
+  misconceptionSnapshot?: TutorMisconceptionSnapshot;
+  historyMisconceptionLineage?: TutorMisconceptionLineage;
   memoryLineageSourceIds?: string[];
   globalMemoryIds?: string[];
   historyCourseBindings?: Parameters<OpeningTutorJobsRepository["readStream"]>[2]["historyCourseBindings"];
@@ -593,6 +596,21 @@ function parseHistoryCourseBindings(value: unknown): NonNullable<TutorStreamCont
   });
 }
 
+function parseMisconceptionSnapshot(value: unknown, streamPrivacyEpoch: number): TutorMisconceptionSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid tutor stream cache");
+  const { courseId, effectiveCourseId, privacyEpoch, revisionIds, renderedMarkdown, byteLength } = value as Record<string, unknown>;
+  const validCourseId = (id: unknown): id is string | null => id === null || uuidSchema.safeParse(id).success;
+  if (Object.keys(value).length !== (effectiveCourseId === undefined ? 5 : 6)
+    || !validCourseId(courseId) || (effectiveCourseId !== undefined && !validCourseId(effectiveCourseId))
+    || (typeof effectiveCourseId === "string" && effectiveCourseId.toLowerCase() !== courseId?.toLowerCase())
+    || privacyEpoch !== streamPrivacyEpoch
+    || !Array.isArray(revisionIds) || revisionIds.some(id => !uuidSchema.safeParse(id).success)
+    || typeof renderedMarkdown !== "string" || byteLength !== Buffer.byteLength(renderedMarkdown)
+    || byteLength > LEARNER_CONTEXT_MAX_BYTES) throw new Error("invalid tutor stream cache");
+  return { courseId, privacyEpoch, renderedMarkdown, byteLength, revisionIds,
+    ...(effectiveCourseId === undefined ? {} : { effectiveCourseId }) };
+}
+
 function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null {
   if (!row.context) return null;
   const context = JSON.parse(row.context) as TutorStreamContext;
@@ -609,6 +627,10 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
   const historyCourseBindings = parseHistoryCourseBindings(context.historyCourseBindings);
   const materialPurposePin = context.materialPurposePin === undefined ? undefined
     : openingMaterialPurposePinSchema.parse(context.materialPurposePin);
+  const misconceptionSnapshot = context.misconceptionSnapshot === undefined ? undefined
+    : parseMisconceptionSnapshot(context.misconceptionSnapshot, context.privacyEpoch);
+  const historyMisconceptionLineage = parseTutorMisconceptionLineage(context.historyMisconceptionLineage);
+  if (context.historyMisconceptionLineage !== undefined && !historyMisconceptionLineage) throw new Error("invalid tutor stream cache");
   let memoryLineageSourceIds: string[] | undefined;
   if (context.memoryLineageSourceIds !== undefined) {
     if (!Array.isArray(context.memoryLineageSourceIds)
@@ -636,6 +658,8 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     ...(attemptSourceRefs ? { attemptSourceRefs } : {}),
     historyCourseBindings,
     ...(materialPurposePin ? { materialPurposePin } : {}),
+    ...(misconceptionSnapshot ? { misconceptionSnapshot } : {}),
+    ...(historyMisconceptionLineage ? { historyMisconceptionLineage } : {}),
     ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
     ...(globalMemoryIds ? { globalMemoryIds } : {}),
     ...(temporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt } : {}),
