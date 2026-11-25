@@ -114,11 +114,15 @@ export async function releaseOpeningStudyExposure(
     const revision = row.course_id == null ? 0 : await nextLearningHistoryRevision(db, scope, String(row.course_id));
     const workspaceRevision = await nextWorkspaceLearningHistoryRevision(db, scope);
     const [updated] = expiresAt === undefined
-      ? await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),
-    history_revision=${revision},workspace_history_revision=${workspaceRevision} WHERE id=${receiptId} RETURNING *`
-      : await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),
-    history_revision=${revision},workspace_history_revision=${workspaceRevision} WHERE id=${receiptId}
-    AND clock_timestamp() < ${expiresAt}::timestamptz RETURNING *`;
+      ? await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=now_ts.ts,delivered_at=now_ts.ts,
+    history_revision=${revision},workspace_history_revision=${workspaceRevision}
+    FROM (SELECT clock_timestamp() AS ts OFFSET 0) now_ts
+    WHERE id=${receiptId} RETURNING opening_help_exposures.*`
+      : await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=now_ts.ts,delivered_at=now_ts.ts,
+    history_revision=${revision},workspace_history_revision=${workspaceRevision}
+    FROM (SELECT clock_timestamp() AS ts OFFSET 0) now_ts
+    WHERE id=${receiptId}
+    AND now_ts.ts < ${expiresAt}::timestamptz RETURNING opening_help_exposures.*`;
     return updated;
   };
   let released: Row | undefined;

@@ -248,6 +248,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       && (row.exposure_receipt as Record<string, unknown>).released_at == null
       ? [String((row.exposure_receipt as Record<string, unknown>).id)] : [];
   const pendingExposureIds = (rows: readonly Record<string, unknown>[]) => rows.flatMap(rowPendingTurnReceiptIds);
+  const TURN_EXPOSURE_ROLLBACK = Symbol("TURN_EXPOSURE_ROLLBACK");
   async function releaseRowsExposures<T extends Record<string, unknown>>(
     tx: TransactionSql,
     scope: OpeningConversationScope,
@@ -259,31 +260,97 @@ export function createOpeningConversationRepository(sql: Sql) {
     const expiredReceiptIds = new Set<string>();
     const expiredRowIndices = new Set<number>();
     const expiredMemoryTurnIds = new Set<string>();
+    type TurnReleaseGroup = {
+      memoryTurnId: string | undefined;
+      rowIndices: number[];
+      pendingIds: string[];
+      seenPendingIds: Set<string>;
+    };
+    const groupsByTurnKey = new Map<string, TurnReleaseGroup>();
     for (const [index, row] of rows.entries()) {
       const memoryTurnId = row.misconception_memory_turn_id ? String(row.misconception_memory_turn_id) : undefined;
-      if (memoryTurnId && expiredMemoryTurnIds.has(memoryTurnId)) {
-        expiredRowIndices.add(index);
+      const turnKey = memoryTurnId ?? (row.id !== undefined ? String(row.id) : `row:${index}`);
+      let group = groupsByTurnKey.get(turnKey);
+      if (!group) {
+        group = { memoryTurnId, rowIndices: [], pendingIds: [], seenPendingIds: new Set() };
+        groupsByTurnKey.set(turnKey, group);
+      }
+      group.rowIndices.push(index);
+      for (const id of getPendingIds(row)) {
+        if (!group.seenPendingIds.has(id)) {
+          group.seenPendingIds.add(id);
+          group.pendingIds.push(id);
+        }
+      }
+    }
+    const markGroupExpired = (group: TurnReleaseGroup) => {
+      for (const idx of group.rowIndices) expiredRowIndices.add(idx);
+      if (group.memoryTurnId) expiredMemoryTurnIds.add(group.memoryTurnId);
+    };
+    for (const group of groupsByTurnKey.values()) {
+      if (!group.pendingIds.length) continue;
+      if (group.memoryTurnId && expiredMemoryTurnIds.has(group.memoryTurnId)) {
+        markGroupExpired(group);
         continue;
       }
-      const deadlineMs = memoryTurnId !== undefined ? deadlines.get(memoryTurnId) : undefined;
+      if (group.pendingIds.some(id => expiredReceiptIds.has(id))) {
+        markGroupExpired(group);
+        continue;
+      }
+      const idsToRelease = group.pendingIds.filter(id => !receipts.has(id));
+      if (!idsToRelease.length) continue;
+      const deadlineMs = group.memoryTurnId !== undefined ? deadlines.get(group.memoryTurnId) : undefined;
       const hasFiniteDeadline = deadlineMs !== undefined && Number.isFinite(deadlineMs);
-      for (const id of getPendingIds(row)) {
-        if (expiredReceiptIds.has(id)) {
-          expiredRowIndices.add(index);
-          if (memoryTurnId) expiredMemoryTurnIds.add(memoryTurnId);
-          break;
+      if (!hasFiniteDeadline) {
+        for (const id of idsToRelease) {
+          const released = await releaseOpeningStudyExposure(tx, scope, id);
+          if (released === null) {
+            expiredReceiptIds.add(id);
+            markGroupExpired(group);
+            break;
+          }
+          receipts.set(id, released);
         }
-        if (receipts.has(id)) continue;
-        const released = hasFiniteDeadline
-          ? await releaseOpeningStudyExposure(tx, scope, id, { expiresAt: new Date(deadlineMs).toISOString() })
-          : await releaseOpeningStudyExposure(tx, scope, id);
-        if (released === null) {
-          expiredReceiptIds.add(id);
-          expiredRowIndices.add(index);
-          if (memoryTurnId) expiredMemoryTurnIds.add(memoryTurnId);
-          break;
+        continue;
+      }
+      const expiresAt = new Date(deadlineMs).toISOString();
+      if (typeof (tx as { savepoint?: unknown }).savepoint === "function") {
+        let failedReceiptId: string | undefined;
+        try {
+          const staged = await (
+            tx as unknown as { savepoint: <R>(fn: (sp: TransactionSql) => Promise<R>) => Promise<R> }
+          ).savepoint(async sp => {
+            const local = new Map<string, StudyExposureReceipt>();
+            for (const id of idsToRelease) {
+              const released = await releaseOpeningStudyExposure(sp, scope, id, { expiresAt });
+              if (released === null) {
+                failedReceiptId = id;
+                throw TURN_EXPOSURE_ROLLBACK;
+              }
+              local.set(id, released);
+            }
+            return local;
+          });
+          for (const [id, rel] of staged) receipts.set(id, rel);
+        } catch (error) {
+          if (error !== TURN_EXPOSURE_ROLLBACK) throw error;
+          if (failedReceiptId) expiredReceiptIds.add(failedReceiptId);
+          markGroupExpired(group);
         }
-        receipts.set(id, released);
+      } else {
+        const local = new Map<string, StudyExposureReceipt>();
+        let failed = false;
+        for (const id of idsToRelease) {
+          const released = await releaseOpeningStudyExposure(tx, scope, id, { expiresAt });
+          if (released === null) {
+            expiredReceiptIds.add(id);
+            failed = true;
+            break;
+          }
+          local.set(id, released);
+        }
+        if (failed) markGroupExpired(group);
+        else for (const [id, rel] of local) receipts.set(id, rel);
       }
     }
     const finalRows = expiredRowIndices.size === 0 && expiredMemoryTurnIds.size === 0

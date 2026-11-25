@@ -187,24 +187,35 @@ async function assertGlobalMemoriesUnexpiredInTx(
   scope: OpeningScope,
   globalMemoryIds: readonly string[] | undefined,
   courseId: string | null,
-): Promise<void> {
-  if (!globalMemoryIds?.length) return;
+): Promise<number> {
+  if (!globalMemoryIds?.length) return Infinity;
   const ids = [...new Set(globalMemoryIds.map(id => {
     if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
       throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
     }
     return id.toLowerCase();
   }))].sort();
-  const active = await tx`SELECT id FROM opening_memories
-    WHERE workspace_id=${scope.workspaceId}
-      AND id=ANY(${ids}::uuid[])
-      AND status='active'
-      AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
-      AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-    ORDER BY id`;
+  const active = await tx<{ id: string | { memoryId: string; expiresAt: string | Date } }[]>`SELECT id FROM opening_memories AS gm(memory_id)
+    CROSS JOIN LATERAL (SELECT CASE WHEN gm.kind='temporary'
+      THEN jsonb_build_object('memoryId', gm.memory_id, 'expiresAt', gm.expires_at)
+      ELSE to_jsonb(gm.memory_id) END AS id) entry
+    WHERE gm.workspace_id=${scope.workspaceId}
+      AND gm.memory_id=ANY(${ids}::uuid[])
+      AND gm.status='active'
+      AND ${memoryCourseAllows(tx, () => tx`gm.course_id`, () => tx`${courseId}::uuid`, () => tx`gm.workspace_id`)}
+      AND (gm.kind='confirmed' OR (gm.kind='temporary' AND gm.expires_at IS NOT NULL AND gm.expires_at > clock_timestamp()))
+    ORDER BY gm.memory_id`;
   if (active.length !== ids.length) {
     throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
   }
+  let earliest = Infinity;
+  for (const row of active) {
+    if (typeof row.id === "object" && row.id !== null && "expiresAt" in row.id && row.id.expiresAt != null) {
+      const ms = new Date(row.id.expiresAt).getTime();
+      if (!Number.isNaN(ms)) earliest = Math.min(earliest, ms);
+    }
+  }
+  return earliest;
 }
 
 function memoryExpiry(nodes: readonly MemoryDependencyStatus[]): number {
@@ -1691,7 +1702,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       attemptFence?: TutorAttemptFence;
       attemptSourceRefs?: readonly ContextSourceRef[];
     }, commitAuthorized?: (job: OpeningTutorJobRecord) => void, canDeliver?: () => boolean): Promise<OpeningTutorJobRecord | null> {
-      const verifyInTx = async (tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE"): Promise<OpeningTutorJobRecord | null> => {
+      const verifyInTx = async (
+        tx: TransactionSql, lockMode: "FOR UPDATE" | "FOR SHARE",
+      ): Promise<{ job: OpeningTutorJobRecord | null; earliestDeadlineMs: number }> => {
         if (lockMode === "FOR UPDATE") await lockWorkspaceLearningHistory(tx, scope);
         else if (context.attemptFence !== undefined) await shareAttemptHistory(tx, scope);
         const [workspace] = lockMode === "FOR UPDATE"
@@ -1699,7 +1712,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`
           : await tx`SELECT privacy_epoch FROM workspaces
               WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        if (!workspace) return null;
+        if (!workspace) return { job: null, earliestDeadlineMs: Infinity };
         const hasPriorExchanges = () => tx`NOT COALESCE(t.query_system, false)
           AND (NOT ${context.historyMisconceptionLineage !== undefined}
             OR t.context_anchor->>'purpose' IS DISTINCT FROM 'exam_help') AND EXISTS (
@@ -1731,9 +1744,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
               JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
               WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} FOR SHARE OF j`;
-        if (!row) return null;
+        if (!row) return { job: null, earliestDeadlineMs: Infinity };
         const job = mapJob(row as Record<string, unknown>);
-        if (job.status !== "running") return job;
+        if (job.status !== "running") return { job, earliestDeadlineMs: Infinity };
         if (Number(workspace.privacy_epoch) !== context.privacyEpoch || row.claim_token !== (context.claimToken ?? null)) {
           throw new Error("stream authorization changed");
         }
@@ -1783,10 +1796,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             )
           : Infinity;
         const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
-        await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
+        const globalExpiresAt = await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
         assertHistoryMemoryUnexpired(historyExpiresAt);
         assertTemporaryMemoryUnexpired(context.temporaryMemoryExpiresAt);
-        return job;
+        const contextExpiresAt = context.temporaryMemoryExpiresAt !== undefined
+          ? Date.parse(context.temporaryMemoryExpiresAt)
+          : Infinity;
+        const earliestDeadlineMs = Math.min(historyExpiresAt, globalExpiresAt, contextExpiresAt);
+        return { job, earliestDeadlineMs };
       };
 
       // Phase 1: Durable exposure commit (only when an exposure receipt exists, or for
@@ -1794,7 +1811,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       let phase1ExecutionId: string | undefined;
       if (context.exposureReceiptId || !commitAuthorized) {
         const phase1Job = await sql.begin(async tx => {
-          const job = await verifyInTx(tx, "FOR UPDATE");
+          const { job, earliestDeadlineMs } = await verifyInTx(tx, "FOR UPDATE");
           if (!job || job.status !== "running") return job;
           if (context.exposureReceiptId) {
             const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
@@ -1802,7 +1819,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND turn_id=${job.assistantTurnId} AND exposure_origin='assistant'`;
             if (!exposure) throw new Error("stream exposure does not belong to assistant turn");
             if (canDeliver && !canDeliver()) throw new Error("stream closed before delivery");
-            await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+            const released = Number.isFinite(earliestDeadlineMs)
+              ? await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId, {
+                  expiresAt: new Date(earliestDeadlineMs).toISOString(),
+                })
+              : await releaseOpeningStudyExposure(tx, scope, context.exposureReceiptId);
+            if (released === null) {
+              throw Object.assign(new Error("temporary memory expired before delivery"), { code: "CONFLICT" });
+            }
           }
           return job;
         }) as OpeningTutorJobRecord | null;
@@ -1813,7 +1837,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       // Phase 2: Pure read-only FOR SHARE transaction holding row locks synchronously
       // across commitAuthorized (controller.enqueue) with zero DB writes.
       return sql.begin(async tx => {
-        const job = await verifyInTx(tx, "FOR SHARE");
+        const { job } = await verifyInTx(tx, "FOR SHARE");
         if (!job || job.status !== "running") return job;
         if (phase1ExecutionId !== undefined && job.executionId !== phase1ExecutionId) {
           throw new Error("stream execution changed");

@@ -83,6 +83,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
   return sql`
     WITH prior AS MATERIALIZED (
       SELECT c.id AS conversation_id, current.id AS current_id, u.id, a.id AS assistant_id, u.created_at,
+        current.created_at AS current_created_at, current.query_system AS current_query_system,
         (extract(epoch FROM u.created_at) * 1000000)::bigint::text AS pos_us,
         (extract(epoch FROM current.created_at) * 1000000)::bigint::text AS current_pos_us,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch, a.intent_hash AS assistant_intent_hash,
@@ -251,6 +252,13 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
             OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (prior.created_at, prior.id)
               AND prior.assistant_course_id IS DISTINCT FROM ch.first_scoped_course_id)
           ELSE false END`} AS assistant_misconception_invalid,
+        ${ancestors ? sql`CASE WHEN NOT prior.current_query_system THEN
+          (ch.first_invalid_id IS NOT NULL AND (ch.first_invalid_at, ch.first_invalid_id) < (prior.current_created_at, prior.current_id))
+          OR (ch.second_scoped_id IS NOT NULL AND (ch.second_scoped_at, ch.second_scoped_id) < (prior.current_created_at, prior.current_id))
+          OR (ch.first_hashless_mismatch_id IS NOT NULL AND (ch.first_hashless_mismatch_at, ch.first_hashless_mismatch_id) <= (prior.current_created_at, prior.current_id))
+          OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (prior.current_created_at, prior.current_id)
+            AND prior.current_course_id IS DISTINCT FROM ch.first_scoped_course_id)
+          ELSE false END` : sql`false`} AS current_misconception_invalid,
         ${recordReferents ? sql`false` : sql`(prior.assistant_intent_hash IS NULL AND (
           prior.own_has_memory
           OR (prior.query_system IS FALSE AND prior.system_query IS NULL
@@ -1115,12 +1123,47 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     }
   }
 
+  type PrecomputedConsumers = {
+    jcList: readonly { posUs: bigint; posId: string; assistantTurnId: string; courseId: string | null }[];
+    normCourses: readonly (string | null)[];
+    nextDifferentCourseIndex: Int32Array;
+    jcLimits: Int32Array;
+  };
+  const jcByConv = new Map<string, PrecomputedConsumers>();
+  for (const [convId, jcList] of batches.consumersByConversation) {
+    const cLen = jcList.length;
+    if (!cLen) continue;
+    const normCourses = jcList.map(jc => normalizeHistoryCourse(jc.courseId));
+    const nextDifferentCourseIndex = new Int32Array(cLen);
+    nextDifferentCourseIndex[cLen - 1] = cLen;
+    for (let k = cLen - 2; k >= 0; k--) {
+      nextDifferentCourseIndex[k] = normCourses[k] === normCourses[k + 1] ? nextDifferentCourseIndex[k + 1]! : k + 1;
+    }
+    const convItems = batches.byConversation.get(convId) ?? [];
+    const jcLimits = new Int32Array(cLen);
+    let itemIdx = 0;
+    for (let k = 0; k < cLen; k++) {
+      const jc = jcList[k]!;
+      while (
+        itemIdx < convItems.length
+        && (convItems[itemIdx]!.posUs < jc.posUs
+          || (convItems[itemIdx]!.posUs === jc.posUs && convItems[itemIdx]!.posId < jc.posId))
+      ) {
+        itemIdx++;
+      }
+      jcLimits[k] = itemIdx;
+    }
+    jcByConv.set(convId, { jcList, normCourses, nextDifferentCourseIndex, jcLimits });
+  }
+
   // Track later hashless courses per current_id (rows are newest-first) and defer jobless prefix emission to one O(K) reverse sweep.
   const hashlessCoursesByCurrent = new Map<string, Set<string | null>>();
   type ConvSweepState = {
     convId: string;
     checkPriorScope: boolean;
     currentCourseId: string | null;
+    currentPosUs: bigint | undefined;
+    currentPosId: string;
     maxLimit: number;
     coursesByLimit: Map<number, (string | null)[]>;
   };
@@ -1141,6 +1184,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const userRefs = parseContextSourceRefs(row.user_source_refs);
     const memoryAuthority = directExchangeMemoryAuthority(row, batches, exchangeAssistantIds);
     if (row.invalid || !row.assistant_direct_versioned || !row.origin_allowed || row.current_allowed === false
+      || (checkPriorScope && row.current_misconception_invalid === true)
       || (misconception !== undefined && (!misconception || !misconception.inScope)) || !memoryAuthority || !assistantRefs || !userRefs
       || memoryAuthority.some(entry => !(entry.expiresAt > Date.now()))) {
       authority.set(row.current_id, null);
@@ -1166,6 +1210,8 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
             convId: row.conversation_id,
             checkPriorScope,
             currentCourseId: row.current_course_id ?? null,
+            currentPosUs: row.current_pos_us !== undefined ? BigInt(row.current_pos_us) : undefined,
+            currentPosId: String(row.current_id).toLowerCase(),
             maxLimit: 0,
             coursesByLimit: new Map(),
           };
@@ -1185,30 +1231,24 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     assistantAuthority!.sourceIds = [...(row.assistant_direct_ids ?? []), ...assistantRefs.map(ref => ref.sourceId)];
     const joblessBetweenCourses: (string | null)[] = [];
     if (checkPriorScope && row.conversation_id && row.pos_us !== undefined && row.id !== undefined) {
-      const jcList = batches.consumersByConversation.get(row.conversation_id) ?? [];
-      if (jcList.length) {
+      const jcInfo = jcByConv.get(row.conversation_id);
+      if (jcInfo) {
+        const { jcList, normCourses, nextDifferentCourseIndex } = jcInfo;
         const cEnd = row.current_pos_us !== undefined
           ? upperBoundMemoryOriginPosition(jcList, BigInt(row.current_pos_us), String(row.current_id).toLowerCase())
           : jcList.length;
         const rStart = upperBoundMemoryOriginPosition(jcList, BigInt(row.pos_us), String(row.id).toLowerCase());
-        for (let k = rStart; k < cEnd && joblessBetweenCourses.length < 2; k++) {
-          const jc = jcList[k]!;
-          if (jc.assistantTurnId === String(row.assistant_id)) continue;
-          const norm = normalizeHistoryCourse(jc.courseId);
-          if (!joblessBetweenCourses.includes(norm)) joblessBetweenCourses.push(norm);
-        }
-        const state = pendingConvSweeps.get(row.current_id)?.get(row.conversation_id);
-        if (state) {
-          const convItems = batches.byConversation.get(row.conversation_id) ?? [];
-          for (let k = 0; k < cEnd; k++) {
-            const jc = jcList[k]!;
-            const jLimit = upperBoundMemoryOriginPosition(convItems, jc.posUs, jc.posId);
-            if (jLimit > 0) {
-              if (jLimit > state.maxLimit) state.maxLimit = jLimit;
-              const merged = mergeMisconceptionCourses(state.coursesByLimit.get(jLimit), jc.courseId);
-              if (merged) state.coursesByLimit.set(jLimit, merged);
-            }
+        const selfAssistantId = String(row.assistant_id);
+        let k = rStart;
+        while (k < cEnd && joblessBetweenCourses.length < 2) {
+          const runEnd = Math.min(cEnd, nextDifferentCourseIndex[k]!);
+          let p = k;
+          while (p < runEnd && jcList[p]!.assistantTurnId === selfAssistantId) p++;
+          if (p < runEnd) {
+            const norm = normCourses[p]!;
+            if (!joblessBetweenCourses.includes(norm)) joblessBetweenCourses.push(norm);
           }
+          k = runEnd;
         }
       }
     }
@@ -1241,13 +1281,40 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const entries = authority.get(currentId);
     if (!entries) continue;
     const emitted = new Map<string, HistoryAncestorAuthority>();
+    let invalidated = false;
     for (const state of convMap.values()) {
+      if (state.checkPriorScope) {
+        const jcInfo = jcByConv.get(state.convId);
+        if (jcInfo) {
+          const cEnd = state.currentPosUs !== undefined
+            ? upperBoundMemoryOriginPosition(jcInfo.jcList, state.currentPosUs, state.currentPosId)
+            : jcInfo.jcList.length;
+          for (let k = 0; k < cEnd; k++) {
+            const jLimit = jcInfo.jcLimits[k]!;
+            if (jLimit > 0) {
+              if (jLimit > state.maxLimit) state.maxLimit = jLimit;
+              const merged = mergeMisconceptionCourses(state.coursesByLimit.get(jLimit), jcInfo.normCourses[k]);
+              if (merged) state.coursesByLimit.set(jLimit, merged);
+            }
+          }
+        }
+      }
+      if ((firstUnresolvedByConv.get(state.convId) ?? Infinity) < state.maxLimit) {
+        authority.set(currentId, null);
+        invalidated = true;
+        break;
+      }
       const convItems = batches.byConversation.get(state.convId) ?? [];
       let runningCourses: (string | null)[] | undefined;
       for (let j = state.maxLimit - 1; j >= 0; j--) {
         const atLimit = state.coursesByLimit.get(j + 1);
         if (atLimit) runningCourses = mergeMisconceptionCourses(runningCourses, ...atLimit);
-        const resolved = convItems[j]!.resolved!;
+        const resolved = convItems[j]?.resolved;
+        if (!resolved) {
+          authority.set(currentId, null);
+          invalidated = true;
+          break;
+        }
         const itemExtra = mergeMisconceptionCourses(
           runningCourses,
           ...(resolved.isPairedUser && resolved.pairedAssistantCourseId !== undefined ? [resolved.pairedAssistantCourseId] : []),
@@ -1273,6 +1340,7 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
           entries.push(histEntry);
         }
       }
+      if (invalidated) break;
     }
   }
   return authority;

@@ -5,7 +5,7 @@ import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-
 import {
   isLineageUuid, lineageUuid, memoryBacksSource, memoryDependencyRows, memoryOnlyRefSourceIds, pairedUserTurnId,
   parseContextMemoryDependencyIds, resolveMemoryDependencyStatus, turnHasMemoryDependencies, turnHasStandaloneSession,
-  turnHasStandaloneSessions, turnLineageCourse, turnLearningSessionCourse, turnMaterialUse, turnMemoryOnlyBackingIds,
+  turnHasStandaloneSessions, turnLineageCourse, turnLearningSessionCourse, turnMaterialUse,
   type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus } from "./opening-memory-admission";
@@ -360,7 +360,8 @@ type MaterialUse = "citation" | "practice";
 export type SavedMemoryOrigin = {
   id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null;
   pairedAssistantCourseId?: string | null; materialUse: MaterialUse;
-  refs: unknown; standalone: boolean; historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
+  refs: unknown; standalone: boolean; createdAt?: string | Date | null;
+  historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
 };
 export type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
 
@@ -389,6 +390,7 @@ function directMemoryOriginSide(
         'refs', ${origin()}.context_source_refs, 'standalone', CASE
           WHEN ${origin()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
           THEN ${turnHasStandaloneSessions(db, owner, origin)} ELSE false END,
+        'createdAt', ${origin()}.created_at,
         'historical', ${historical()},
         'jobBacked', ${pairedUser()}.id IS NOT NULL,
         'isPairedUser', false) AS payload
@@ -402,6 +404,7 @@ function directMemoryOriginSide(
         'refs', ${pairedUser()}.context_source_refs, 'standalone', CASE
           WHEN ${pairedUser()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
           THEN ${turnHasStandaloneSession(db, pairedUser, owner)} ELSE false END,
+        'createdAt', ${pairedUser()}.created_at,
         'historical', ${historical()},
         'jobBacked', true,
         'isPairedUser', true) AS payload
@@ -429,17 +432,22 @@ function memoryOriginEvidence(
     ) side`;
 }
 
-function displayMemoryOnlyBackingIds(
+function originMemoryOnlyBackingIds(
   db: Db, refs: FragmentFactory, ownCourse: FragmentFactory, standaloneSessions: FragmentFactory,
-  scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
+  createdAt: FragmentFactory, scope: { workspaceId: string; ownerUserId: string | FragmentFactory },
+  includeExpiredBackings: boolean,
 ) {
   const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
+  const temporaryAllowed = includeExpiredBackings
+    ? db`m.expires_at IS NOT NULL AND (${attributed()} OR ${createdAt()} IS NULL OR m.expires_at > ${createdAt()})`
+    : db`m.expires_at > clock_timestamp() AND (${attributed()} OR ${createdAt()} IS NULL OR m.expires_at > ${createdAt()})`;
   return db`(
     SELECT COALESCE(jsonb_agg(to_jsonb(ARRAY(
       SELECT m.id FROM opening_memories m
       WHERE m.workspace_id = ${scope.workspaceId}
         AND m.status = 'active'
-        AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL))
+        AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND ${temporaryAllowed}))
+        AND (${attributed()} OR ${createdAt()} IS NULL OR m.created_at <= ${createdAt()})
         AND (m.course_id IS NULL OR m.course_id = ${ownCourse()})
         AND (${attributed()} AND m.id::text IN (SELECT lower(d.id) FROM ${memoryDependencyRows(db, refs)} d)
           OR NOT (${attributed()}) AND ${ownCourse()} IS NULL AND (${standaloneSessions()}) AND m.course_id IS NULL)
@@ -456,16 +464,17 @@ function displayMemoryOnlyBackingIds(
 
 async function resolveMemoryOriginRefs(db: Db, scope: OpeningScope, rows: SavedMemoryOrigin[], includeExpiredBackings = false) {
   const legacy = [...new Map(rows.filter(row => memoryOnlyRefSourceIds(row.refs).length).map(row => [row.id, row])).values()];
-  const backingHelper = includeExpiredBackings ? displayMemoryOnlyBackingIds : turnMemoryOnlyBackingIds;
   const backings = legacy.length ? await db<{ id: string; backings: string[][] }[]>`
-    SELECT saved.id, ${backingHelper(db, () => db`saved.refs`, () => db`saved.course_id`,
-      () => db`saved.standalone`, scope)} AS backings
+    SELECT saved.id, ${originMemoryOnlyBackingIds(db, () => db`saved.refs`, () => db`saved.course_id`,
+      () => db`saved.standalone`, () => db`saved.created_at`, scope, includeExpiredBackings)} AS backings
     FROM (
       SELECT (r.val->>'id')::uuid AS id, r.val->'refs' AS refs,
-        (r.val->>'course_id')::uuid AS course_id, (r.val->>'standalone')::boolean AS standalone
+        (r.val->>'course_id')::uuid AS course_id, (r.val->>'standalone')::boolean AS standalone,
+        (r.val->>'created_at')::timestamptz AS created_at
       FROM unnest(ARRAY(
         SELECT jsonb_array_elements(${db.json(legacy.map(row => ({ id: row.id, refs: row.refs,
-          course_id: row.courseId, standalone: row.standalone })) as never)}::jsonb)
+          course_id: row.courseId, standalone: row.standalone,
+          created_at: row.createdAt instanceof Date ? row.createdAt.toISOString() : (row.createdAt ?? null) })) as never)}::jsonb)
       )) AS r(val)
       LIMIT ${legacy.length}
     ) saved` : [];
@@ -926,127 +935,244 @@ export async function readMemoryMisconceptionAuthorities(
     }
   }
   const resolved = new Map<string, MemoryMisconceptionAuthority>();
+  const usedNodes = new Map<string, ReadonlySet<string>>();
   const orderedNodes = [...nodes].sort(([a], [b]) => a.localeCompare(b));
   const nowMs = Date.now();
-  let waitForUnresolved = true;
-  let progress = true;
-  while (progress) {
-    progress = false;
-    for (const [id, node] of orderedNodes) {
-      if (resolved.has(id)) continue;
-      if (waitForUnresolved && node.origins.some(origin => origin !== null
-        && !(display && origin.ids.length)
-        && origin.backings.some(options => options.some(rawDep => {
-          const dep = rawDep.toLowerCase();
-          return dep !== id && nodes.has(dep) && !resolved.has(dep);
-        })))) {
-        continue;
+  const canonicalLineageKey = (lineage: TutorMisconceptionLineage | undefined) =>
+    !lineage ? "" : `${lineage.courseId ?? ""}:${[...lineage.revisionIds].sort().join(",")}`;
+  const canonicalBindingsKey = (bindings: readonly MemoryMisconceptionBinding[]) =>
+    bindings.map(b => `${b.courseId ?? ""}|${b.materialUse}:${b.memoryIds.join(",")}`).join(";");
+  const compareAuthority = (
+    a: MemoryMisconceptionAuthority, aUsedSize: number,
+    b: MemoryMisconceptionAuthority, bUsedSize: number,
+  ): number => {
+    const aUnexp = a.unexpired && a.earliestExpiresAtMs > nowMs ? 1 : 0;
+    const bUnexp = b.unexpired && b.earliestExpiresAtMs > nowMs ? 1 : 0;
+    if (aUnexp !== bUnexp) return aUnexp - bUnexp;
+    const aNoLin = !a.lineage ? 1 : 0;
+    const bNoLin = !b.lineage ? 1 : 0;
+    if (aNoLin !== bNoLin) return aNoLin - bNoLin;
+    const aDead = aUnexp ? a.earliestExpiresAtMs : -1;
+    const bDead = bUnexp ? b.earliestExpiresAtMs : -1;
+    if (aDead !== bDead) return aDead > bDead ? 1 : -1;
+    if (a.lineage && b.lineage) {
+      if (a.lineage.revisionIds.length !== b.lineage.revisionIds.length) {
+        return b.lineage.revisionIds.length - a.lineage.revisionIds.length;
       }
-      const lineages = [node.lineage];
-      const depMap = new Map<string, string | null>();
-      const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
-      let unexpired = node.unexpired;
-      let earliestExpiresAtMs = node.expiresAtMs;
-      const addBinding = (courseId: string | null, materialUse: MaterialUse, ids: readonly string[]) => {
-        if (!ids.length) return;
-        const normalizedCourse = normalizeCourse(courseId);
-        const key = `${normalizedCourse}|${materialUse}`;
-        const existing = bindingMap.get(key) ?? { courseId: normalizedCourse, materialUse, ids: new Set<string>() };
-        for (const item of ids) existing.ids.add(item.toLowerCase());
-        bindingMap.set(key, existing);
-      };
-      const backingSourceIdsFor = (origin: TurnMemoryOrigin) => origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined;
-      const valid = node.origins.every(origin => {
-        if (!origin) return false;
-        const sourceIds = backingSourceIdsFor(origin);
-        const admits = (rawDep: string, legacy: boolean, backingIndex?: number) => {
-          const dep = rawDep.toLowerCase();
-          const child = nodes.get(dep);
-          const childAuth = resolved.get(dep);
-          const childAllowed = display ? (legacy ? Boolean(child?.statusActive && child.notCandidate) : true) : Boolean(child?.active);
-          if (!child || !childAuth || !childAllowed) return false;
-          if (legacy && backingGraphs.has(origin.materialUse)) {
-            const requiredSource = sourceIds && backingIndex !== undefined ? [sourceIds[backingIndex]!] : undefined;
-            if (!resolveMemoryDependencyStatus(backingGraphs.get(origin.materialUse)!, [], [[dep]],
-              normalizeCourse(origin.courseId), id, requiredSource)) return false;
-          }
-          const memoryTargets = origin.historical
-            ? [origin.courseId]
-            : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
-          return courseAllows(child.memoryCourseId, ...memoryTargets)
-            && courseAllows(
-              childAuth.lineage?.courseId ?? null,
-              node.courseId,
-              origin.courseId,
-              origin.consumerCourseId,
-              ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
-            );
-        };
-        const selectBestBacking = (options: readonly string[], backingIndex: number): string | undefined => {
-          let best: string | undefined;
-          let bestUnexpired = -1;
-          let bestNoLineage = -1;
-          let bestDeadline = -Infinity;
-          for (const dep of options) {
-            if (!admits(dep, true, backingIndex)) continue;
-            const auth = resolved.get(dep.toLowerCase())!;
-            const isUnexpired = auth.unexpired && auth.earliestExpiresAtMs > nowMs ? 1 : 0;
-            const effDeadline = isUnexpired ? auth.earliestExpiresAtMs : -1;
-            const noLineage = !auth.lineage ? 1 : 0;
-            if (
-              best === undefined
-              || isUnexpired > bestUnexpired
-              || (isUnexpired === bestUnexpired && noLineage > bestNoLineage)
-              || (isUnexpired === bestUnexpired && noLineage === bestNoLineage && effDeadline > bestDeadline)
-            ) {
-              best = dep;
-              bestUnexpired = isUnexpired;
-              bestNoLineage = noLineage;
-              bestDeadline = effDeadline;
-            }
-          }
-          return best;
-        };
-        const backings = (display && origin.ids.length ? [] : origin.backings).map(selectBestBacking);
-        if (!origin.ids.every(dep => admits(dep, false)) || backings.some(dep => dep === undefined)) return false;
-        const chosen = [...origin.ids, ...(backings as string[])].map(dep => dep.toLowerCase());
-        const joblessHistorical = Boolean(origin.historical && !origin.jobBacked);
-        if (joblessHistorical) addBinding(origin.courseId, origin.materialUse, chosen);
-        for (const dep of chosen) {
-          const child = nodes.get(dep)!;
-          const childAuth = resolved.get(dep)!;
-          lineages.push(childAuth.lineage);
-          if (joblessHistorical && dep !== id) depMap.set(dep, child.memoryCourseId);
-          for (const sub of childAuth.dependencies) if (sub.id !== id) depMap.set(sub.id, sub.courseId);
-          for (const binding of childAuth.bindings) addBinding(binding.courseId, binding.materialUse, binding.memoryIds);
-          unexpired = unexpired && childAuth.unexpired;
-          earliestExpiresAtMs = Math.min(earliestExpiresAtMs, childAuth.earliestExpiresAtMs);
+      const aLin = canonicalLineageKey(a.lineage);
+      const bLin = canonicalLineageKey(b.lineage);
+      if (aLin !== bLin) return bLin.localeCompare(aLin);
+    }
+    if (a.dependencies.length !== b.dependencies.length) return b.dependencies.length - a.dependencies.length;
+    const aDeps = a.dependencyIds.join(",");
+    const bDeps = b.dependencyIds.join(",");
+    if (aDeps !== bDeps) return bDeps.localeCompare(aDeps);
+    if (aUsedSize !== bUsedSize) return bUsedSize - aUsedSize;
+    const aBind = canonicalBindingsKey(a.bindings);
+    const bBind = canonicalBindingsKey(b.bindings);
+    return aBind === bBind ? 0 : bBind.localeCompare(aBind);
+  };
+  const evaluateNode = (
+    id: string, node: MemoryLineageNode,
+  ): { auth: MemoryMisconceptionAuthority; used: Set<string> } | null => {
+    const lineages = [node.lineage];
+    const depMap = new Map<string, string | null>();
+    const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
+    const used = new Set<string>([id]);
+    let unexpired = node.unexpired;
+    let earliestExpiresAtMs = node.expiresAtMs;
+    const addBinding = (courseId: string | null, materialUse: MaterialUse, ids: readonly string[]) => {
+      if (!ids.length) return;
+      const normalizedCourse = normalizeCourse(courseId);
+      const key = `${normalizedCourse}|${materialUse}`;
+      const existing = bindingMap.get(key) ?? { courseId: normalizedCourse, materialUse, ids: new Set<string>() };
+      for (const item of ids) existing.ids.add(item.toLowerCase());
+      bindingMap.set(key, existing);
+    };
+    const backingSourceIdsFor = (origin: TurnMemoryOrigin) => origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined;
+    const valid = node.origins.every(origin => {
+      if (!origin) return false;
+      const sourceIds = backingSourceIdsFor(origin);
+      const admits = (rawDep: string, legacy: boolean, backingIndex?: number) => {
+        const dep = rawDep.toLowerCase();
+        if (dep === id || usedNodes.get(dep)?.has(id)) return false;
+        const child = nodes.get(dep);
+        const childAuth = resolved.get(dep);
+        const childAllowed = display ? (legacy ? Boolean(child?.statusActive && child.notCandidate) : true) : Boolean(child?.active);
+        if (!child || !childAuth || !childAllowed) return false;
+        if (legacy && backingGraphs.has(origin.materialUse)) {
+          const requiredSource = sourceIds && backingIndex !== undefined ? [sourceIds[backingIndex]!] : undefined;
+          if (!resolveMemoryDependencyStatus(backingGraphs.get(origin.materialUse)!, [], [[dep]],
+            normalizeCourse(origin.courseId), id, requiredSource)) return false;
         }
-        return true;
-      });
-      if (!valid) continue;
-      const mergedLineage = mergeTutorMisconceptionLineages(...lineages);
-      const dependencies = [...depMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([depId, depCourseId]) => ({
-        id: depId, courseId: depCourseId,
-      }));
-      resolved.set(id, {
+        const memoryTargets = origin.historical
+          ? [origin.courseId]
+          : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
+        return courseAllows(child.memoryCourseId, ...memoryTargets)
+          && courseAllows(
+            childAuth.lineage?.courseId ?? null,
+            node.courseId,
+            origin.courseId,
+            origin.consumerCourseId,
+            ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
+          );
+      };
+      const selectBestBacking = (options: readonly string[], backingIndex: number): string | undefined => {
+        let best: string | undefined;
+        let bestNorm = "";
+        let bestAuth: MemoryMisconceptionAuthority | undefined;
+        let bestUsedSize = Infinity;
+        for (const dep of options) {
+          if (!admits(dep, true, backingIndex)) continue;
+          const normDep = dep.toLowerCase();
+          const auth = resolved.get(normDep)!;
+          const depUsedSize = usedNodes.get(normDep)?.size ?? 1;
+          const cmp = bestAuth === undefined ? 1 : compareAuthority(auth, depUsedSize, bestAuth, bestUsedSize);
+          if (cmp > 0 || (cmp === 0 && normDep < bestNorm)) {
+            best = dep;
+            bestNorm = normDep;
+            bestAuth = auth;
+            bestUsedSize = depUsedSize;
+          }
+        }
+        return best;
+      };
+      const backings = (display && origin.ids.length ? [] : origin.backings).map(selectBestBacking);
+      if (!origin.ids.every(dep => admits(dep, false)) || backings.some(dep => dep === undefined)) return false;
+      const chosen = [...origin.ids, ...(backings as string[])].map(dep => dep.toLowerCase());
+      const joblessHistorical = Boolean(origin.historical && !origin.jobBacked);
+      if (joblessHistorical) addBinding(origin.courseId, origin.materialUse, chosen);
+      for (const dep of chosen) {
+        const child = nodes.get(dep)!;
+        const childAuth = resolved.get(dep)!;
+        lineages.push(childAuth.lineage);
+        for (const u of usedNodes.get(dep) ?? [dep]) used.add(u);
+        if (joblessHistorical && dep !== id) depMap.set(dep, child.memoryCourseId);
+        for (const sub of childAuth.dependencies) if (sub.id !== id) depMap.set(sub.id, sub.courseId);
+        for (const binding of childAuth.bindings) addBinding(binding.courseId, binding.materialUse, binding.memoryIds);
+        unexpired = unexpired && childAuth.unexpired;
+        earliestExpiresAtMs = Math.min(earliestExpiresAtMs, childAuth.earliestExpiresAtMs);
+      }
+      return true;
+    });
+    if (!valid) return null;
+    const mergedLineage = mergeTutorMisconceptionLineages(...lineages);
+    const dependencies = [...depMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([depId, depCourseId]) => ({
+      id: depId, courseId: depCourseId,
+    }));
+    const sortedBindings = [...bindingMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([, b]) => ({ courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort() }));
+    return {
+      auth: {
         courseId: node.memoryCourseId ?? mergedLineage?.courseId ?? null,
         lineage: mergedLineage,
         dependencyIds: dependencies.map(dep => dep.id),
         dependencies,
-        bindings: [...bindingMap.values()].map(b => ({
-          courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort(),
-        })),
+        bindings: sortedBindings,
         unexpired,
         earliestExpiresAtMs,
-      });
-      progress = true;
+      },
+      used,
+    };
+  };
+
+  // Decompose dependency graph into strongly connected components (dependency-first topological order)
+  // so acyclic dependencies evaluate once and cycles converge via UUID-order-independent lattice relaxation.
+  const adj = new Map<string, string[]>();
+  for (const [id, node] of orderedNodes) {
+    const deps = new Set<string>();
+    for (const origin of node.origins) {
+      if (!origin) continue;
+      for (const rawDep of origin.ids) {
+        const dep = rawDep.toLowerCase();
+        if (dep !== id && nodes.has(dep)) deps.add(dep);
+      }
+      if (!(display && origin.ids.length)) {
+        for (const options of origin.backings) {
+          for (const rawDep of options) {
+            const dep = rawDep.toLowerCase();
+            if (dep !== id && nodes.has(dep)) deps.add(dep);
+          }
+        }
+      }
     }
-    if (!progress && waitForUnresolved) {
-      waitForUnresolved = false;
-      progress = true;
-    } else if (progress) {
-      waitForUnresolved = true;
+    adj.set(id, [...deps].sort());
+  }
+  const indexById = new Map<string, number>();
+  const lowlinkById = new Map<string, number>();
+  const onStack = new Set<string>();
+  const tarjanStack: string[] = [];
+  const callStack: Array<{ id: string; neighborIdx: number }> = [];
+  const sccs: string[][] = [];
+  let nextIndex = 0;
+  for (const [startId] of orderedNodes) {
+    if (indexById.has(startId)) continue;
+    indexById.set(startId, nextIndex);
+    lowlinkById.set(startId, nextIndex);
+    nextIndex++;
+    tarjanStack.push(startId);
+    onStack.add(startId);
+    callStack.push({ id: startId, neighborIdx: 0 });
+    while (callStack.length) {
+      const frame = callStack[callStack.length - 1]!;
+      const neighbors = adj.get(frame.id) ?? [];
+      if (frame.neighborIdx < neighbors.length) {
+        const dep = neighbors[frame.neighborIdx++]!;
+        if (!indexById.has(dep)) {
+          indexById.set(dep, nextIndex);
+          lowlinkById.set(dep, nextIndex);
+          nextIndex++;
+          tarjanStack.push(dep);
+          onStack.add(dep);
+          callStack.push({ id: dep, neighborIdx: 0 });
+        } else if (onStack.has(dep)) {
+          lowlinkById.set(frame.id, Math.min(lowlinkById.get(frame.id)!, indexById.get(dep)!));
+        }
+      } else {
+        callStack.pop();
+        if (callStack.length) {
+          const parent = callStack[callStack.length - 1]!;
+          lowlinkById.set(parent.id, Math.min(lowlinkById.get(parent.id)!, lowlinkById.get(frame.id)!));
+        }
+        if (lowlinkById.get(frame.id) === indexById.get(frame.id)) {
+          const scc: string[] = [];
+          while (true) {
+            const member = tarjanStack.pop()!;
+            onStack.delete(member);
+            scc.push(member);
+            if (member === frame.id) break;
+          }
+          sccs.push(scc);
+        }
+      }
+    }
+  }
+  for (const scc of sccs) {
+    if (scc.length === 1) {
+      const id = scc[0]!;
+      const candidate = evaluateNode(id, nodes.get(id)!);
+      if (candidate) {
+        resolved.set(id, candidate.auth);
+        usedNodes.set(id, candidate.used);
+      }
+      continue;
+    }
+    scc.sort((a, b) => a.localeCompare(b));
+    let improved = true;
+    while (improved) {
+      improved = false;
+      for (const id of scc) {
+        const candidate = evaluateNode(id, nodes.get(id)!);
+        if (!candidate) continue;
+        const prev = resolved.get(id);
+        const prevUsed = usedNodes.get(id);
+        if (!prev || !prevUsed || compareAuthority(candidate.auth, candidate.used.size, prev, prevUsed.size) > 0) {
+          resolved.set(id, candidate.auth);
+          usedNodes.set(id, candidate.used);
+          improved = true;
+        }
+      }
     }
   }
   return new Map(memoryIds.flatMap(rawId => {
