@@ -1808,6 +1808,36 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(partial_ext.raw_texts_by_page[1], ["Answer Key", "| sealed |", "Chapter 2: Rings"])
         self.assertEqual(partial_ext.texts_by_page[1], ["Chapter 2: Rings"])
 
+    def test_strip_heading_markup_linear_time_on_long_whitespace_runs(self):
+        self.assertEqual(physical_pages._strip_heading_markup("## Title#"), "Title#")
+        self.assertEqual(physical_pages._strip_heading_markup("##   ###"), "")
+
+        non_closing = "## *Q.E.D.*" + (" " * 25_000) + "prose"
+        t0 = perf_counter()
+        stripped_non_closing = physical_pages._strip_heading_markup(non_closing)
+        elapsed_non_closing_ms = (perf_counter() - t0) * 1000.0
+        self.assertLess(elapsed_non_closing_ms, 50.0)
+        self.assertTrue(stripped_non_closing.endswith("prose"))
+
+        closing = "## *Q.E.D.*" + (" " * 25_000) + "##"
+        t1 = perf_counter()
+        stripped_closing = physical_pages._strip_heading_markup(closing)
+        elapsed_closing_ms = (perf_counter() - t1) * 1000.0
+        self.assertLess(elapsed_closing_ms, 50.0)
+        self.assertEqual(stripped_closing, "*Q.E.D.*")
+
+        ext = physical_pages.extract_physical_pages(
+            result_for(
+                [text_element(1, "Answer: No.\nProof. Step 1.\n" + non_closing, 1)],
+                [text_element(2, "Step 2.\n" + closing, 1)],
+                [text_element(3, "Public prose after proof.", 1)],
+                start_page=1,
+            )
+        )
+        self.assertTrue(ext.inline_proof_sealed_by_page[1])
+        self.assertFalse(ext.inline_sealed_by_page[2])
+        self.assertEqual(ext.texts_by_page[3], ["Public prose after proof."])
+
 
 if __name__ == "__main__":
     if WORKER_FIXTURE_MODE:

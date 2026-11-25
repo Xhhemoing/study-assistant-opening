@@ -1386,5 +1386,101 @@ describe("parse source handler", () => {
       expect((multiAuxProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
         .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
     }
+
+    // Round 60 P1 #1a: Live Vision retry on a mixed public+sealed page must not downgrade saved inline_proof_sealed to inline_sealed.
+    const recognizeWithoutProof = vi.fn(async () => ({
+      text: "[转写]\nTheorem 1.\nAnswer: x = 1\n[图片描述]\nDiagram",
+      imageObjectKey: "vision/p1-retry-omitted-proof",
+    }));
+    const liveRetryPreservesSavedProof = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      recognizePage: recognizeWithoutProof,
+      published: [{
+        id: "00000000-0000-4000-8000-000000000095",
+        sourceId,
+        sourceVersion: 7,
+        page: 1,
+        slideLabel: null,
+        startMs: null,
+        endMs: null,
+        text: "[原生提取]\nTheorem 1.\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nTheorem 1.\nAnswer: x = 1\n\n[图片描述]\nProof. An unfinished derivation.",
+        imageObjectKey: null,
+      }],
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? { page: 1, text: "Theorem 1.\nAnswer: x = 1", imagePath: null, visualKinds: ["picture"] }
+          : start === 2
+            ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(liveRetryPreservesSavedProof.handler({ ...job, claimToken: "claim-r60-p1-1a" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(recognizeWithoutProof).toHaveBeenCalledOnce();
+    expect(liveRetryPreservesSavedProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((liveRetryPreservesSavedProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([
+        [1, "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nTheorem 1."],
+        [4, "Chapter 2\nPublic prose."],
+      ]);
+
+    // Round 60 P1 #1b: Public prefix + Docling-stripped inline_sealed (inlineEmptyAtEnd: false) + live Vision auxiliary Proof upgrades to inline_proof_sealed.
+    const recognizeDoclingPublicPrefixProof = vi.fn(async () => ({
+      text: "[图片描述]\nProof. An unfinished derivation.",
+      imageObjectKey: "vision/p1-docling-public-prefix-proof",
+    }));
+    const doclingPublicPrefixLiveProof = await deps({
+      segmentPages: 1,
+      segments: makeSegments(),
+      recognizePage: recognizeDoclingPublicPrefixProof,
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: 4 }) };
+        const start = Number(argv[argv.indexOf("--page-start") + 1]);
+        const page = start === 1
+          ? {
+              page: 1,
+              text: "Theorem 1.",
+              imagePath: null,
+              visualKinds: ["picture"],
+              hadSealedContent: true,
+              inlineSealedAtEnd: true,
+              inlineEmptyAtEnd: false,
+            }
+          : start === 2
+            ? { page: 2, text: "Intermediate step ends with a period.", imagePath: null, visualKinds: [] }
+            : start === 3
+              ? { page: 3, text: "Final step. Q.E.D.", imagePath: null, visualKinds: [] }
+              : { page: 4, text: "Chapter 2\nPublic prose.", imagePath: null, visualKinds: [] };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [page] }) };
+      },
+    });
+    await expect(doclingPublicPrefixLiveProof.handler({ ...job, claimToken: "claim-r60-p1-1b" }, { sourceId, sourceVersion: 7 }))
+      .resolves.toEqual({ pages: 4 });
+    expect(recognizeDoclingPublicPrefixProof).toHaveBeenCalledOnce();
+    expect(doclingPublicPrefixLiveProof.argvs().filter(a => a.includes("--page-start")).map(a => ({
+      start: Number(a[a.indexOf("--page-start") + 1]),
+      seed: a.includes("--initial-seal-mode") ? a[a.indexOf("--initial-seal-mode") + 1] : undefined,
+    }))).toEqual([
+      { start: 1, seed: undefined },
+      { start: 2, seed: "inline_proof_sealed" },
+      { start: 3, seed: "inline_proof_sealed" },
+      { start: 4, seed: undefined },
+    ]);
+    expect((doclingPublicPrefixLiveProof.replaceInput() as { chunks: NewSourceChunk[] }).chunks.map(c => [c.page, c.text]))
+      .toEqual([[1, "Theorem 1."], [4, "Chapter 2\nPublic prose."]]);
   });
 });

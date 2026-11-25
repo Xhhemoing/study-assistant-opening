@@ -2071,4 +2071,63 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     expect(texts.slice(0, -1).join("")).toBe(prefix);
     expect(texts.at(-1)).toBe(formula);
   });
+
+  it.each([
+    "[原生提取]\nAnswer: x = 1\nProof. Done. Q.E.D.\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1\nProof. Step 1.\nDone. Q.E.D.\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1\nProof. First. Q.E.D.\nProof. Public theorem proof\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1\nProof. Done. Q.E.D.\n\n[图片描述]\nAnswer:",
+  ])("starts a fresh archived inline seal from an empty auxiliary Answer: after a closed proof (%j)", async pageOne => {
+    await expectArchivedPdfPages([
+      pageOne,
+      "Unlabeled answer continuation on page 2",
+      "Chapter 2: Geometry\nPublic prose.",
+    ], [3], 2);
+  });
+
+  it.each([
+    "[原生提取]\nAnswer: x = 1. Q.E.D.\nProof. Unfinished\n\n[视觉转写与描述]\n[图片描述]\nAnswer:",
+    "[原生提取]\nTheorem 1.\nAnswer:\n\n[视觉转写与描述]\n[转写]\nAnswer: x = 1. Q.E.D.\nProof. Unfinished\n\n[图片描述]\nAnswer:",
+    "[视觉转写与描述]\n[图片描述]\nAnswer: x = 1\nProof. First. Q.E.D.\nProof. Unfinished\n\n[不确定处]\nAnswer:",
+  ])("keeps unclosed_answer_body true and seals proof continuations when an unclosed proof follows Q.E.D. (%j)", async pageOne => {
+    const pages = [
+      pageOne,
+      "Intermediate step ends with a period.",
+      "Final step. Q.E.D.",
+      "Chapter 2: Geometry\nPublic prose.",
+    ];
+    await expectArchivedPdfPages(pages, [4], 2);
+    await expectArchivedPdfPages(pages, [4], 3);
+    const pdf = await seed(pages);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const rows = await f.sql<{ auxiliary: boolean; last_answer_body: string; unclosed_answer_body: boolean; starts_inline: boolean }[]>`
+      ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+      SELECT auxiliary, last_answer_body, unclosed_answer_body, starts_inline
+      FROM pdf_archive_inline_starts WHERE page=1 AND inline_opener ORDER BY position`;
+    expect(rows.some(r => r.last_answer_body !== "" && r.unclosed_answer_body)).toBe(true);
+    expect(rows.at(-1)).toMatchObject({ auxiliary: true, last_answer_body: "", starts_inline: false });
+  });
+
+  it.each([
+    "[原生提取]\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nChapter 2: Geometry\n\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nExercises\n\n[图片描述]\nAnswer:",
+    "[原生提取]\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\n1. Solve y.\nAnswer: y = 2.\n\n[图片描述]\nAnswer:",
+  ])("starts a new archived inline group from auxiliary Answer: after a same-page group boundary (%j)", async pageOne => {
+    await expectArchivedPdfPages([
+      pageOne,
+      "Unlabeled answer continuation on page 2",
+      "Chapter 3: Rings\nPublic prose.",
+    ], [3], 2);
+  });
+
+  it("upgrades auxiliary Answer: + Proof. after a repeated public heading to inline_proof_sealed across periods", async () => {
+    const pages = [
+      "[原生提取]\nTheorem 1.\nAnswer: x = 1\n\n[视觉转写与描述]\n[转写]\nTheorem 1.\n\n[图片描述]\nAnswer:\n\n[不确定处]\nProof. Step 1.",
+      "Intermediate step ends with a period.",
+      "Final step. Q.E.D.",
+      "Chapter 2: Geometry\nPublic prose.",
+    ];
+    await expectArchivedPdfPages(pages, [4], 2);
+    await expectArchivedPdfPages(pages, [4], 3);
+  });
 });

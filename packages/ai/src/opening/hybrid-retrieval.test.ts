@@ -389,4 +389,31 @@ describe("material hybrid retrieval", () => {
     expect(batchedReindex[0]?.id).toBe("formula-doc");
     expect(batchedReindex[0]?.text).toContain(formulaTail);
   });
+
+  it.each(["$\\Box $", "$\\square $", "$\\blacksquare $", "$1 + 1 = 2 \\Box $"])(
+    "keeps spaced QED inline math %s unbroken across the 6,000-byte boundary",
+    formula => {
+      const prefix = "a".repeat(5997);
+      const text = `${prefix}${formula} tail`;
+      const segments = segmentMaterialChunks([chunk("spaced-qed", text)], 6000);
+      expect(segments.map(s => s.chunk.text)).toEqual([prefix, `${formula} tail`]);
+    },
+  );
+
+  it("keeps adjacent and display-followed spaced QED formulas intact while leaving prose currency unmerged", () => {
+    const prefix = "a".repeat(5998);
+    expect(segmentMaterialChunks([chunk("adj-spaced-qed", `${prefix}$2x$$\\Box $ tail`)], 6000).map(s => s.chunk.text))
+      .toEqual([prefix, "$2x$$\\Box $ tail"]);
+
+    const prefixDisplay = "a".repeat(5997);
+    expect(segmentMaterialChunks([chunk("disp-spaced-qed", `${prefixDisplay}$\\Box $$$y$$ tail`)], 6000).map(s => s.chunk.text))
+      .toEqual([prefixDisplay, "$\\Box $$$y$$ tail"]);
+
+    // Escaped backslash before Box is not a \Box token, and ordinary prose currency still splits at maxBytes.
+    const escapedSlash = "a".repeat(5997) + "$\\\\Box $ tail";
+    expect(segmentMaterialChunks([chunk("escaped-box", escapedSlash)], 6000)[0]?.chunk.text.length).toBe(6000);
+
+    const currencyProse = "a".repeat(5998) + "$5 and $6 in cash";
+    expect(segmentMaterialChunks([chunk("currency-prose", currencyProse)], 6000)[0]?.chunk.text.length).toBe(6000);
+  });
 });

@@ -44,6 +44,29 @@ const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|to|or|per|for|in|of|at|from|with|by|on|million|billion|thousand|hundred|usd|eur|gbp|cad|aud|cny|rmb|jpy|hkd|sgd|dollars?|cents?|each|more|less|off|only|about|around|over|under|between|is|are|was|were|costs?|prices?)\b|^\d[\d,.]*[;:]\s*[a-z]|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 const PUNCTUATED_CURRENCY_RE = /^\d[\d,]*(?:\.\d+)?[.,]$/;
+const SPACED_QED_TOKENS = ["Box", "square", "blacksquare"] as const;
+
+function hasValidInlineMathBeforeClose(text: string, openIndex: number, closeIndex: number): boolean {
+  if (closeIndex <= openIndex + 1) return false;
+  if (!/\s/u.test(text[closeIndex - 1]!)) return true;
+  let k = closeIndex - 1;
+  while (k > openIndex) {
+    const ws = text[k]!;
+    if (ws === "\n" || ws === "\r" || !/\s/u.test(ws)) break;
+    k--;
+  }
+  const tokenEnd = k + 1;
+  if (tokenEnd <= openIndex + 1 || tokenEnd >= closeIndex) return false;
+  for (const token of SPACED_QED_TOKENS) {
+    const tokenStart = tokenEnd - token.length;
+    if (tokenStart > openIndex + 1 && text.startsWith(token, tokenStart) && text[tokenStart - 1] === "\\") {
+      let slashes = 0;
+      for (let s = tokenStart - 1; s > openIndex && text[s] === "\\"; s--) slashes++;
+      if (slashes % 2 === 1) return true;
+    }
+  }
+  return false;
+}
 
 function hasAdjacentInlineFormula(text: string, opener: number, blankLineAt: Uint8Array, commentEnds?: Int32Array): boolean {
   const startsInline = (index: number) => Boolean(text[index + 1] && !/[\s$]/u.test(text[index + 1]!));
@@ -56,7 +79,7 @@ function hasAdjacentInlineFormula(text: string, opener: number, blankLineAt: Uin
     if (blankLineAt[index]) return false;
     if (char === "$") {
       const next = text[index + 1] ?? "";
-      return !/\s/u.test(text[index - 1]!) && !/[0-9]/u.test(next)
+      return hasValidInlineMathBeforeClose(text, opener, index) && !/[0-9]/u.test(next)
         && (next !== "$" || startsInline(index + 1));
     }
     index++;
@@ -92,9 +115,9 @@ function isBareCurrencyStart(
     }
     j += 1;
   }
-  const prev = text[closeIdx - 1] ?? "";
   const next = text[closeIdx + 1] ?? "";
-  const validClose = closeIdx >= 0 && !/\s/.test(prev) && !(next >= "0" && next <= "9");
+  const validClose = closeIdx >= 0 && hasValidInlineMathBeforeClose(text, dollarIndex, closeIdx)
+    && !(next >= "0" && next <= "9");
   if (validClose) {
     const inner = bodyParts.join("") + text.slice(bodyStart, closeIdx);
     if ((MATH_COMMAND_OR_OP_RE.test(inner) || !CURRENCY_PROSE_OR_NON_MATH_RE.test(inner))
@@ -227,9 +250,8 @@ function scanMathSpans(text: string): MathSpan[] {
       if (ch === "$") {
         if (text[i + 1] === "$") {
           if (inlineDollarStart !== null) {
-            const prev = text[i - 1] ?? "";
             const next = text[i + 1] ?? "";
-            if (!/\s/.test(prev) && !/[0-9]/.test(next)) {
+            if (hasValidInlineMathBeforeClose(text, inlineDollarStart, i) && !/[0-9]/.test(next)) {
               spans.push({ start: inlineDollarStart, end: i + 1 });
               inlineDollarStart = null;
               i += 1;
@@ -244,7 +266,7 @@ function scanMathSpans(text: string): MathSpan[] {
         if (inlineDollarStart !== null) {
           const prev = text[i - 1] ?? "";
           const next = text[i + 1] ?? "";
-          if (!/\s/.test(prev) && !/[0-9]/.test(next)) {
+          if (hasValidInlineMathBeforeClose(text, inlineDollarStart, i) && !/[0-9]/.test(next)) {
             spans.push({ start: inlineDollarStart, end: i + 1 });
             inlineDollarStart = null;
           } else if (/\s/.test(prev) && next && !/\s/.test(next) && opensInlineMath(i)) {

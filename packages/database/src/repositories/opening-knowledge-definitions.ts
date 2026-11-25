@@ -502,7 +502,10 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   ), pdf_archive_inline_starts AS (
     SELECT *, inline_opener AND NOT auxiliary_complete
         AND NOT (auxiliary AND last_answer_body=''
-          AND COALESCE(bool_or(unclosed_answer_body) OVER earlier_on_page,false)) AS starts_inline,
+          AND COALESCE(max(position) FILTER (WHERE unclosed_answer_body) OVER earlier_on_page,0)
+            > COALESCE(max(position) FILTER (WHERE section_answer OR opens_exercise OR opens_public
+              OR (inline_opener AND NOT auxiliary_complete AND NOT (auxiliary AND last_answer_body='')
+                AND NOT unclosed_answer_body)) OVER earlier_on_page,0)) AS starts_inline,
       COALESCE(auxiliary_proof_head AND max(position) FILTER (WHERE auxiliary_answer_boundary) OVER earlier_on_page
         = max(position) FILTER (WHERE auxiliary AND content_line) OVER earlier_on_page
         OR (NOT auxiliary AND position=first_primary_position AND candidate_body ~* ${answerProofHeading}
@@ -522,17 +525,12 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
           IS TRUE AS transcription_reopens_answer,
         auxiliary AND (last_answer_body ~* ${inlineTerminator}
           OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends)) AS auxiliary_complete,
+        COALESCE(bool_or(native_line AND position=native_answer_position AND primary_lane_unclosed) OVER chunk_lines,false) AS native_answer_unclosed,
         inline_opener AND last_answer_body<>'' AND (
           auxiliary AND NOT (last_answer_body ~* ${inlineTerminator}
             OR NOT open_auxiliary_proof AND (first_auxiliary_close IS NOT NULL OR auxiliary_sentence_ends))
-          OR transcription AND position=last_transcription_answer
-            AND lane_boundary_position IS NULL AND blank_exit_position IS NULL AND answer_terminator IS NULL
-            AND NOT (NOT answer_has_proof AND last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineFallbackBlocked})
-          OR native_line AND position=native_answer_position
-            AND native_answer_position>COALESCE(native_reopening,0)
-            AND native_answer_position>COALESCE(native_blank_exit,0)
-            AND NOT (native_answer_position>COALESCE(native_proof,0)
-              AND (native_tail ~* ${inlineTerminator} OR native_tail ~* ${inlineTerminal} AND native_tail !~* ${inlineFallbackBlocked}))
+          OR transcription AND position=last_transcription_answer AND primary_lane_unclosed
+          OR native_line AND position=native_answer_position AND primary_lane_unclosed
         ) AS unclosed_answer_body,
         auxiliary AND content_line AND position=last_auxiliary_position AND auxiliary_opener>0 AND NOT open_auxiliary_proof
           AND CASE WHEN first_auxiliary_close IS NULL THEN auxiliary_sentence_ends
@@ -540,6 +538,13 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       FROM (
         SELECT *, NOT open_auxiliary_proof AND last_answer_body !~* ${inlineTerminator} AND last_answer_body ~* ${inlineTerminal}
             AND last_answer_body !~* ${inlineFallbackBlocked} AS auxiliary_sentence_ends,
+          NOT auxiliary AND inline_opener AND last_answer_body<>''
+            AND lane_boundary_position IS NULL AND blank_exit_position IS NULL
+            AND CASE WHEN lane_first_proof IS NOT NULL
+              THEN COALESCE(lane_last_terminator,0)<lane_first_proof
+              ELSE answer_terminator IS NULL
+                AND NOT (last_answer_body ~* ${inlineTerminal} AND last_answer_body !~* ${inlineFallbackBlocked})
+            END AS primary_lane_unclosed,
           transcription AND inline_opener
             AND lane_reopening_position=lane_boundary_position AND lane_reopening_position>answer_end_position
             AND (blank_exit_position IS NULL OR lane_reopening_position<=blank_exit_position)
@@ -583,6 +588,12 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                   FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
               max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
               bool_or(answer_content AND candidate_proof) OVER answer_sequence AS answer_has_proof,
+              min(position) FILTER (WHERE NOT auxiliary AND candidate_proof
+                AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
+                AND (blank_exit_position IS NULL OR position<blank_exit_position)) OVER answer_sequence AS lane_first_proof,
+              max(position) FILTER (WHERE NOT auxiliary AND candidate_terminator
+                AND (lane_boundary_position IS NULL OR position<lane_boundary_position)
+                AND (blank_exit_position IS NULL OR position<blank_exit_position)) OVER answer_sequence AS lane_last_terminator,
               min(position) FILTER (WHERE content_line AND position>answer_terminator)
                 OVER answer_sequence AS first_content_after_terminator
             FROM (
@@ -667,8 +678,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
           AND auxiliary_block IS NOT DISTINCT FROM first_value(auxiliary_block) OVER inline_origin
           OR first_value(last_answer_body) OVER inline_origin<>''
             AND first_value(blank_exit_position) OVER inline_origin IS NULL
-          OR NOT native_answer_boundary AND native_answer_position>COALESCE(native_reopening,0)
-            AND native_answer_position>COALESCE(native_blank_exit,0) AND native_tail<>'')
+          OR native_answer_unclosed)
         OR auxiliary AND inline_opener AND candidate_proof AND NOT candidate_terminator)
         AND first_value(starts_inline) OVER inline_origin
         AND (auxiliary_terminator IS NULL OR auxiliary_terminator<position) AS upgrades_inline

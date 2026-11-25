@@ -113,7 +113,13 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
   const isMarkdownHeading = /^#{1,6}\s+\S/u.test(trimmed);
   let s = trimmed;
   if (isMarkdownHeading) {
-    s = s.replace(/\s+#+$/u, "");
+    if (s.endsWith("#")) {
+      let hashStart = s.length;
+      while (hashStart > 0 && s[hashStart - 1] === "#") hashStart--;
+      let trimEnd = hashStart;
+      while (trimEnd > 0 && /\s/u.test(s[trimEnd - 1]!)) trimEnd--;
+      if (trimEnd < hashStart) s = s.slice(0, trimEnd);
+    }
     if (/^#{1,6}$/u.test(s)) return { stripped: "", isMarkdownHeading };
     s = s.replace(/^(?:#{1,6}\s+)+/u, "").trim();
   }
@@ -1653,7 +1659,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               visionClosedEmptyNativeInline: closedEmptyNativeInline,
             });
             if (archivedSeal && (liveSealState.mode === "none"
-              || archivedSeal.mode === "section_sealed" && liveSealState.mode !== "section_sealed")) {
+              || archivedSeal.mode === "section_sealed" && liveSealState.mode !== "section_sealed"
+              || archivedSeal.mode === "inline_proof_sealed" && liveSealState.mode === "inline_sealed")) {
               Object.assign(liveSealState, archivedSeal);
             }
             if (archivedSeal && !visionSealed.detectedOnPage) return saved;

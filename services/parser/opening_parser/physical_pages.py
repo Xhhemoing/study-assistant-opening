@@ -703,7 +703,15 @@ def _strip_markdown_emphasis(text: str) -> str:
 def _strip_heading_markup(line_text: str) -> str:
     s = line_text.strip()
     if _MD_HEADING_LINE_RE.match(s):
-        s = re.sub(r"\s+#+$", "", s)
+        if s.endswith("#"):
+            hash_start = len(s)
+            while hash_start > 0 and s[hash_start - 1] == "#":
+                hash_start -= 1
+            trim_end = hash_start
+            while trim_end > 0 and s[trim_end - 1].isspace():
+                trim_end -= 1
+            if trim_end < hash_start:
+                s = s[:trim_end]
         if re.fullmatch(r"#{1,6}", s):
             return ""
         s = _MD_HASH_PREFIX_RE.sub("", s).strip()

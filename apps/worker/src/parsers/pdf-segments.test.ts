@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v53-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v54-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -4238,5 +4238,26 @@ describe("bounded resumable PDF parser", () => {
     expect(partialDegradationBatch.publishedChunks.map(c => c.page)).toEqual([2, 4]);
     expect(partialDegradationBatch.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nChapter 1: Geometry");
     expect(partialDegradationBatch.publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
+
+  it("normalizes long whitespace runs in Markdown headings in O(N) time (< 50 ms)", () => {
+    const makeState = () => ({ mode: "none" as const, inWorkedExample: false, inExercise: false, afterAllSealedPage: false });
+    sealTextWithState("Answer: No.\nProof. Step 1.\n## *Q.E.D.* ##", makeState());
+
+    const nonClosing = "Answer: No.\nProof. Step 1.\n## *Q.E.D.*" + " ".repeat(25_000) + "prose";
+    const nonClosingState = makeState();
+    const t0 = performance.now();
+    sealTextWithState(nonClosing, nonClosingState);
+    const nonClosingMs = performance.now() - t0;
+    expect(nonClosingMs).toBeLessThan(50);
+    expect(nonClosingState.mode).toBe("inline_proof_sealed");
+
+    const closing = "Answer: No.\nProof. Step 1.\n## *Q.E.D.*" + " ".repeat(25_000) + "##";
+    const closingState = makeState();
+    const t1 = performance.now();
+    sealTextWithState(closing, closingState);
+    const closingMs = performance.now() - t1;
+    expect(closingMs).toBeLessThan(50);
+    expect(closingState.mode).toBe("none");
   });
 });
