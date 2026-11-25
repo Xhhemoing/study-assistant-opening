@@ -476,7 +476,8 @@ it.each(["anchor", "citation", "direct ref", "pin plus memory ref"] as const)("r
     const memories = createOpeningMemoryRepository(sql);
     const origin = await insertOwnedTurn(sql, scope, { sourceIds: [sourceId] });
     const proposed = await memories.proposeMemory(scope, { text: "Backed memory", sourceTurnIds: [origin], expiresAt: null });
-    await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const backing = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    await sql`UPDATE opening_memories SET created_at=now()-interval '2 hours' WHERE id=${backing.id}`;
     refs = [{ ...ref, memoryOnly: true }];
   } else if (evidence === "direct ref") {
     refs = [ref];
@@ -570,6 +571,7 @@ it("tracks temporary ancestors of legacy global memory-only history", async () =
   });
   const candidate = await memories.proposeMemory(f.scope, { text: "Derived global fact", sourceTurnIds: [backingTurn], expiresAt: null });
   const backing = await memories.confirm(f.scope, candidate.id, candidate.version, randomUUID());
+  await f.sql`UPDATE opening_memories SET created_at=now()-interval '2 hours' WHERE id IN (${temporary.id}, ${backing.id})`;
   await f.sql`UPDATE opening_turns SET context_source_refs=${f.sql.json([{ ...sourceRef, memoryOnly: true }])}
     WHERE id=${prior.assistantTurnId}`;
 

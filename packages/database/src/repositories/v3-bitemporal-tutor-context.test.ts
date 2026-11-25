@@ -11,8 +11,9 @@ import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation
 import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
   assertTutorLearnerMisconceptionSnapshot, readMemoryMisconceptionAuthorities, readMemoryMisconceptionLineages,
-  readTurnMisconceptionMemoryOrigins, readTurnsWithInvalidMisconceptionMemories, readTutorLearnerMisconceptionContext,
-  sourceTurnsAllowMisconceptionMemory, turnUsesInactiveMisconception, type TutorMisconceptionSnapshot,
+  readTurnMisconceptionMemoryOriginBatches, readTurnMisconceptionMemoryOrigins, readTurnsWithInvalidMisconceptionMemories,
+  readTutorLearnerMisconceptionContext, sourceTurnsAllowMisconceptionMemory, turnUsesInactiveMisconception,
+  type TutorMisconceptionSnapshot,
 } from "./v3-bitemporal-misconception-memory";
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
@@ -2736,6 +2737,124 @@ it("closes Round-16 skipPriorMisconceptions jobless sweeps, includeUserPrefix sc
   }
 });
 
+it("closes Round-17 user-turn memory lineage preservation and unconditional memoryOnly timestamp bounds", async () => {
+  const userSourceTurn = "c7000000-0000-4000-8000-000000000001";
+  const withdrawnDepMem = "c7000000-0000-4000-8000-000000000002";
+  const tempDepMem = "c7000000-0000-4000-8000-000000000003";
+  const confirmedFromWithdrawnUser = "c7000000-0000-4000-8000-000000000004";
+  const confirmedFromTempUser = "c7000000-0000-4000-8000-000000000005";
+  const futureExpIso = new Date(Date.now() + 75_000).toISOString();
+  const futureExpMs = new Date(futureExpIso).getTime();
+
+  // 1) Round-17 P1 #1 (SQL structure + simulation):
+  // - readMemoryLineageBatch / memoryOriginEvidence no longer restricts directMemoryOriginSide to origin.role = 'assistant'
+  //   and emits CASE WHEN (origin).role = 'assistant' THEN origin.id END for assistantTurnId.
+  // - readTurnMisconceptionMemoryOriginBatches gates direct user origins ONLY when includeUserPrefix is true AND t.role = 'user'.
+  // - originMemoryOnlyBackingIds unconditionally enforces m.created_at <= createdAt and m.expires_at > createdAt with zero
+  //   opening_sources.created_at exception.
+  {
+    const lineageSqlTexts: string[] = [];
+    const originBatchQueries: Array<{ text: string; values: unknown[] }> = [];
+    const backingSqlTexts: string[] = [];
+    const legacySrcId = "c7000000-0000-4000-8000-000000000010";
+    const legacyTurnId = "c7000000-0000-4000-8000-000000000011";
+    const legacyMemId = "c7000000-0000-4000-8000-000000000012";
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT id FROM opening_memories AS m(memory_id)")) {
+        lineageSqlTexts.push(s);
+        const reqIds = q.values[1] as string[];
+        return reqIds.flatMap(id => {
+          if (id === confirmedFromWithdrawnUser) {
+            return [{ id: {
+              memoryId: confirmedFromWithdrawnUser, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: null,
+              origins: [{
+                id: userSourceTurn, assistantTurnId: null, courseId: null, consumerCourseId: null,
+                materialUse: "citation", refs: [{ memoryDependencyIds: [withdrawnDepMem] }], standalone: false,
+                historical: false, jobBacked: false, isPairedUser: false,
+              }],
+            } }];
+          }
+          if (id === confirmedFromTempUser) {
+            return [{ id: {
+              memoryId: confirmedFromTempUser, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: null,
+              origins: [{
+                id: userSourceTurn, assistantTurnId: null, courseId: null, consumerCourseId: null,
+                materialUse: "citation", refs: [{ memoryDependencyIds: [tempDepMem] }], standalone: false,
+                historical: false, jobBacked: false, isPairedUser: false,
+              }],
+            } }];
+          }
+          if (id === tempDepMem) {
+            return [{ id: {
+              memoryId: tempDepMem, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: futureExpIso, origins: [],
+            } }];
+          }
+          if (id === legacyMemId) {
+            return [{ id: {
+              memoryId: legacyMemId, hashes: [], courseId: null, active: true, unexpired: true, expiresAt: null,
+              origins: [{
+                id: legacyTurnId, assistantTurnId: legacyTurnId, courseId: null, consumerCourseId: null,
+                materialUse: "citation", refs: [{ sourceId: legacySrcId, sourceVersion: 1, memoryOnly: true }],
+                standalone: true, createdAt: at,
+              }],
+            } }];
+          }
+          // withdrawnDepMem omitted by readMemoryLineageBatch because its misconception revision was withdrawn!
+          return [];
+        });
+      }
+      if (s.startsWith("SELECT saved.id,")) {
+        backingSqlTexts.push(s);
+        return [{ id: legacyTurnId, backings: [[]] }];
+      }
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        originBatchQueries.push({ text: s, values: [...q.values] });
+        return [{
+          id: userSourceTurn,
+          origins: [{
+            id: userSourceTurn, assistantTurnId: null, courseId: null, consumerCourseId: null,
+            materialUse: "citation", refs: [{ memoryDependencyIds: [withdrawnDepMem] }], standalone: false,
+            historical: false, jobBacked: false, isPairedUser: false,
+          }],
+          conversation_id: "c7000000-0000-4000-8000-000000000099",
+          consumer_course_id: null, pos_us: "100", pos_id: userSourceTurn,
+          inherits_prefix: false, conv_origins: [], conv_consumers: [],
+        }];
+      }
+      if (s.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        return [{ id: tempDepMem, course_id: null, source_turn_ids: [], expires_at: new Date(futureExpIso) }];
+      }
+      if (s.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return q.values[0] as unknown[];
+      return unexpected(q);
+    });
+
+    const auth = await readMemoryMisconceptionAuthorities(
+      sql, scope, [confirmedFromWithdrawnUser, confirmedFromTempUser, legacyMemId], null,
+    );
+    expect(auth.has(confirmedFromWithdrawnUser)).toBe(false);
+    expect(auth.get(confirmedFromTempUser)).toMatchObject({
+      courseId: null,
+      lineage: undefined,
+      unexpired: true,
+      earliestExpiresAtMs: futureExpMs,
+    });
+    expect(auth.has(legacyMemId)).toBe(false);
+
+    expect(lineageSqlTexts[0]).not.toContain("(origin).role = 'assistant' AND");
+    expect(lineageSqlTexts[0]).toContain("'assistantTurnId', CASE WHEN (origin).role = 'assistant' THEN origin.id END");
+    expect(backingSqlTexts[0]).not.toContain("s.created_at >");
+    expect(backingSqlTexts[0]).toContain("m.created_at <=");
+
+    const invalidUserTurns = await readTurnsWithInvalidMisconceptionMemories(sql, scope, [userSourceTurn]);
+    expect(invalidUserTurns.has(userSourceTurn)).toBe(true);
+    expect(originBatchQueries).toHaveLength(1);
+    expect(originBatchQueries[0]!.text).toContain("NOT (? AND t.role = 'user')");
+    expect(originBatchQueries[0]!.values[0]).toBe(false);
+  }
+});
+
 it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception lineage validation on PostgreSQL 16", async () => {
   // PGlite is provisioned locally for this optional real-SQL test so the workspace lockfile stays unchanged.
   const packageName = "@electric-sql/pglite";
@@ -5031,6 +5150,236 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         });
         expect(multiAuth.get(mCeil32)).toEqual(multiAuth.get(mCeil23));
       }
+
+      // 12) Round-17 P1 #1 & P1 #2 on real PostgreSQL 16.4 (< 20,000 EXPLAIN cost gate active):
+      const r17Rev = "b8000000-0000-4000-8000-000000000001";
+      const r17GlobalLin = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [r17Rev] };
+      await db.query(`INSERT INTO v3_bitemporal_misconception_edges
+          (revision_id,workspace_id,owner_user_id,course_id,privacy_epoch,valid_range,tx_range,status,edge_id,summary)
+        VALUES ($1,$2,$3,NULL,7,'(,)','(,)','candidate',$1,'Round 17 global rev')`,
+        [r17Rev, scope.workspaceId, scope.ownerUserId]);
+
+      // (a) P1 #1 on real PostgreSQL 16.4: Confirmed global memory whose sole source_turn_id is a completed user turn
+      // with memoryDependencyIds pointing to:
+      //   (i) a withdrawn-misconception memory -> rejected across readMemoryMisconceptionAuthorities, listContext,
+      //       loadTutorHistoryContext, listTurns, and sourceTurnsAllowMisconceptionMemory (NOT admitted as bare ID!),
+      //  (ii) a temporary memory -> propagates its finite expiry deadline across readMemoryMisconceptionAuthorities,
+      //       listContext, loadTutorHistoryContext, and releaseOpeningStudyExposure (preserving 3-arg release when permanent)!
+      {
+        const cOrig = "b8100000-0000-4000-8000-000000000001";
+        const cUser = "b8100000-0000-4000-8000-000000000002";
+        const cCons = "b8100000-0000-4000-8000-000000000003";
+        const tMiscOrig = "b8100000-0000-4000-8000-000000000004";
+        const mLeafMisc = "b8100000-0000-4000-8000-000000000005";
+        const mLeafTemp = "b8100000-0000-4000-8000-000000000006";
+        const uWithMisc = "b8100000-0000-4000-8000-000000000007";
+        const uWithTemp = "b8100000-0000-4000-8000-000000000008";
+        const mConfMiscUser = "b8100000-0000-4000-8000-000000000009";
+        const mConfTempUser = "b8100000-0000-4000-8000-000000000010";
+        const uCons1 = "b8100000-0000-4000-8000-000000000011";
+        const aCons1 = "b8100000-0000-4000-8000-000000000012";
+        const uCons2 = "b8100000-0000-4000-8000-000000000013";
+        const aCons2 = "b8100000-0000-4000-8000-000000000014";
+        const curU = "b8100000-0000-4000-8000-000000000015";
+        const recTemp = "b8100000-0000-4000-8000-000000000016";
+        const recPerm = "b8100000-0000-4000-8000-000000000017";
+        const r17TempIso = new Date(Date.now() + 25_000).toISOString();
+        const r17TempMs = new Date(r17TempIso).getTime();
+
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$4,$5,NULL), ($2,$4,$5,NULL), ($3,$4,$5,NULL)",
+          [cOrig, cUser, cCons, scope.workspaceId, scope.ownerUserId]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,query_system,created_at,text)
+          VALUES ($1,$4,$5,'assistant','complete',$6,'[]',false,to_timestamp($9),'R17 misc leaf assistant'),
+                 ($2,$4,$7,'user','complete','sha256:user-req-misc',$8,false,to_timestamp($10),'R17 user turn with misc dep'),
+                 ($3,$4,$7,'user','complete','sha256:user-req-temp',$11,false,to_timestamp($10),'R17 user turn with temp dep')`,
+          [tMiscOrig, uWithMisc, uWithTemp, scope.workspaceId, cOrig,
+            JSON.stringify(r17GlobalLin), cUser,
+            JSON.stringify([{ memoryDependencyIds: [mLeafMisc] }]),
+            baseEpochSec + 95_000, baseEpochSec + 95_010,
+            JSON.stringify([{ memoryDependencyIds: [mLeafTemp] }])]);
+        await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,created_at)
+          VALUES ($1,$5,NULL,$6,'confirmed',NULL,to_timestamp($10)),
+                 ($2,$5,NULL,$7,'temporary',$12,to_timestamp($10)),
+                 ($3,$5,NULL,$8,'confirmed',NULL,to_timestamp($11)),
+                 ($4,$5,NULL,$9,'confirmed',NULL,to_timestamp($11))`,
+          [mLeafMisc, mLeafTemp, mConfMiscUser, mConfTempUser, scope.workspaceId,
+            JSON.stringify([tMiscOrig]), JSON.stringify([cleanOriginId]),
+            JSON.stringify([uWithMisc]), JSON.stringify([uWithTemp]),
+            baseEpochSec + 95_005, baseEpochSec + 95_015, r17TempIso]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,query_system,created_at,text)
+          VALUES ($1,$6,$7,'user','complete',NULL,'[]',false,to_timestamp($10),'Cons Q2'),
+                 ($2,$6,$7,'assistant','complete',NULL,$9,false,to_timestamp($10),'Cons A2 from user-temp mem'),
+                 ($3,$6,$7,'user','complete',NULL,'[]',false,to_timestamp($11),'Cons Q1'),
+                 ($4,$6,$7,'assistant','complete',$13,$8,false,to_timestamp($11),'Cons A1 from user-misc mem'),
+                 ($5,$6,$7,'user','complete',NULL,$8,false,to_timestamp($12),'Current Q3 with own user ref')`,
+          [uCons2, aCons2, uCons1, aCons1, curU, scope.workspaceId, cCons,
+            JSON.stringify([{ memoryDependencyIds: [mConfMiscUser] }]),
+            JSON.stringify([{ memoryDependencyIds: [mConfTempUser] }]),
+            baseEpochSec + 95_020, baseEpochSec + 95_030, baseEpochSec + 95_040,
+            JSON.stringify(cleanLineage)]);
+        await db.query(`INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status)
+          VALUES ($1,$3,$4,$5,$1,'succeeded'), ($2,$3,$4,$6,$2,'succeeded')`,
+          [aCons1, aCons2, scope.workspaceId, cCons, uCons1, uCons2]);
+        await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+          VALUES ($1,$3,$4,NULL,$5,'assistant','r17-rec-perm',$7,NULL),
+                 ($2,$3,$4,NULL,$6,'assistant','r17-rec-temp',$7,NULL)`,
+          [recPerm, recTemp, scope.workspaceId, scope.ownerUserId, aCons1, aCons2, JSON.stringify({ purpose: "learning_help" })]);
+        await db.exec("ANALYZE");
+
+        // Direct user-turn origins are preserved with assistantTurnId: null when includeUserPrefix is false,
+        // and gated to [] when includeUserPrefix is true:
+        const directUserOrigins = await readTurnMisconceptionMemoryOrigins(sql, scope, [uWithMisc, uWithTemp]);
+        expect(directUserOrigins.get(uWithMisc)).toMatchObject([
+          { id: uWithMisc, assistantTurnId: null, ids: [mLeafMisc], isPairedUser: false },
+        ]);
+        expect(directUserOrigins.get(uWithTemp)).toMatchObject([
+          { id: uWithTemp, assistantTurnId: null, ids: [mLeafTemp], isPairedUser: false },
+        ]);
+        const curPrefixBatches = await readTurnMisconceptionMemoryOriginBatches(sql, scope, [curU], { includeUserPrefix: true });
+        expect(curPrefixBatches.targets.get(curU)?.direct).toEqual([]);
+        expect(curPrefixBatches.targets.get(curU)?.inheritsPrefix).toBe(true);
+
+        // While r17Rev is active, mConfMiscUser carries r17GlobalLin and mConfTempUser propagates r17TempMs!
+        const activeUserAuth = await readMemoryMisconceptionAuthorities(sql, scope, [mConfMiscUser, mConfTempUser], null);
+        expect(activeUserAuth.get(mConfMiscUser)).toMatchObject({
+          lineage: r17GlobalLin,
+          unexpired: true,
+          earliestExpiresAtMs: Infinity,
+        });
+        expect(activeUserAuth.get(mConfTempUser)).toMatchObject({
+          lineage: undefined,
+          unexpired: true,
+          earliestExpiresAtMs: r17TempMs,
+        });
+        expect(await sourceTurnsAllowMisconceptionMemory(sql, scope, [uWithMisc], null)).toBe(true);
+
+        const activeHist = await loadTutorHistoryContext(sql, scope, curU);
+        expect(activeHist.history.map(h => h.text)).toEqual([
+          "Cons Q2", "Cons A2 from user-temp mem", "Cons Q1", "Cons A1 from user-misc mem",
+        ]);
+        expect(activeHist.temporaryMemoryExpiresAt).toBe(r17TempIso);
+        expect(activeHist.historyMisconceptionLineage).toEqual(r17GlobalLin);
+
+        // Verify listTurns passes finite deadline ONLY for aCons2 (recTemp) and preserves 3-arg call (no now_ts.ts <) for aCons1 (recPerm):
+        const releaseSqlByRec = new Map<string, { rendered: string; params: unknown[] }>();
+        SqlFragment.prototype.execute = async function (this: SqlFragment) {
+          const params: unknown[] = [];
+          const rendered = this.render(params).trim();
+          if (rendered.startsWith("UPDATE opening_help_exposures")) {
+            if (params.includes(recPerm)) releaseSqlByRec.set(recPerm, { rendered, params: [...params] });
+            if (params.includes(recTemp)) releaseSqlByRec.set(recTemp, { rendered, params: [...params] });
+          }
+          return origExecute.call(this);
+        };
+        const listedBeforeWithdraw = await repo.listTurns(scope, cCons);
+        SqlFragment.prototype.execute = origExecute;
+        expect(listedBeforeWithdraw.find(t => t.id === aCons1)?.text).toBe("Cons A1 from user-misc mem");
+        expect(listedBeforeWithdraw.find(t => t.id === aCons2)?.text).toBe("Cons A2 from user-temp mem");
+        expect(releaseSqlByRec.get(recPerm)?.rendered).not.toContain("now_ts.ts <");
+        expect(releaseSqlByRec.get(recTemp)?.rendered).toContain("now_ts.ts <");
+        expect(releaseSqlByRec.get(recTemp)?.params).toContain(r17TempIso);
+
+        // Withdraw r17Rev: mConfMiscUser MUST be rejected (NOT admitted as bare ID!) while mConfTempUser remains live with finite deadline!
+        // Also verify curU's own user context_source_refs pointing to mConfMiscUser do NOT pollute uCons2/aCons2 when includeUserPrefix=true!
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [r17Rev]);
+        const retractedUserAuth = await readMemoryMisconceptionAuthorities(sql, scope, [mConfMiscUser, mConfTempUser], null);
+        expect(retractedUserAuth.has(mConfMiscUser)).toBe(false);
+        expect(retractedUserAuth.get(mConfTempUser)).toMatchObject({
+          lineage: undefined,
+          unexpired: true,
+          earliestExpiresAtMs: r17TempMs,
+        });
+        expect(await sourceTurnsAllowMisconceptionMemory(sql, scope, [uWithMisc], null)).toBe(false);
+        expect((await readTurnsWithInvalidMisconceptionMemories(sql, scope, [uWithMisc])).has(uWithMisc)).toBe(true);
+
+        const memRepo = createOpeningMemoryRepository(sql);
+        const memCtx = await memRepo.listContext(scope, new Date().toISOString());
+        expect(memCtx.memories.map(m => m.id)).not.toContain(mConfMiscUser);
+        expect(memCtx.memories.map(m => m.id)).toContain(mConfTempUser);
+        expect(memCtx.temporaryMemoryExpiresAt).toBe(r17TempIso);
+
+        const retractedHist = await loadTutorHistoryContext(sql, scope, curU);
+        expect(retractedHist.history.map(h => h.text)).toEqual([
+          "Cons Q2", "Cons A2 from user-temp mem",
+        ]);
+        expect(retractedHist.temporaryMemoryExpiresAt).toBe(r17TempIso);
+        expect(retractedHist.historyMisconceptionLineage).toBeUndefined();
+
+        const listedAfterWithdraw = await repo.listTurns(scope, cCons);
+        expect(listedAfterWithdraw.find(t => t.id === aCons1)?.text).toBe(unavailable);
+        expect(listedAfterWithdraw.find(t => t.id === aCons2)?.text).toBe("Cons A2 from user-temp mem");
+
+        // Once mLeafTemp expires, mConfTempUser is also excluded (not retained as bare confirmed ID):
+        await db.query("UPDATE opening_memories SET expires_at=to_timestamp($2) WHERE id=$1", [mLeafTemp, baseEpochSec + 95_012]);
+        expect((await memRepo.listContext(scope, new Date().toISOString())).memories.map(m => m.id)).not.toContain(mConfTempUser);
+        await db.query("UPDATE opening_memories SET expires_at=$2 WHERE id=$1", [mLeafTemp, r17TempIso]);
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate' WHERE revision_id=$1", [r17Rev]);
+      }
+
+      // (b) P1 #2 on real PostgreSQL 16.4: Unattributed legacy memoryOnly turn whose referenced opening_sources.created_at >
+      // turn.created_at (clock skew / import): after its original backing's misconception is withdrawn, a clean memory created
+      // AFTER turn.created_at MUST STILL be rejected by m.created_at <= turn.created_at!
+      {
+        const sSkew = "b8200000-0000-4000-8000-000000000001";
+        const cOrig = "b8200000-0000-4000-8000-000000000002";
+        const cLeg = "b8200000-0000-4000-8000-000000000003";
+        const tMiscSrc = "b8200000-0000-4000-8000-000000000004";
+        const tCleanSrc = "b8200000-0000-4000-8000-000000000005";
+        const uLeg = "b8200000-0000-4000-8000-000000000006";
+        const aLeg = "b8200000-0000-4000-8000-000000000007";
+        const curU = "b8200000-0000-4000-8000-000000000008";
+        const mContempMisc = "b8200000-0000-4000-8000-000000000009";
+        const mLaterClean = "b8200000-0000-4000-8000-000000000010";
+        const mDerivedFromLeg = "b8200000-0000-4000-8000-000000000011";
+
+        // Notice sSkew.created_at (+96_100) > aLeg.created_at (+96_020)!
+        await db.query("INSERT INTO opening_sources (id,workspace_id,version,upload_state,created_at) VALUES ($1,$2,1,'uploaded',to_timestamp($3))",
+          [sSkew, scope.workspaceId, baseEpochSec + 96_100]);
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$3,$4,NULL), ($2,$3,$4,NULL)",
+          [cOrig, cLeg, scope.workspaceId, scope.ownerUserId]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,source_ids,source_versions,
+            context_source_refs,query_system,created_at,text)
+          VALUES ($1,$6,$7,'assistant','complete',$9,ARRAY[$11]::uuid[],jsonb_build_object($11::text,1),$12,false,to_timestamp($14),'R17 skew misc src'),
+                 ($2,$6,$7,'assistant','complete',$10,ARRAY[$11]::uuid[],jsonb_build_object($11::text,1),$12,false,to_timestamp($14),'R17 skew clean src'),
+                 ($3,$6,$8,'user','complete',NULL,'{}','{}'::jsonb,'[]',false,to_timestamp($15),'R17 skew legacy Q'),
+                 ($4,$6,$8,'assistant','complete',NULL,'{}','{}'::jsonb,$13,false,to_timestamp($15),'R17 skew legacy A'),
+                 ($5,$6,$8,'user','complete',NULL,'{}','{}'::jsonb,'[]',false,to_timestamp($16),'R17 skew current Q')`,
+          [tMiscSrc, tCleanSrc, uLeg, aLeg, curU, scope.workspaceId, cOrig, cLeg,
+            JSON.stringify(r17GlobalLin), JSON.stringify(cleanLineage), sSkew,
+            JSON.stringify([{ sourceId: sSkew, sourceVersion: 1 }]),
+            JSON.stringify([{ sourceId: sSkew, sourceVersion: 1, memoryOnly: true }]),
+            baseEpochSec + 96_000, baseEpochSec + 96_020, baseEpochSec + 96_050]);
+        await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id,status) VALUES ($1,$2,$3,$4,$1,'succeeded')",
+          [aLeg, scope.workspaceId, cLeg, uLeg]);
+        // mContempMisc created at +96_020 <= aLeg.created_at (+96_020); mLaterClean created at +96_030 > aLeg.created_at (+96_020)!
+        await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at,created_at)
+          VALUES ($1,$4,NULL,$5,'confirmed',NULL,to_timestamp($8)),
+                 ($2,$4,NULL,$6,'confirmed',NULL,to_timestamp($9)),
+                 ($3,$4,NULL,$7,'confirmed',NULL,to_timestamp($9))`,
+          [mContempMisc, mLaterClean, mDerivedFromLeg, scope.workspaceId,
+            JSON.stringify([tMiscSrc]), JSON.stringify([tCleanSrc]), JSON.stringify([aLeg]),
+            baseEpochSec + 96_020, baseEpochSec + 96_030]);
+        await db.exec("ANALYZE");
+
+        // While r17Rev is active, mContempMisc authorizes aLeg and mDerivedFromLeg (carrying r17GlobalLin, NOT mLaterClean!):
+        expect((await loadTutorHistoryContext(sql, scope, curU)).history).toEqual([
+          { role: "user", text: "R17 skew legacy Q" },
+          { role: "assistant", text: "R17 skew legacy A" },
+        ]);
+        expect((await readTutorHistoryAncestorStatus(sql, scope, curU)).valid).toBe(true);
+        expect((await readMemoryMisconceptionAuthorities(sql, scope, [mDerivedFromLeg], null)).get(mDerivedFromLeg)).toMatchObject({
+          lineage: r17GlobalLin,
+          unexpired: true,
+        });
+
+        // Withdraw r17Rev: mLaterClean (created AFTER aLeg.created_at) MUST STILL be rejected despite sSkew.created_at > aLeg.created_at!
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [r17Rev]);
+        expect((await loadTutorHistoryContext(sql, scope, curU)).history).toEqual([]);
+        expect((await readTutorHistoryAncestorStatus(sql, scope, curU)).valid).toBe(false);
+        expect((await readMemoryMisconceptionAuthorities(sql, scope, [mDerivedFromLeg], null)).has(mDerivedFromLeg)).toBe(false);
+        expect((await repo.listTurns(scope, cLeg)).find(t => t.id === aLeg)?.text).toBe(unavailable);
+        await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate' WHERE revision_id=$1", [r17Rev]);
+      }
     } finally {
       SqlFragment.prototype.execute = origExecute;
     }
@@ -5039,4 +5388,4 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
   } finally {
     await db.close();
   }
-}, 90_000);
+}, 120_000);

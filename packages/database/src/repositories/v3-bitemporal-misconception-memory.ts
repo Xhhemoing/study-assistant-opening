@@ -358,7 +358,7 @@ export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
 
 type MaterialUse = "citation" | "practice";
 export type SavedMemoryOrigin = {
-  id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null;
+  id: string; assistantTurnId?: string | null; courseId: string | null; consumerCourseId: string | null;
   pairedAssistantCourseId?: string | null; materialUse: MaterialUse;
   refs: unknown; standalone: boolean; createdAt?: string | Date | null;
   historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
@@ -368,7 +368,7 @@ export type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: st
 function directMemoryOriginSide(
   db: Db, origin: FragmentFactory, pairedUser: FragmentFactory, course: FragmentFactory,
   owner: FragmentFactory, historical: FragmentFactory, conversationCourse?: FragmentFactory,
-  knownOriginCourse?: FragmentFactory,
+  knownOriginCourse?: FragmentFactory, allowOrigin?: FragmentFactory,
 ) {
   const originHasMem = () => hasSavedMemoryReferences(db, () => db`${origin()}.context_source_refs`);
   const pairedHasMem = () => db`(${pairedUser()}.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`${pairedUser()}.context_source_refs`)})`;
@@ -379,11 +379,12 @@ function directMemoryOriginSide(
       SELECT ${computedOriginCourse()} AS id,
         ${originHasMem()} AS origin_has_mem,
         ${pairedHasMem()} AS paired_has_mem
-      WHERE (${origin()}).role = 'assistant' AND (${originHasMem()} OR ${pairedHasMem()})
+      WHERE ${allowOrigin ? db`${allowOrigin()} AND ` : db``}(${originHasMem()} OR ${pairedHasMem()})
       OFFSET 0
     ) origin_course
     CROSS JOIN LATERAL (
-      SELECT jsonb_build_object('id', ${origin()}.id, 'assistantTurnId', ${origin()}.id,
+      SELECT jsonb_build_object('id', ${origin()}.id,
+        'assistantTurnId', CASE WHEN (${origin()}).role = 'assistant' THEN ${origin()}.id END,
         'courseId', origin_course.id,
         'consumerCourseId', ${course()},
         'materialUse', (SELECT ${turnMaterialUse(db, "a")} FROM (SELECT ${origin()}.*) a OFFSET 0),
@@ -438,14 +439,7 @@ export function originMemoryOnlyBackingIds(
   includeExpiredBackings = false,
 ) {
   const attributed: FragmentFactory = () => db`${refs()} @? '$[*].memoryDependencyIds[*]'`;
-  // Causal turns always satisfy s.created_at <= turn.created_at (including across backup/restore);
-  // s.created_at > turn.created_at only occurs when a synthetic test fixture backdated turn.created_at before inserting the source.
-  const enforceTurnTime: FragmentFactory = () => db`NOT (${attributed()}) AND ${createdAt()} IS NOT NULL AND NOT EXISTS (
-    SELECT 1 FROM opening_sources s
-    WHERE s.workspace_id = ${scope.workspaceId}
-      AND s.id = ${lineageUuid(db, () => db`mem_ref->>'sourceId'`)}
-      AND s.created_at > ${createdAt()}
-  )`;
+  const enforceTurnTime: FragmentFactory = () => db`NOT (${attributed()}) AND ${createdAt()} IS NOT NULL`;
   const temporaryAllowed = includeExpiredBackings
     ? db`m.expires_at IS NOT NULL AND (NOT (${enforceTurnTime()}) OR m.expires_at > ${createdAt()})`
     : db`m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp() AND (NOT (${enforceTurnTime()}) OR m.expires_at > ${createdAt()})`;
@@ -572,7 +566,10 @@ export async function readTurnMisconceptionMemoryOriginBatches(
     conv_consumers?: RawConversationHashlessConsumer[] | null;
   }[]>`
     SELECT t.id, ARRAY(
-      ${directMemoryOriginSide(db, () => db`t`, () => db`own_u`, () => db`t.own_course_id`, owner, () => db`false`, () => db`t.conv_course_id`, () => db`t.own_course_id`)}
+      ${directMemoryOriginSide(
+        db, () => db`t`, () => db`own_u`, () => db`t.own_course_id`, owner, () => db`false`,
+        () => db`t.conv_course_id`, () => db`t.own_course_id`, () => db`NOT (${includeUserPrefix} AND t.role = 'user')`,
+      )}
     ) AS origins,
       t.conversation_id,
       t.own_course_id AS consumer_course_id,
