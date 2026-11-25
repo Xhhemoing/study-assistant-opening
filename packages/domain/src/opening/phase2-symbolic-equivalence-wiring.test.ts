@@ -131,6 +131,25 @@ describe("symbolic teaching choice", () => {
   it("permits a nonzero rescaling of the arbitrary integration constant", () => {
     expect(verifySymbolicStepEquivalence({ kind: "indefinite-integral", reference: "2x", student: "x^2+C/2-C" })).toBe("equivalent");
   });
+
+  it("abstains if formal differentiation loses a point of an alternative antiderivative", () => {
+    const stem = String.raw`Evaluate $\int 2x\,dx$`;
+    const alternative = String.raw`$\sqrt{x^4}+C$`;
+    const interaction = choice("x^2+C", alternative);
+    expect(check(stem, interaction, "A", "B. " + alternative)).toBeNull();
+    expect(check(stem, interaction, "A", "A. x^2+C")).toBeNull();
+
+    const wrongPower = choice("x^2+C", "x^3+C");
+    expect(check(stem, wrongPower, "A", "A. x^2+C")).toBe("correct");
+    expect(check(stem, wrongPower, "A", "B. x^3+C")).toBe("incorrect");
+  });
+
+  it("rejects an antiderivative with a removable hole inside the integrand domain", () => {
+    const stem = String.raw`Evaluate $\int 2x\,dx$`;
+    const interaction = choice("x^2+C", "x^3/x+C");
+    expect(check(stem, interaction, "A", "A. x^2+C")).toBe("correct");
+    expect(check(stem, interaction, "A", "B. x^3/x+C")).toBe("incorrect");
+  });
 });
 
 describe("symbolic teaching numeric", () => {
@@ -233,6 +252,9 @@ describe("symbolic Markdown boundaries", () => {
   it.each([
     ["2^.0", "1"], ["2^0.0", "1"], ["2^0.5", "1"], ["2^.0^2", "1"],
     ["2^(+2)^3", "256"], ["2^(.0)^2", "1"], ["2^(1+1)^3", "256"], ["2^sqrt(4)^3", "256"],
+    ...["\\,", "\\;", "\\!", "\\:", "\\ ", "~"].flatMap(space => [
+      [`2^${space}2^3`, "256"], [`2^${space}0.0`, "1"],
+    ]),
   ])("rejects ambiguous plain-text exponent notation in %s", (expression, result) => {
     expect(check("Evaluate " + expression, numeric, result, result)).toBeNull();
     expect(check("Evaluate $sqrt(4)$", numeric, "2", expression)).toBe("unparseable");
@@ -249,7 +271,26 @@ describe("symbolic Markdown boundaries", () => {
 
   it("leaves a grouped noninteger exponent to the scalar engine", () => {
     expect(check("Evaluate $2^{0.5}$", numeric, "1", "1")).toBeNull();
+    expect(check("Evaluate 2^(0.5)", numeric, "1", "1")).toBeNull();
   });
+
+  it.each([
+    ["\\sqrt\u00a0{4}", "2"], ["\\frac{1}\u00a0{2}", "0.5"],
+    ["\\left\u2009[1+1\\right]", "2"], ["\\left[1+1\\right\u3000]", "2"],
+    ["\\frac{d}{dx}\u00a0(3x)", "3"], ["\\frac{d}{d\u00a0x}(3x)", "3"],
+  ])("abstains when non-ASCII whitespace occurs in a TeX command %j", (expression, result) => {
+    expect(check(`Evaluate $${expression}$`, numeric, result, result)).toBeNull();
+    expect(verifyStandaloneProofEquationClaim(`$${expression} = ${result}$`))
+      .toEqual({ status: "unverified", unconditional: false });
+  });
+
+  it.each(["\\int\u00a02x\\,dx", "\\int 2x\u2009dx", "\\int 2x\\,d\u3000x"])(
+    "abstains when non-ASCII whitespace occurs in an integral operator %j", integral => {
+      expect(check(`Evaluate $${integral}$`, choice("x^2+C", "x^3+C"), "A", "A. x^2+C")).toBeNull();
+      expect(verifyStandaloneProofEquationClaim(`$${integral} = x^2+C$`))
+        .toEqual({ status: "unverified", unconditional: false });
+    },
+  );
 
   it.each([["(+2)", "4"], ["(-2)", "1/4"]])("requires TeX braces around the exponent %s", (exponent, result) => {
     const unbraced = "2^" + exponent;
@@ -272,6 +313,7 @@ describe("symbolic Markdown boundaries", () => {
     [String.raw`\left(2+\left[3\right]\right)`, "5"], [String.raw`\left\|2-3\right\|+1`, "2"],
     [String.raw`\frac{\sqrt{4}}{2^{2}}`, "1/2"], [String.raw`\dfrac{\sqrt{4}}{3}`, "2/3"],
     [String.raw`\tfrac{\sqrt{4}}{3}`, "2/3"], ["2^{-2}", "1/4"],
+    [String.raw`\frac {\sqrt {4}} {2}`, "1"], [String.raw`\left [1+1\right ]`, "2"],
     ["(2^2)^3", "64"],
   ])("keeps supported grouping in %s", (expression, result) => {
     expect(check(`Evaluate $${expression}$`, numeric, result, result)).toBe("correct");
@@ -346,7 +388,8 @@ describe("symbolic proof feedback", () => {
     "x + 1 = x + 2", "(x+1)^2 = x^2 + 2x + 2", "Step 1: $$(x+1)^2 = x^2 + 2x + 1 = x^2 + 2x + 2$$",
     "1/x + 1 = 1/x + 2", "x^2 = x + 1 = x + 2", String.raw`x + \sqrt{2} = x`,
     String.raw`\sin(x)^2 + \cos(x)^2 = 2`, "1/2 + 1/3 = 2/5", String.raw`\sqrt{4} = 3`,
-    String.raw`Step 1: $\frac{d}{dx}(x^3) = x^2$`, String.raw`1. \int 2x\,dx = x^3 + C`,
+    String.raw`Step 1: $\frac{d}{dx}(x^2) = 2x + 1$`, String.raw`$\frac{d}{dx}(3x) = 2$`,
+    String.raw`1. \int 2x\,dx = x^3 + C`,
   ])("vetoes a positive verdict on a refuted required claim %s", claim => {
     expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "inequivalent", unconditional: false });
     expect(proofFeedbackAllowsOutcome("correct", proof(claim, "correct"))).toBe(false);
@@ -359,11 +402,19 @@ describe("symbolic proof feedback", () => {
     expect(adjudicate("correct", feedback)).toBe("correct");
   });
 
+  it("preserves a correct proof that evaluates the derivative at an earlier point", () => {
+    const feedback = proof("Evaluate the derivative at x = 1.", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: String.raw`$\frac{d}{dx}(x^2)=2$` });
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
   it.each([
     "x + 1 = 3", "(x+1)^2 = x^2 + 1", "x/x = 1", "sqrt(x)^2 = x",
     String.raw`e^{\ln(x)} = x`, String.raw`\frac{d}{dx}(\ln(x)) = 1/x`,
     String.raw`\frac{d}{dx}(x^2) = 2\sqrt{x^2}`, String.raw`\int 2x\,dx = x\sqrt{x^2} + C`,
     String.raw`\frac{d}{dx}(x^2) = 2\sqrt{(x-1)^2} + 2`,
+    String.raw`Step 1: $\frac{d}{dx}(x^3) = x^2$`, String.raw`\frac{d}{dx}(x^2) = 2`,
+    String.raw`\int 2x\,dx = \sqrt{x^4} + C`,
     String.raw`\int 2x\,dx = (1+\sqrt{x})^0 + C`,
   ])("abstains when the proof context could affect the claim %s", claim => {
     expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "unverified", unconditional: false });

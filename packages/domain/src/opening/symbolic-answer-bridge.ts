@@ -186,14 +186,14 @@ function argumentGroupEnd(text: string, start: number): number | null {
 }
 
 function bracedArgument(text: string, offset: number): { start: number; end: number } | null {
-  const start = offset + /^\s*/.exec(text.slice(offset))![0].length;
+  const start = offset + /^[ \t\r\n]*/.exec(text.slice(offset))![0].length;
   if (text[start] !== "{") return null;
   const end = argumentGroupEnd(text, start);
   return end === null ? null : { start, end };
 }
 
 function validateTexExpression(body: string, texMode: boolean): string | null {
-  if ((texMode && body.includes("_")) ||
+  if ((texMode && (body.includes("_") || /[^\S \t\r\n]/.test(body))) ||
       /[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)+[\d.]|\d\.\d*\.|\.\d+\./.test(body) ||
       /[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\\[dt]?frac(?![A-Za-z])/.test(body)) return null;
   const argumentGroups = new Set<number>();
@@ -223,9 +223,8 @@ function validateTexExpression(body: string, texMode: boolean): string | null {
       } else {
         if (/^(?:[+\-−]|\d*\.)/.test(exponent)) return null;
         const group = /^(?:[A-Za-z]+\s*)?\(/.exec(exponent);
-        end = group
-          ? argumentGroupEnd(body, start + group[0].length - 1)
-          : start + (/^[A-Za-z0-9]+/.exec(exponent)?.[0].length ?? 0);
+        const atom = /^[A-Za-z0-9]+(?![A-Za-z0-9.])/.exec(exponent)?.[0];
+        end = group ? argumentGroupEnd(body, start + group[0].length - 1) : atom ? start + atom.length : null;
       }
       if (end === null) return null;
       if (/^(?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\^/.test(body.slice(end))) return null;
@@ -239,7 +238,7 @@ function validateTexExpression(body: string, texMode: boolean): string | null {
         argumentGroups.add(second.start);
       }
     } else if (token === "\\left" || token === "\\right") {
-      const delimiter = /^\s*(\\\||[()[\]|])/.exec(body.slice(after));
+      const delimiter = /^[ \t\r\n]*(\\\||[()[\]|])/.exec(body.slice(after));
       if (!delimiter) return null;
       tokens.lastIndex += delimiter[0].length;
       if (token === "\\left") {
@@ -264,7 +263,8 @@ function parseExpression(text: string, derivativeOperand = false, texOperand = f
   const wrapped = text.trim().startsWith("$");
   if (!body) return null;
   const source = wrapped || texOperand ? body : body.replace(/\\\*/g, "*");
-  const validated = validateTexExpression(source, wrapped || texOperand || /\\[A-Za-z]/.test(source));
+  const texMode = wrapped || texOperand || /\\|~/.test(source);
+  const validated = validateTexExpression(source, texMode);
   if (!validated) return null;
   // The engine allows adjacent identifiers as implicit products. Reject words before normalization.
   const words = validated.match(/\\[A-Za-z]+|[A-Za-z][A-Za-z0-9_]*/g) ?? [];
@@ -348,8 +348,9 @@ function makeTarget(kind: SymbolicKind, source: ParsedExpression, domain?: Domai
 function parseTargetExpression(text: string, promptKind: SymbolicKind, domain?: DomainSpec): Target | null {
   const body = unwrapMath(text);
   if (!body) return null;
-  const derivative = /^\\(?:dfrac|tfrac|frac)\s*\{\s*d\s*\}\s*\{\s*d\s*([A-Za-z])\s*\}\s*(.+)$/s.exec(body);
-  const integral = /^\\int(?![A-Za-z])\s*(.+?)(?:\\[,;! ]|\s)*d\s*([A-Za-z])$/s.exec(body);
+  const derivative = /^\\(?:dfrac|tfrac|frac)[ \t\r\n]*\{[ \t\r\n]*d[ \t\r\n]*\}[ \t\r\n]*\{[ \t\r\n]*d[ \t\r\n]*([A-Za-z])[ \t\r\n]*\}[ \t\r\n]*(.+)$/s.exec(body);
+  const integral = /^\\int(?![A-Za-z])[ \t\r\n]*(.+?)(?:\\[,;! ]|[ \t\r\n])*d[ \t\r\n]*([A-Za-z])$/s.exec(body);
+  if ((derivative || integral) && /[^\S \t\r\n]/.test(body)) return null;
   const kind = derivative ? "derivative" : integral ? "indefinite-integral" : promptKind;
   if ((promptKind !== "scalar" && kind !== promptKind) || (kind === "indefinite-integral" && !integral)) return null;
   const variable = derivative?.[1] ?? integral?.[2];
@@ -405,7 +406,23 @@ function compareToTarget(candidate: ParsedExpression, target: Target): Verificat
   const family = additiveConstant(candidate.expr, domain.variable);
   if (!family) return { status: "unverified" };
   if (family.coefficient.n === 0n) return { status: "inequivalent", reason: "missing_additive_constant" };
-  return verifyIndefiniteIntegral({ student: family.expr, integrand: expected, domain });
+  const result = verifyIndefiniteIntegral({ student: family.expr, integrand: expected, domain });
+  if (result.reason !== "natural_domain_mismatch") return result;
+  // Require a hole in the candidate itself at an interior point of the integrand's domain.
+  const familyDomain = withZeroValue(family.expr);
+  const coverage = verifyScalarEquivalence(familyDomain, openDomainCarrier(target.source), domain);
+  if (coverage.reason !== "natural_domain_mismatch" || coverage.witness?.detail !== "student undefined") {
+    return { status: "unverified" };
+  }
+  const familyDetails = inspectExpression(family.expr);
+  if (!familyDetails || ((familyDetails.radicands.length || familyDetails.absoluteValues.length) &&
+      verifyScalarEquivalence(openDomainCarrier(familyDetails, true), familyDomain, domain).status !== "equivalent")) {
+    return { status: "unverified" };
+  }
+  // A restriction introduced by formal differentiation may be spurious at a root.
+  const derivative = differentiate(family.expr, domain.variable);
+  return derivative && verifyScalarEquivalence(withZeroValue(derivative), familyDomain, domain).status === "equivalent"
+    ? result : { status: "unverified" };
 }
 
 /** Compare structured scalar, derivative or indefinite-integral steps. The reference is the expression being operated on. */
@@ -748,7 +765,14 @@ function calculusProofContradiction(candidate: ParsedExpression, target: Target,
   if (!isValueRefutation(result)) return false;
   if (result.reason === "missing_additive_constant") return true;
   const { domain } = target;
-  const family = target.kind === "indefinite-integral" ? additiveConstant(candidate.expr, domain.variable) : undefined;
+  if (target.kind === "derivative") {
+    if (verifyScalarEquivalence(withZeroValue(target.expected), openDomainCarrier(target.source), domain).status !== "equivalent") {
+      return false;
+    }
+    const derivative = inspectExpression(target.expected);
+    return derivative !== null && scalarProofContradiction(derivative, candidate);
+  }
+  const family = additiveConstant(candidate.expr, domain.variable);
   const compared = family ? { ...candidate, expr: family.expr } : candidate;
   if ((target.source.mayRestrictDomain || candidate.mayRestrictDomain) &&
       verifyScalarEquivalence(withZeroValue(compared.expr), withZeroValue(target.expected), domain).status !== "equivalent") {
