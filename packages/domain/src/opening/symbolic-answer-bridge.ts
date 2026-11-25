@@ -173,16 +173,23 @@ function isSingleDerivativeOperand(normalized: string): boolean {
   return false;
 }
 
-function bracedArgument(text: string, offset: number): { start: number; end: number } | null {
-  const start = offset + /^\s*/.exec(text.slice(offset))![0].length;
-  if (text[start] !== "{") return null;
+function argumentGroupEnd(text: string, start: number): number | null {
+  const open = text[start];
+  const close = open === "{" ? "}" : ")";
   let depth = 1;
   for (let index = start + 1; index < text.length; index++) {
     if (text[index] === "\\") index++;
-    else if (text[index] === "{") depth++;
-    else if (text[index] === "}" && --depth === 0) return { start, end: index + 1 };
+    else if (text[index] === open) depth++;
+    else if (text[index] === close && --depth === 0) return index + 1;
   }
   return null;
+}
+
+function bracedArgument(text: string, offset: number): { start: number; end: number } | null {
+  const start = offset + /^\s*/.exec(text.slice(offset))![0].length;
+  if (text[start] !== "{") return null;
+  const end = argumentGroupEnd(text, start);
+  return end === null ? null : { start, end };
 }
 
 function validateTexExpression(body: string, texMode: boolean): string | null {
@@ -202,12 +209,25 @@ function validateTexExpression(body: string, texMode: boolean): string | null {
       if (closers.pop() !== "}") return null;
     } else if (token === "^") {
       const tail = body.slice(after);
-      if (/^\s*[+\-−]/.test(tail) ||
-          (texMode && /^\s*(?:\\|[A-Za-z0-9]{2,}|\d\.\d|\()/.test(tail))) return null;
-      const braced = bracedArgument(body, after);
-      if (braced) argumentGroups.add(braced.start);
-      const unbraced = /^\s*(?:\(\s*[+\-−]?\s*\d+\s*\)|[+\-−]?\s*[A-Za-z0-9]+)/.exec(tail)?.[0];
-      const end = braced?.end ?? after + (unbraced?.length ?? 0);
+      // Only lexer whitespace may precede the TeX superscript token.
+      const whitespace = texMode ? /^[ \t\r\n]*/ : /^\s*/;
+      const start = after + whitespace.exec(tail)![0].length;
+      const exponent = body.slice(start);
+      let end: number | null;
+      if (exponent.startsWith("{")) {
+        end = argumentGroupEnd(body, start);
+        argumentGroups.add(start);
+      } else if (texMode) {
+        if (!/^[A-Za-z0-9](?![A-Za-z0-9.])/.test(exponent)) return null;
+        end = start + 1;
+      } else {
+        if (/^(?:[+\-−]|\d*\.)/.test(exponent)) return null;
+        const group = /^(?:[A-Za-z]+\s*)?\(/.exec(exponent);
+        end = group
+          ? argumentGroupEnd(body, start + group[0].length - 1)
+          : start + (/^[A-Za-z0-9]+/.exec(exponent)?.[0].length ?? 0);
+      }
+      if (end === null) return null;
       if (/^(?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\^/.test(body.slice(end))) return null;
     } else if (token === "\\sqrt" || /^\\[dt]?frac$/.test(token)) {
       const first = bracedArgument(body, after);

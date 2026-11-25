@@ -220,6 +220,37 @@ describe("symbolic Markdown boundaries", () => {
     expect(check("Evaluate $sqrt(4)$", numeric, "2", expression)).toBe("unparseable");
   });
 
+  it.each([
+    ["2^.0", "1"], ["2^2.", "4"], ["2^2.5", "4"],
+    ["2^\\,3", "8"], ["2^~3", "8"], ["2^\\,{3}", "8"],
+    ["2^~{3}", "8"], ["2^\u00a0{3}", "8"], ["2^(+2)", "4"],
+    ["2^[2]", "4"], ["2^|2|", "4"], ["2^+2", "4"], ["2^12", "4096"], ["2^\\alpha", "2"],
+  ])("rejects ambiguous TeX superscripts in %s", (expression, result) => {
+    expect(check("Evaluate $" + expression + "$", numeric, result, result)).toBeNull();
+    expect(verifyStandaloneProofEquationClaim("$" + expression + " = " + result + "$").status).toBe("unverified");
+  });
+
+  it.each([
+    ["2^.0", "1"], ["2^0.0", "1"], ["2^0.5", "1"], ["2^.0^2", "1"],
+    ["2^(+2)^3", "256"], ["2^(.0)^2", "1"], ["2^(1+1)^3", "256"], ["2^sqrt(4)^3", "256"],
+  ])("rejects ambiguous plain-text exponent notation in %s", (expression, result) => {
+    expect(check("Evaluate " + expression, numeric, result, result)).toBeNull();
+    expect(check("Evaluate $sqrt(4)$", numeric, "2", expression)).toBe("unparseable");
+    expect(verifyStandaloneProofEquationClaim(expression + " = " + result).status).toBe("unverified");
+  });
+
+  it.each([
+    ["$2^3$", "8"], ["$2^ {3}$", "8"], ["$2^{.0}$", "1"], ["$2^{2.0}$", "4"],
+    ["2^(.0)", "1"], ["2^12", "4096"], ["(2^2)^3", "64"], ["2^(1+1)", "4"],
+  ])("keeps supported exponent notation in %s", (expression, result) => {
+    expect(check("Evaluate " + expression, numeric, result, result)).toBe("correct");
+    expect(verifyStandaloneProofEquationClaim(expression + " = " + result).status).toBe("equivalent");
+  });
+
+  it("leaves a grouped noninteger exponent to the scalar engine", () => {
+    expect(check("Evaluate $2^{0.5}$", numeric, "1", "1")).toBeNull();
+  });
+
   it.each([["(+2)", "4"], ["(-2)", "1/4"]])("requires TeX braces around the exponent %s", (exponent, result) => {
     const unbraced = "2^" + exponent;
     const braced = "$2^{" + exponent + "}$";
