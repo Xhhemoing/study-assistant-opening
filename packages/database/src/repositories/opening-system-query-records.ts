@@ -3,7 +3,7 @@ import { openingAdaptivePrefsSchema, type Scope, type SystemQueryRequest } from 
 import type { OpeningSystemQueryDraft } from "./opening-system-query";
 import { cardReadable, notePublicationCardIds } from "./card-sources";
 
-import { contextSourceRefsIncluded, isVerifiedSnippetLineage, memoryOnlyRefSourceIds, noteContextSourceRefs, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
+import { isVerifiedSnippetLineage, memoryOnlyRefSourceIds, noteContextSourceRefsIncluded, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
 import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { readProjectedOpeningAdaptivePrefs } from "./opening-learning-goal-bridge";
@@ -89,7 +89,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       LEFT JOIN library_revisions origin ON origin.document_id=d.id AND origin.workspace_id=d.workspace_id AND origin.revision_number=1
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
         AND (np.document_id IS NULL OR (np.workspace_id=${scope.workspaceId}
-          AND ${contextSourceRefsIncluded(tx, scope.workspaceId, () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)}))
+          AND ${noteContextSourceRefsIncluded(tx, scope.workspaceId, () => tx`np.context_source_refs`, false)}))
         ${after ? tx`AND (d.updated_at < ${String(after.cursor_updated_at)}::timestamptz
           OR (d.updated_at = ${String(after.cursor_updated_at)}::timestamptz AND d.id > ${String(after.id)}::uuid))` : tx``}
       ORDER BY d.updated_at DESC,d.id LIMIT ${batchSize}`,
@@ -120,7 +120,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
             WHERE np.workspace_id=${scope.workspaceId} AND np.context_source_refs IS NOT NULL
               AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
           ) np
-          CROSS JOIN LATERAL (${notePublicationCardIds(tx, () => tx`np.context_source_refs`)}) AS pub(card_id)
+          CROSS JOIN LATERAL ${notePublicationCardIds(tx, () => tx`np.context_source_refs`)} AS pub(card_id)
         ),
         card_doc_links AS MATERIALIZED (
           SELECT DISTINCT c.id AS card_id, linked.id AS document_id
@@ -142,8 +142,8 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
         admitted_docs AS MATERIALIZED (
           SELECT doc.document_id,
             d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
-              (np.workspace_id=${scope.workspaceId} AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
-                () => noteContextSourceRefs(tx, () => tx`np.context_source_refs`), false)})) AS admitted,
+              (np.workspace_id=${scope.workspaceId} AND ${noteContextSourceRefsIncluded(tx, scope.workspaceId,
+                () => tx`np.context_source_refs`, false)})) AS admitted,
             np.context_source_refs, np.document_id IS NOT NULL AS has_note_provenance,
             CASE WHEN origin.document_id IS NOT NULL THEN origin.reason IS NOT DISTINCT FROM 'save-opening-snippet' END AS snippet_origin
           FROM (SELECT DISTINCT document_id FROM card_doc_links) doc

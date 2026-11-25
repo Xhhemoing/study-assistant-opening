@@ -5,7 +5,7 @@ import { notePublicationMetadata } from "@aistudy/domain";
 import type { OpeningScope } from "./opening-sources";
 import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
 import { contextSourceRefsIncluded, isVerifiedSnippetLineage, memoryOnlyRefSourceIds, mergeContextProvenanceRefs,
-  noteContextSourceRefs, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs, parseContextProvenanceRefs, type ContextProvenanceRef } from "./opening-context-provenance";
+  noteContextSourceRefsIncluded, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs, parseContextProvenanceRefs, type ContextProvenanceRef } from "./opening-context-provenance";
 
 type ResolvedHistory = ContextProvenanceRef[] & { readonly verifiedLineage?: true; readonly originTurnIds?: string[] };
 type CredentialInput = { requestId: string; privacyEpoch: number; verifiedLineage?: false; originTurnIds?: string[] };
@@ -61,7 +61,7 @@ export function createOpeningEphemeralProvenanceRepository(sql: Sql): EphemeralP
         WHERE p.id=ANY(${ids}::uuid[]) AND p.workspace_id=${scope.workspaceId}
           AND p.owner_user_id=${scope.ownerUserId} AND w.owner_user_id=${scope.ownerUserId}
           AND p.privacy_epoch=${epoch} AND w.privacy_epoch=${epoch}
-          AND ${contextSourceRefsIncluded(sql, scope.workspaceId, () => noteContextSourceRefs(sql, () => sql`p.context_source_refs`))}`;
+          AND ${noteContextSourceRefsIncluded(sql, scope.workspaceId, () => sql`p.context_source_refs`)}`;
       if (rows.length !== ids.length) return null;
       const groups: ContextProvenanceRef[][] = [];
       let verified = true;

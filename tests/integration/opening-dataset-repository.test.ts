@@ -527,7 +527,12 @@ describe("synthetic deidentified dataset repository", () => {
       const final = await page(next.nextOffset!);
       expect(final).toMatchObject({ status: "partial", reason: "truncated", nextOffset: null, data: [expect.any(Object)] });
       expect(final.data).not.toEqual(next.data);
-    } finally { await fixture.close(); }
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM courses WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
   }, 30_000);
 
   it.each(["notes", "cards", "historical cards", "automatic cards"] as const)("carries %s memory lineage through the actual ephemeral query producer", async kind => {
@@ -690,7 +695,11 @@ describe("synthetic deidentified dataset repository", () => {
       const dataset = await datasets.read(scope);
       expect(dataset.coursePackageQuality).toHaveLength(1);
       expect(dataset.answerSequences).toHaveLength(1);
-    } finally { await fixture.close(); }
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
   }, 30_000);
 
   it("fails closed on malformed publicationCardIds shapes in cardLinkedToNotePublication and excludes root-null publication cards in backup", async () => {
@@ -762,7 +771,12 @@ describe("synthetic deidentified dataset repository", () => {
         VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},'Private exam',${doc.id},1,'{"extras":{"kind":"course_exam"}}')`;
       const backup = await readOpeningBackupRecords(sql, scope);
       expect(backup.tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
-    } finally { await fixture.close(); }
+    } finally {
+      await fixture.sql`DELETE FROM opening_note_provenance WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM opening_teaching_units WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.sql`DELETE FROM cards WHERE workspace_id IN (${fixture.scope.workspaceId}, ${fixture.otherScope.workspaceId})`;
+      await fixture.close();
+    }
   }, 30_000);
 });
 async function grantOther() { await repo.grantConsent(f.otherScope,{policyVersion:OPENING_DATASET_POLICY_VERSION,consented:true,expiresAt:new Date(Date.now() + 3600000).toISOString()}); }

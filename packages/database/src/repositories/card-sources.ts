@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { CardRepositoryError } from "./cards-types";
-import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourceRefs } from "./opening-context-provenance";
+import { noteContextSourceRefsIncluded, parseNoteContextSourceRefs } from "./opening-context-provenance";
 
 type Db = Sql | TransactionSql;
 /** Identity-based lineage remains private after source exclusion/deletion, including historical text. */
@@ -11,17 +11,16 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)
   )`;
 }
-const LAX_ARRAY_UNWRAP_32 = `lax $${"[*]".repeat(33)}`;
 /** Extract normalized publication card IDs from any depth without recursive CTE planner fanout. */
 export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
-  return db`SELECT DISTINCT lower(btrim(linked.id)) AS card_id
+  return db`(SELECT DISTINCT lower(btrim(linked.id)) AS card_id
     FROM (SELECT ${refs()} AS val) AS root
     CROSS JOIN LATERAL unnest(ARRAY(
       SELECT jsonb_array_elements(
         CASE WHEN root.val IS NOT NULL AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
           THEN jsonb_path_query_array(
             jsonb_path_query_array(jsonb_build_array(root.val), 'strict $.**.publicationCardIds', '{}'::jsonb, true),
-            ${LAX_ARRAY_UNWRAP_32}::jsonpath
+            'lax $[*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*][*]'::jsonpath
           )
           ELSE '[]'::jsonb
         END
@@ -35,14 +34,14 @@ export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
     ) AS linked(id)
     WHERE root.val IS NOT NULL
       AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
-      AND linked.id IS NOT NULL AND btrim(linked.id)<>''`;
+      AND linked.id IS NOT NULL AND btrim(linked.id)<>'')`;
 }
 
 /** Historical publication links survive reassignment of the card or its teaching spec. */
 export function cardLinkedToNotePublication(db: Db) {
   return db`(COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
     AND EXISTS (
-      SELECT 1 FROM (${notePublicationCardIds(db, () => db`np.context_source_refs`)}) AS pub(card_id)
+      SELECT 1 FROM ${notePublicationCardIds(db, () => db`np.context_source_refs`)} AS pub(card_id)
       WHERE pub.card_id=c.id::text
     ))`;
 }
@@ -51,7 +50,7 @@ export function cardReadable(db: Db, workspaceId: string) {
   return db`${cardSourcesIncluded(db, workspaceId, db`c.source_ids`)}
     AND (c.source_document_id IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=c.source_document_id AND d.workspace_id=${workspaceId}))
     AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=c.source_document_id
-      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})))
+      AND (np.workspace_id<>${workspaceId} OR NOT (${noteContextSourceRefsIncluded(db, workspaceId, () => db`np.context_source_refs`, true)})))
     AND NOT COALESCE(c.id::text = ANY(ARRAY(
       SELECT pub.card_id
       FROM (
@@ -61,9 +60,9 @@ export function cardReadable(db: Db, workspaceId: string) {
           AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
       ) np
       LEFT JOIN library_documents d ON d.id=np.document_id AND d.workspace_id=np.workspace_id
-      CROSS JOIN LATERAL (${notePublicationCardIds(db, () => db`np.context_source_refs`)}) AS pub(card_id)
+      CROSS JOIN LATERAL ${notePublicationCardIds(db, () => db`np.context_source_refs`)} AS pub(card_id)
       WHERE np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
-        OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})
+        OR NOT (${noteContextSourceRefsIncluded(db, workspaceId, () => db`np.context_source_refs`, true)})
     )), false)`;
 }
 

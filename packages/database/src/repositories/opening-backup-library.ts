@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { notePublicationMetadata } from "@aistudy/domain";
-import { contextSourceRefsIncluded, isMemoryDependencyMetadata, noteContextSourceRefs, parseContextMemoryDependencyIds } from "./opening-context-provenance";
+import { isMemoryDependencyMetadata, noteContextSourceRefsIncluded, parseContextMemoryDependencyIds } from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
@@ -285,7 +285,7 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
       d.created_at,d.updated_at,d.deleted_at FROM library_documents d
     WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${excludedDocuments}::uuid[]))
       AND NOT EXISTS (SELECT 1 FROM opening_note_provenance p WHERE p.document_id=d.id AND
-        (p.workspace_id<>d.workspace_id OR NOT (${contextSourceRefsIncluded(tx, workspace, () => noteContextSourceRefs(tx, () => tx`p.context_source_refs`), true)})))
+        (p.workspace_id<>d.workspace_id OR NOT (${noteContextSourceRefsIncluded(tx, workspace, () => tx`p.context_source_refs`, true)})))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_units u WHERE u.document_id=d.id
         AND NOT (u.id=ANY(${tables.opening_teaching_units.map(row => String(row.id))}::uuid[])))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_activity_specs spec WHERE spec.document_id=d.id

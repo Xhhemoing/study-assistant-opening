@@ -57,7 +57,7 @@ export function createOpeningDatasetRepository(sql: Sql) {
                 WHERE np.workspace_id<>${workspace} AND np.context_source_refs IS NOT NULL
                   AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
               ) np
-              CROSS JOIN LATERAL (${notePublicationCardIds(tx, () => tx`np.context_source_refs`)}) AS pub(card_id)
+              CROSS JOIN LATERAL ${notePublicationCardIds(tx, () => tx`np.context_source_refs`)} AS pub(card_id)
             )), false)`;
         const memories = await tx`SELECT id, workspace_id, course_id, kind, status, source_turn_ids, expires_at, updated_at
           FROM opening_memories WHERE workspace_id=${workspace}`;
