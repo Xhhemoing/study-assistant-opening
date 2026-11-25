@@ -87,7 +87,7 @@ describe("bounded resumable PDF parser", () => {
     const d = setup(2);
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v55-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v56-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -4259,5 +4259,39 @@ describe("bounded resumable PDF parser", () => {
     const closingMs = performance.now() - t1;
     expect(closingMs).toBeLessThan(50);
     expect(closingState.mode).toBe("none");
+  });
+
+  it("enforces the 200,020 per-page text limit in Unicode code points across Worker and cache validation", async () => {
+    const supplementary200k = "a".repeat(199_979) + "𝕏".repeat(21);
+    const truncatedSupplementary = "𝕏".repeat(200_000) + "\n…[truncated]";
+    expect(supplementary200k.length).toBe(200_021);
+    expect(truncatedSupplementary.length).toBe(400_013);
+
+    const d = setup(2);
+    d.input.runner = async argv => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          pages: [
+            { page: 1, text: supplementary200k, imagePath: null },
+            { page: 2, text: truncatedSupplementary, imagePath: null },
+          ],
+        }),
+      };
+    };
+    const pages = await collectPdfSegments(d.input);
+    expect(pages.map(p => p.text)).toEqual([supplementary200k, truncatedSupplementary]);
+    // Second read validates from segment cache via validatePdfSegmentPages without re-invoking Docling.
+    const cachedPages = await collectPdfSegments(d.input);
+    expect(cachedPages.map(p => p.text)).toEqual([supplementary200k, truncatedSupplementary]);
+
+    for (const overLimit of ["x".repeat(200_021), "𝕏".repeat(200_021), "a".repeat(100_000) + "𝕏".repeat(100_021)]) {
+      const bad = setup(1);
+      bad.input.runner = async argv => argv.includes("--inspect-pdf")
+        ? { exitCode: 0, stdout: '{"pageCount":1}' }
+        : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 1, text: overLimit, imagePath: null }] }) };
+      await expect(collectPdfSegments(bad.input)).rejects.toBeInstanceOf(BoundsExceededError);
+    }
   });
 });

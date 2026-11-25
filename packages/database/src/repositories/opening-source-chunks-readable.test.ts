@@ -247,6 +247,20 @@ describe("page-less archived PDF chunks", () => {
     [`${example}\n## Introduction ##   \nSolution:\nYes.`, false],
     [`${example}\n ## ## \nSolution:\nYes.`, true],
     [`${example}\n ## \nSolution:\nYes.`, true],
+    [`${example}\n${stem}\n## ##\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n## ****\nSolution:\nYes.`, false],
+    [`${example}\n${stem}\n##\nSolution:\nYes.`, true],
+    ["Solutions\n## ##\n1. The result is 42.", false],
+    ["Solutions\n## ****\n1. The result is 42.", false],
+    ["Solutions\n## __\n1. The result is 42.", false],
+    ["[图片描述] ## ##\nSolutions\n1. The result is 42.", false],
+    ["[图片描述] Solutions\n## ##\n1. The result is 42.", false],
+    ["[图片描述] ## Answers ##", false],
+    ["Solutions\n##\n1. Propositions.", true],
+    ["Solutions\nAlgebra | 第2张\n1. The result is 42.", false],
+    ["Solutions\n第2张（共5页）\n1. The result is 42.", false],
+    ["Solutions\n1/3张\n1. The result is 42.", false],
+    ["Solutions\n共5页第2页\n1. The result is 42.", false],
   ])("checks local answer context in %j", (text, isPublic) => {
     expect(isPublicSourceChunk({ mime: "application/pdf", page: null, text })).toBe(isPublic);
   });
@@ -254,12 +268,20 @@ describe("page-less archived PDF chunks", () => {
   it("normalizes closing ATX hashes on long whitespace and hash-space lines in O(N) time (< 50 ms)", () => {
     expect(containsPdfAnswerLabel("## Answers ##   ")).toBe(true);
     expect(containsPdfAnswerLabel("## Answer#")).toBe(false);
+    expect(containsPdfAnswerLabel("Solutions\n## ##\n1. The result is 42.")).toBe(true);
+    expect(containsPdfAnswerLabel("Solutions\n##\n1. Propositions.")).toBe(false);
+    expect(containsPdfAnswerLabel("Solutions\nAlgebra | 第2张\n1. The result is 42.")).toBe(true);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answers ##   " })).toBe(false);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answer#" })).toBe(true);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "Solutions\n## ##\n1. The result is 42." })).toBe(false);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "Solutions\nAlgebra | 第2张\n1. The result is 42." })).toBe(false);
 
     const longSpaces = "## " + " ".repeat(25_000) + "prose";
     const longHashSpaces = "## " + "# ".repeat(25_000) + "prose";
     const longClosingAnswer = "## Answers" + " ".repeat(25_000) + "##   ";
+    const longStarPage = "** ".repeat(25_000) + "Page 42";
+    const longUnderSheet = "__ ".repeat(25_000) + "第2张";
+    const longStarTitled = "** ".repeat(25_000) + "a".repeat(200) + "| Page 42";
 
     const t0 = performance.now();
     expect(containsPdfAnswerLabel(longSpaces)).toBe(false);
@@ -275,6 +297,12 @@ describe("page-less archived PDF chunks", () => {
     expect(containsPdfAnswerLabel(longClosingAnswer)).toBe(true);
     expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: longClosingAnswer })).toBe(false);
     expect(performance.now() - t2).toBeLessThan(50);
+
+    const t3 = performance.now();
+    expect(containsPdfAnswerLabel(`Solutions\n${longStarPage}\n1. The result is 42.`)).toBe(true);
+    expect(containsPdfAnswerLabel(`Solutions\n${longUnderSheet}\n1. The result is 42.`)).toBe(true);
+    expect(containsPdfAnswerLabel(longStarTitled)).toBe(false);
+    expect(performance.now() - t3).toBeLessThan(50);
   });
 });
 

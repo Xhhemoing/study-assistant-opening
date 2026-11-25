@@ -55,3 +55,20 @@ it("preserves whether a confirmed publication seal followed public text", () => 
   }
   expect(() => validatePdfSegmentPages([{ ...marker, publicationSealHadPublicPrefix: "true" }], 4, 4)).toThrow();
 });
+
+it("measures page text bounds in Unicode code points rather than UTF-16 code units", () => {
+  const supplementaryMath = "a".repeat(199_979) + "𝕏".repeat(21);
+  expect(supplementaryMath.length).toBe(200_021);
+  expect([...supplementaryMath].length).toBe(200_000);
+  const page = { page: 1, text: supplementaryMath, imagePath: null };
+  expect(validatePdfSegmentPages([page], 1, 1)).toEqual([page]);
+
+  const truncatedAllSupplementary = "𝕏".repeat(200_000) + "\n…[truncated]";
+  expect(truncatedAllSupplementary.length).toBe(400_013);
+  expect([...truncatedAllSupplementary].length).toBe(200_013);
+  const truncatedPage = { page: 1, text: truncatedAllSupplementary, imagePath: null };
+  expect(validatePdfSegmentPages([truncatedPage], 1, 1)).toEqual([truncatedPage]);
+
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x".repeat(200_021), imagePath: null }], 1, 1)).toThrow(TypeError);
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "𝕏".repeat(200_021), imagePath: null }], 1, 1)).toThrow(TypeError);
+});

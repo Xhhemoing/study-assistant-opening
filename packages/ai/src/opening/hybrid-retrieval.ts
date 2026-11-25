@@ -138,7 +138,10 @@ function scanMathSpans(text: string): MathSpan[] {
   const parenStack: number[] = [];
   const envStack: Array<{ name: string; start: number }> = [];
   const envCounts = new Map<string, number>();
+  const displayEnvStack: Array<{ name: string; start: number }> = [];
+  const displayEnvCounts = new Map<string, number>();
   let displayDollarStart: number | null = null;
+  let displaySpanBaseline = 0;
   let inlineDollarStart: number | null = null;
   const commentEnds = new Int32Array(text.length);
   const displayCloseFrom = new Uint8Array(text.length + 1);
@@ -221,6 +224,38 @@ function scanMathSpans(text: string): MathSpan[] {
               continue;
             }
           }
+        } else {
+          if (next === "b") {
+            BEGIN_ENV_RE.lastIndex = i;
+            const match = BEGIN_ENV_RE.exec(text);
+            if (match) {
+              const name = match[1]!;
+              displayEnvStack.push({ name, start: i });
+              displayEnvCounts.set(name, (displayEnvCounts.get(name) ?? 0) + 1);
+              i = BEGIN_ENV_RE.lastIndex;
+              continue;
+            }
+          }
+          if (next === "e") {
+            END_ENV_RE.lastIndex = i;
+            const match = END_ENV_RE.exec(text);
+            if (match) {
+              const target = match[1]!;
+              if ((displayEnvCounts.get(target) ?? 0) > 0) {
+                for (let idx = displayEnvStack.length - 1; idx >= 0; idx--) {
+                  const entry = displayEnvStack[idx]!;
+                  displayEnvCounts.set(entry.name, (displayEnvCounts.get(entry.name) ?? 1) - 1);
+                  if (entry.name === target) {
+                    displayEnvStack.length = idx;
+                    spans.push({ start: entry.start, end: END_ENV_RE.lastIndex });
+                    break;
+                  }
+                }
+              }
+              i = END_ENV_RE.lastIndex;
+              continue;
+            }
+          }
         }
         i += 1;
         continue;
@@ -236,6 +271,8 @@ function scanMathSpans(text: string): MathSpan[] {
         if (ch === "$" && text[i + 1] === "$") {
           spans.push({ start: displayDollarStart, end: i + 2 });
           displayDollarStart = null;
+          displayEnvStack.length = 0;
+          displayEnvCounts.clear();
           i += 2;
           continue;
         }
@@ -260,6 +297,9 @@ function scanMathSpans(text: string): MathSpan[] {
             inlineDollarStart = null;
           }
           displayDollarStart = i;
+          displayEnvStack.length = 0;
+          displayEnvCounts.clear();
+          displaySpanBaseline = spans.length;
           i += 2;
           continue;
         }
@@ -289,10 +329,13 @@ function scanMathSpans(text: string): MathSpan[] {
 
   scanRange(0, text.length);
   if (displayDollarStart !== null) {
-    // At most one unclosed $$ can exist (near EOF); re-scan its suffix for inline/env spans.
+    // At most one unclosed $$ can exist (near EOF); discard its provisional inner spans and re-scan its suffix.
     const suffixStart = displayDollarStart + 2;
+    spans.length = displaySpanBaseline;
     displayDollarStart = null;
     inlineDollarStart = null;
+    displayEnvStack.length = 0;
+    displayEnvCounts.clear();
     bracketStack.length = 0;
     parenStack.length = 0;
     envStack.length = 0;

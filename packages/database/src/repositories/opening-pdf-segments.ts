@@ -29,12 +29,35 @@ function validateIdentity(input: PdfSegmentIdentity) {
     || input.parserProfile.length < 1 || input.parserProfile.length > 200
     || input.parserProfile.includes(failureProfileSuffix)) throw new TypeError("invalid PDF segment identity");
 }
+const MAX_PDF_SEGMENT_PAGE_CODE_POINTS = 200_020;
+const MAX_PDF_SEGMENT_PAGE_UTF8_BYTES = 1024 * 1024;
+
+function exceedsCodePointLimit(text: string, maxCodePoints: number): boolean {
+  if (text.length <= maxCodePoints) return false;
+  if (text.length > maxCodePoints * 2) return true;
+  let codePoints = 0;
+  for (let i = 0; i < text.length;) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const trail = text.charCodeAt(i + 1);
+      i += trail >= 0xdc00 && trail <= 0xdfff ? 2 : 1;
+    } else {
+      i += 1;
+    }
+    if (++codePoints > maxCodePoints) return true;
+  }
+  return false;
+}
+
 export function validatePdfSegmentPages(value: unknown, start: number, end: number): PdfSegmentPage[] {
   if (!Array.isArray(value) || value.length !== end - start + 1) throw new TypeError("incomplete PDF segment");
   return value.map((page: unknown, index) => {
     if (!page || typeof page !== "object") throw new TypeError("invalid PDF segment page");
     const row = page as Record<string, unknown>;
-    if (row.page !== start + index || typeof row.text !== "string" || row.text.length > 200_020 || row.imagePath !== null) throw new TypeError("invalid PDF segment page");
+    if (row.page !== start + index || typeof row.text !== "string"
+      || exceedsCodePointLimit(row.text, MAX_PDF_SEGMENT_PAGE_CODE_POINTS)
+      || Buffer.byteLength(row.text, "utf8") > MAX_PDF_SEGMENT_PAGE_UTF8_BYTES
+      || row.imagePath !== null) throw new TypeError("invalid PDF segment page");
     if (row.visualKinds !== undefined && (!Array.isArray(row.visualKinds) || row.visualKinds.length > 4
       || row.visualKinds.some(kind => !["scan", "formula", "table", "picture"].includes(String(kind)))
       || new Set(row.visualKinds).size !== row.visualKinds.length)) throw new TypeError("invalid PDF visual classification");

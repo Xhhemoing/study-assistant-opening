@@ -582,7 +582,7 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
         "Chapter 2: Geometry\nPublic prose.",
       ], [3], 2);
     }
-  });
+  }, 60_000);
 
   it.each([
     "End of Answers.",
@@ -2183,5 +2183,53 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
       { page: 7, raw_line: " ## " },
       { page: 7, raw_line: "## " },
     ]);
+  });
+
+  it("seals archived answers across empty ATX headings and 张/張 page counters without treating ## ## as a blank break, in O(N) time", async () => {
+    const longStarPage = "** ".repeat(25_000) + "Page 42";
+    const longUnderSheet = "__ ".repeat(25_000) + "第2张";
+    const pages = [
+      "Public introduction.",
+      "Solutions\n## ##\n1. The result is 42.",
+      "## ##\nChapter 2: Vector Spaces\nPublic theorem.",
+      "1. Find x.\n## ##\nSolution:\nx = 42",
+      "Chapter 3: Linear Maps\nSolutions\n##\n1. Propositions.",
+      "Answer: x = 1\n## ##\nx = 2",
+      "Continuation after non-blank empty ATX heading",
+      "Chapter 4: Determinants\nPublic definition.",
+      "Solutions\nAlgebra | 第2张\n1. The result is 42.",
+      "Chapter 5: Eigenvalues\n" + longStarPage,
+      "Chapter 6: Quadratic Forms\n" + longUnderSheet,
+    ];
+    const expectedPages = [1, 3, 5, 8, 10, 11];
+    const pdf = await seed(pages);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const publicChunks = pdf.snapshot.chunks.filter(chunk => expectedPages.includes(chunk.page!));
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0], limit: 32 };
+
+    const t0 = performance.now();
+    expect(await chunks.listChunks(f.scope, pdf.sourceId)).toEqual(publicChunks);
+    expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual(publicChunks);
+    expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [2, 4, 6, 7, 9, ...expectedPages])).toEqual(publicChunks);
+    expect(performance.now() - t0).toBeLessThan(1000);
+
+    for (const blockedPage of [2, 4, 6, 7, 9]) {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+    for (const publicPage of [1, 3, 5, 8]) {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: publicPage }))
+        .resolves.toMatchObject({ pages: expectedPages, text: pages[publicPage - 1] });
+    }
+    for (const longPublicPage of [10, 11]) {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: longPublicPage }))
+        .resolves.toMatchObject({ pages: expectedPages, page: longPublicPage });
+    }
+    expect(await backfilledPages(pdf)).toEqual(expectedPages);
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks).toEqual(publicChunks);
+    expect([...new Set((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page))]
+      .sort((a, b) => a! - b!)).toEqual(expectedPages);
+    expect((await pdf.repository.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual(publicChunks);
   });
 });

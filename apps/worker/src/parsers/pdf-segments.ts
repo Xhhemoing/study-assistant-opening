@@ -69,6 +69,23 @@ function parseInspectOutput(stdout: string): { pageCount?: unknown } {
   return JSON.parse(start < 0 ? stdout : stdout.slice(start)) as { pageCount?: unknown };
 }
 
+function exceedsCodePointLimit(text: string, maxCodePoints: number): boolean {
+  if (text.length <= maxCodePoints) return false;
+  if (text.length > maxCodePoints * 2) return true;
+  let codePoints = 0;
+  for (let i = 0; i < text.length;) {
+    const code = text.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+      const trail = text.charCodeAt(i + 1);
+      i += trail >= 0xdc00 && trail <= 0xdfff ? 2 : 1;
+    } else {
+      i += 1;
+    }
+    if (++codePoints > maxCodePoints) return true;
+  }
+  return false;
+}
+
 function validatePositiveBound(value: number | undefined, fallback: number, min: number, max: number, label: string): number {
   const resolved = value ?? fallback;
   if (!Number.isInteger(resolved) || resolved < min || resolved > max) throw new RangeError(`invalid ${label}`);
@@ -147,8 +164,9 @@ export async function parsePdfSegments(input: {
         if (!rawPage || typeof rawPage !== "object") continue;
         const row = rawPage as Record<string, unknown>;
         if (typeof row.text !== "string") continue;
-        if (row.text.length > MAX_PDF_PAGE_TEXT_LENGTH) {
-          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds text length limit (${row.text.length} > ${MAX_PDF_PAGE_TEXT_LENGTH})`);
+        if (exceedsCodePointLimit(row.text, MAX_PDF_PAGE_TEXT_LENGTH)) {
+          const codePoints = [...row.text].length;
+          throw new BoundsExceededError(`PDF page ${String(row.page ?? "?")} exceeds text length limit (${codePoints} > ${MAX_PDF_PAGE_TEXT_LENGTH})`);
         }
         const pageBytes = Buffer.byteLength(row.text, "utf8");
         if (pageBytes > maxPageTextBytes) {

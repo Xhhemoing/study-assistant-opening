@@ -144,6 +144,7 @@ const answerProofStar = String.raw`\*(?=[^ *\r\n])(?:(?:Proof|Sketch +of +Proof)
 const answerProofUnder = String.raw`_(?=[^ _\r\n])(?:(?:Proof|Sketch +of +Proof)(?=_|\M)|【 *(?:证明|证|略证|续证) *】|(?:证明|略证|续证)(?=[ _\d:：.．。—–(（-]|$)|证 *[:：.．。])(?:(?:${underEmphasisInterior})*[^ _\r\n])?_(?!_)${singleEmphasisAfter}`;
 const answerProofHeading = String.raw`${lineStart}(?:${answerProofCore}|${answerProofStar}|${answerProofUnder})`;
 const explicitHeadingMarkup = String.raw`^ *#{1,6} +[^ ]`;
+const emptyAtxHeading = String.raw`^ *(?:#{1,6}(?: +|$))+$`;
 
 const jsWorkedExample = new RegExp(workedExampleHeading, "iu");
 const jsEnglishExample = new RegExp(asJsPattern(englishExamplePrefix), "iu");
@@ -170,6 +171,7 @@ const jsBackMatter = new RegExp(backMatterLine, "iu");
 const jsBlockedReopening = new RegExp(blockedReopeningHeading.replaceAll(String.raw`\m`, String.raw`\b`).replaceAll(String.raw`\M`, String.raw`\b`), "iu");
 const jsExerciseHeading = new RegExp(exerciseHeading.replace(String.raw`\M`, String.raw`\b`), "iu");
 const jsExplicitHeading = new RegExp(explicitHeadingMarkup, "u");
+const jsEmptyAtxHeading = new RegExp(emptyAtxHeading, "u");
 const jsProofHeading = new RegExp(asJsPattern(answerProofHeading), "iu");
 
 function asJsPattern(pattern: string): string {
@@ -201,21 +203,24 @@ function stripArchiveClosingAtxHashes(line: string): string {
 
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
   const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ");
-  const primary: { rawLine: string; line: string }[] = [];
+  const primary: { atx: boolean; line: string }[] = [];
   const blocks = [primary];
   let block = primary;
   for (const splitLine of normalized.split("\n")) {
-    const rawLine = stripArchiveClosingAtxHashes(splitLine);
-    let line = rawLine.replace(/\*\*|__/gu, "");
+    const rawAuxHeader = jsVisionAuxiliary.exec(splitLine);
+    const postAuxRaw = rawAuxHeader ? splitLine.slice(rawAuxHeader[0].length) : splitLine;
+    const atx = jsExplicitHeading.test(postAuxRaw);
+    const strippedRaw = stripArchiveClosingAtxHashes(postAuxRaw);
+    let line = (rawAuxHeader ? splitLine.slice(0, rawAuxHeader[0].length) + strippedRaw : strippedRaw).replace(/\*\*|__/gu, "");
     const auxiliaryHeader = jsVisionAuxiliary.exec(line);
     if (auxiliaryHeader) {
       block = [];
       blocks.push(block);
       line = line.slice(auxiliaryHeader[0].length);
     } else if (jsVisionTranscription.test(line)) block = primary;
-    if (jsPdfLeadingTextWrappers.test(line) || !line.trim()) continue;
+    if (jsPdfLeadingTextWrappers.test(line) || !line.trim() || (atx && jsEmptyAtxHeading.test(line))) continue;
     if (answerLabel.test(line) || jsQualifiedSolution.test(line) || jsAnswerPeriod.test(line)) return true;
-    if (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)) block.push({ rawLine, line });
+    if (!isArchiveRunningHeading(line) || jsStandaloneAssessmentItem.test(line)) block.push({ atx, line });
   }
   if (blocks.some(lines => lines.some(({ line }, index) => jsAssessmentSolutionsHeading.test(line)
     && jsAssessmentSolutionsContext.test(lines[index + 1]?.line ?? "")))) return true;
@@ -223,7 +228,7 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
   let inWorkedExample = false;
   for (const lines of blocks) {
     let previousNumberedQuestion = false;
-    for (const { rawLine, line } of lines) {
+    for (const { atx, line } of lines) {
       const followsNumberedQuestion = previousNumberedQuestion;
       previousNumberedQuestion = jsNumberedQuestion.test(line);
       if (explanationLabel.test(line) || jsEnglishSolutionLabel.test(line) || jsSolutionPeriod.test(line)) {
@@ -231,7 +236,6 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
         continue;
       }
       if (lines !== primary || jsProofHeading.test(line)) continue;
-      const atx = jsExplicitHeading.test(rawLine);
       const englishExample = jsEnglishExample.exec(line);
       const chineseExample = jsChineseExample.exec(line);
       if (jsWorkedExample.test(line)
@@ -265,22 +269,22 @@ export function containsPdfAnswerLabel(text: string, { checkContext = true } = {
 
 const pageNumberRatio = String.raw`\d+ *(?:of +|[/／–—-] *)\d+`;
 const chinesePageNumber = String.raw`[\d一二三四五六七八九十百千零〇]+`;
-const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁]`;
+const chinesePage = String.raw`(?:第 *)?${chinesePageNumber} *[页頁张張]`;
 const chinesePageTotal = String.raw`共 *${chinesePageNumber} *[页頁]`;
-const chineseCounter = String.raw`(?:${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal} +${chinesePage}|(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *${chinesePage})`;
+const chineseCounter = String.raw`(?:(?:(?:第 *)?${chinesePageNumber} *(?:[/／–—-]|共) *)?${chinesePage}(?: *[（(] *${chinesePageTotal} *[）)]| *[/／,，] *${chinesePageTotal})?|${chinesePageTotal}(?: *第 *${chinesePageNumber} *[页頁张張]| +${chinesePageNumber} *[页頁张張]))`;
 const romanCounter = "[ivxlcdm]{1,8}";
 const counter = String.raw`(?:\d+(?:\.\d+)*|${romanCounter})`;
 const shortFurniturePrefix = String.raw`(?:(?:chapter|section|part|unit|lecture|lesson|module) +(?:\d+(?:\.\d+)*|${romanCounter})|第 *${chinesePageNumber} *(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])) *[|:：—–-] *`;
 const furnitureSeparator = String.raw`(?: *[|｜—–] *| +- +)`;
 const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|[。！；!]|(?:见|参见)第 *\d+ *页`;
-const pageCounter = String.raw`(?:[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
+const pageCounter = String.raw`(?:(?:[(（\[【] *)?(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
 const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
-const titledPageCounterSuffix = String.raw`(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
-const titledPageCounter = String.raw`${lineStart}(?!#{1,6} +#)([^|｜—–]{1,96}?)${titledPageCounterSuffix}`;
+const titledPageCounterSuffix = String.raw`(?:[|｜—–] *| - +|[:：] +)${pageCounter} *$`;
+const titledPageCounter = String.raw`${lineStart}(?!#{1,6} +#)([^ |｜—–][^|｜—–]{0,95}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
 const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
 const ocrPlaceholder = String.raw`${lineStart}[\[【(（] *(?:illegible|unreadable|blank|unclear|ocr|no +(?:readable +)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[ \]】)）：:]|$)`;
 const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
-const bareAnswerCounter = String.raw`${lineStart}(?:[(（\[【]? *(?:${counter}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|${romanCounter}) *[-–—]) *[.。．、]? *$`;
+const bareAnswerCounter = String.raw`${lineStart}(?:(?:[(（\[【] *)?(?:${counter}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|${romanCounter}) *[-–—]) *[.。．、]? *$`;
 const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter} *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
 const jsTitledPageCounterSuffix = new RegExp(titledPageCounterSuffix, "iu");
@@ -388,18 +392,18 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       (dotted_title IS NOT NULL AND (dotted_title ~ ${latinSectionTitle} AND dotted_title ~ '[A-Za-z]{2}'
         OR dotted_title ~ ${cjkSectionTitle} AND dotted_title !~ ${cjkSectionUnits})
         AND dotted_title !~ ${sectionProse} AND line !~* ${blockedReopeningHeading}) AS public_dotted,
-      (line ~* ${backMatterLine} OR (atx AND line ~* ${"^ *" + markdownTitle}
+      NOT empty_atx AND (line ~* ${backMatterLine} OR (atx AND line ~* ${"^ *" + markdownTitle}
         AND dotted_title IS NULL AND english_container IS NULL AND chinese_container IS NULL
         AND english_numbered IS NULL AND chinese_numbered IS NULL
         AND english_example IS NULL AND chinese_example IS NULL
         AND line !~* ${englishBlockPrefix} AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix}
         AND line !~ ${markdownProse}))
         AND line !~* ${blockedReopeningHeading} AS other_reopening,
-      (line ~* ${inlineRunningHeading} OR (furniture_title IS NOT NULL
+      NOT empty_atx AND (line ~* ${inlineRunningHeading} OR (furniture_title IS NOT NULL
         AND furniture_title !~ ${englishReferenceVerb} AND furniture_title !~* ${furnitureTitleProse})) AS running_heading
     FROM (
       SELECT *, coalesce(last_auxiliary>coalesce(last_transcription,0),false) AS auxiliary,
-        raw_line ~ ${explicitHeadingMarkup} AS atx,
+        atx AND unstarred_line ~ ${emptyAtxHeading} AS empty_atx,
         NULLIF(regexp_replace(line,${englishContainerPrefix},'','i'),line) AS english_container,
         NULLIF(regexp_replace(line,${chineseContainerPrefix},''),line) AS chinese_container,
         NULLIF(regexp_replace(line,${englishBlockReferencePrefix},'','i'),line) AS english_numbered,
@@ -409,42 +413,52 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         CASE WHEN line ~* ${titledPageCounterSuffix} THEN (regexp_match(line,${titledPageCounter},'i'))[1] END AS furniture_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
-        SELECT id,source_id,source_version,page,max_source_page,created_at,raw_line,line_number,
-          regexp_replace(unstarred_line,${visionAuxiliary},'') AS unstarred_line,
+        SELECT id,source_id,source_version,page,max_source_page,created_at,aux_stripped AS raw_line,line_number,atx,unstarred_line,
           CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0 THEN
             regexp_replace(regexp_replace(regexp_replace(
               aux_stripped,${pairedBoldEmphasis},${emphasisReplacement},'g'),
               ${pairedUnderEmphasis},${emphasisReplacement},'g'),
               ${pairedBoldEmphasis},${emphasisReplacement},'g')
           ELSE aux_stripped END AS line,
-          max(line_number) FILTER (WHERE unstarred_line ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
-          max(line_number) FILTER (WHERE unstarred_line ~ ${visionTranscription}) OVER vision_block AS last_transcription
+          max(line_number) FILTER (WHERE raw_unstarred ~ ${visionAuxiliary}) OVER vision_block AS last_auxiliary,
+          max(line_number) FILTER (WHERE raw_unstarred ~ ${visionTranscription}) OVER vision_block AS last_transcription
         FROM (
           SELECT *,
-            CASE WHEN position('**' in raw_line)>0 OR position('__' in raw_line)>0
-              THEN replace(replace(raw_line,'**',''),'__','') ELSE raw_line END AS unstarred_line,
-            regexp_replace(raw_line,${visionAuxiliary},'') AS aux_stripped
+            CASE WHEN position('**' in raw_piece)>0 OR position('__' in raw_piece)>0
+              THEN replace(replace(raw_piece,'**',''),'__','') ELSE raw_piece END AS raw_unstarred,
+            CASE WHEN position('**' in aux_stripped)>0 OR position('__' in aux_stripped)>0
+              THEN regexp_replace(replace(replace(aux_stripped,'**',''),'__',''),${visionAuxiliary},'')
+              ELSE aux_stripped END AS unstarred_line
           FROM (
-            SELECT id,source_id,source_version,page,max_source_page,created_at,line_number,
+            SELECT id,source_id,source_version,page,max_source_page,created_at,line_number,raw_piece,
+              left(lead_trimmed,1)='#'
+                AND length(lead_trimmed)-length(after_open_hashes)<=6
+                AND left(after_open_hashes,1)=' '
+                AND ltrim(after_open_hashes,' ')<>'' AS atx,
               CASE
                 WHEN left(lead_trimmed,1)='#'
                   AND right(trail_trimmed,1)='#'
                   AND length(lead_trimmed)-length(after_open_hashes)<=6
                   AND left(after_open_hashes,1)=' '
                   AND right(without_close_hashes,1)=' '
-                  AND length(without_close_hashes)>length(raw_piece)-length(after_open_hashes)
+                  AND length(without_close_hashes)>length(aux_piece)-length(after_open_hashes)
                 THEN rtrim(without_close_hashes,' ')
-                ELSE raw_piece
-              END AS raw_line
+                ELSE aux_piece
+              END AS aux_stripped
             FROM (
               SELECT *,ltrim(lead_trimmed,'#') AS after_open_hashes,rtrim(trail_trimmed,'#') AS without_close_hashes
               FROM (
-                SELECT *,ltrim(raw_piece,' ') AS lead_trimmed,rtrim(raw_piece,' ') AS trail_trimmed
+                SELECT *,ltrim(aux_piece,' ') AS lead_trimmed,rtrim(aux_piece,' ') AS trail_trimmed
                 FROM (
-                  SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_piece,
-                    generate_subscripts(lines,1) AS line_number
-                  FROM pdf_archive_text
-                ) unnested_lines
+                  SELECT *,
+                    CASE WHEN position('[' in raw_piece)>0 OR position('【' in raw_piece)>0
+                      THEN regexp_replace(raw_piece,${visionAuxiliary},'') ELSE raw_piece END AS aux_piece
+                  FROM (
+                    SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_piece,
+                      generate_subscripts(lines,1) AS line_number
+                    FROM pdf_archive_text
+                  ) unnested_lines
+                ) aux_lines
               ) trimmed_lines
             ) atx_bounds
           ) raw_lines
@@ -453,17 +467,17 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       ) normalized_lines
     ) heading_suffixes
   ), pdf_archive_lines AS (
-    SELECT id,source_id,source_version,page,max_source_page,raw_line,line,atx,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
+    SELECT id,source_id,source_version,page,max_source_page,raw_line,line,atx,empty_atx,running_heading,auxiliary,last_transcription IS NOT NULL AND NOT auxiliary AS transcription,
       row_number() OVER (PARTITION BY source_id,source_version ORDER BY page,created_at,id,line_number) AS position,
-      NOT wrapper AND line ~* ${exerciseHeading} AS opens_exercise,
-      NOT wrapper AND public_example AND NOT running_heading AS opens_worked_example,
+      NOT wrapper AND NOT empty_atx AND line ~* ${exerciseHeading} AS opens_exercise,
+      NOT wrapper AND NOT empty_atx AND public_example AND NOT running_heading AS opens_worked_example,
       (line ~* ${inlinePublicHeading} OR public_example
         OR public_numbered OR public_container OR public_dotted OR other_reopening)
-        AND NOT wrapper AND NOT running_heading AND line !~* ${answerProofHeading} AND NOT qualified_solution
+        AND NOT wrapper AND NOT empty_atx AND NOT running_heading AND line !~* ${answerProofHeading} AND NOT qualified_solution
         AND unstarred_line !~* ${answerLabelLine} AND line !~* ${explanationLabelLine} AS opens_public,
       (other_reopening OR public_dotted OR public_example OR public_numbered OR line ~* ${inlinePublicHeading}
         OR public_container AND (line ~* ${appendixHeading} OR COALESCE(english_container,chinese_container) !~ ${bareContainerSuffix}))
-        AND NOT wrapper AND NOT running_heading AND line !~* ${answerProofHeading}
+        AND NOT wrapper AND NOT empty_atx AND NOT running_heading AND line !~* ${answerProofHeading}
         AND line !~* ${captionPrefix} AND line !~ ${chineseCaptionPrefix} AS reopens_section,
        (unstarred_line ~* ${sectionAnswerLine} OR assessment_solutions) AS opens_section,
        (unstarred_line ~* ${answerLabelLine} OR qualified_solution OR period_answer OR assessment_solutions) AS unconditional_answer,
@@ -485,7 +499,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       FROM (
          SELECT *, CASE WHEN auxiliary THEN id END AS auxiliary_chunk,
            CASE WHEN auxiliary THEN last_auxiliary END AS auxiliary_block,
-           line !~* ${pdfLeadingTextWrappers} AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
+           line !~* ${pdfLeadingTextWrappers} AND NOT empty_atx AND (NOT running_heading OR line ~ ${standaloneAssessmentItem})
           AND btrim(line)<>'' AS content_line
         FROM (
           SELECT *, auxiliary OR line ~* ${pdfLeadingTextWrappers} AS wrapper
@@ -520,7 +534,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
       CASE WHEN inline_opener AND qualified_solution THEN btrim(regexp_replace(line,${qualifiedSolutionLabel},'','i'))
         WHEN inline_opener AND period_inline THEN btrim(regexp_replace(line,${exerciseInlineAnswerPeriod},''))
         WHEN inline_opener THEN btrim(regexp_replace(line,${exerciseInlineAnswer},'','i'))
-        WHEN running_heading OR line ~* ${pdfLeadingTextWrappers} THEN ''
+        WHEN empty_atx OR running_heading OR line ~* ${pdfLeadingTextWrappers} THEN ''
         WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END AS candidate_body,
       -- Carry each provisional section opener on its numbered predecessor so the
       -- seal windows can check the predecessor before the opener changes groups.
@@ -620,7 +634,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
                 > COALESCE(max(position) FILTER (WHERE candidate_terminator) OVER answer_body,0) AS open_auxiliary_proof,
               CASE WHEN NOT auxiliary AND inline_opener THEN
                 string_agg(btrim(regexp_replace(
-                  CASE WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END,
+                  CASE WHEN empty_atx THEN '' WHEN atx THEN btrim(regexp_replace(line,${lineStart},'')) ELSE btrim(line) END,
                   ' +',' ','g')),chr(10))
                   FILTER (WHERE answer_content) OVER answer_sequence END AS answer_lines,
               max(position) FILTER (WHERE answer_content) OVER answer_sequence AS answer_end_position,
@@ -852,7 +866,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
     FROM (
       SELECT source_id,source_version,page,position,section_answer,
         inline_opener OR unconditional_answer OR sealed_explanation AS answer_label,section_terminator,
-        CASE WHEN NOT wrapper AND btrim(line)<>'' AND NOT running_heading THEN reopens_section END AS reopens_section
+        CASE WHEN NOT wrapper AND NOT empty_atx AND btrim(line)<>'' AND NOT running_heading THEN reopens_section END AS reopens_section
       FROM pdf_archive_line_events
       UNION ALL
       SELECT source_id,source_version,numbered_section_page,numbered_section_position,true,true,false,NULL::boolean

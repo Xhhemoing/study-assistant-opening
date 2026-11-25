@@ -416,4 +416,43 @@ describe("material hybrid retrieval", () => {
     const currencyProse = "a".repeat(5998) + "$5 and $6 in cash";
     expect(segmentMaterialChunks([chunk("currency-prose", currencyProse)], 6000)[0]?.chunk.text.length).toBe(6000);
   });
+
+  it("keeps nested LaTeX environments intact when an enclosing $$...$$ display exceeds 8,192 bytes", () => {
+    const alignedBlock = "\\begin{aligned}\n" + "x_i + y_i &= z_i \\\\\n".repeat(24) + "\\end{aligned}";
+    expect(Buffer.byteLength(alignedBlock, "utf8")).toBeGreaterThan(450);
+    expect(Buffer.byteLength(alignedBlock, "utf8")).toBeLessThan(8192);
+    const displayLead = "$$" + "a + ".repeat(1450);
+    expect(Buffer.byteLength(displayLead, "utf8")).toBe(5802);
+    const displayTail = " + b".repeat(800) + "$$";
+    const oversizedDisplay = displayLead + alignedBlock + displayTail;
+    expect(Buffer.byteLength(oversizedDisplay, "utf8")).toBeGreaterThan(9000);
+
+    const segments = segmentMaterialChunks([chunk("oversized-display-env", oversizedDisplay)], 6000);
+    const texts = segments.map(s => s.chunk.text);
+    expect(texts.join("")).toBe(oversizedDisplay);
+    expect(texts.every(part => Buffer.byteLength(part, "utf8") <= 6000)).toBe(true);
+    expect(texts.some(part => part.includes(alignedBlock))).toBe(true);
+  });
+
+  it("isolates unclosed \\begin{...} inside $$...$$ from \\end{...} outside $$...$$", () => {
+    const malformedPrefix = "$$ \\begin{aligned} x = 1 $$ ";
+    const strayEnd = "\\end{aligned} ";
+    const middleProse = "p".repeat(5995 - malformedPrefix.length - strayEnd.length);
+    const text = malformedPrefix + middleProse + strayEnd + "$a + b = c$ tail";
+
+    const segments = segmentMaterialChunks([chunk("malformed-display-env", text)], 6000);
+    const texts = segments.map(s => s.chunk.text);
+    expect(texts.join("")).toBe(text);
+    expect(texts).toEqual([
+      malformedPrefix + middleProse + strayEnd,
+      "$a + b = c$ tail",
+    ]);
+
+    // Also verify when \end{aligned} straddles the 6,000-byte boundary: if \begin{aligned}
+    // inside $$...$$ had leaked onto the outer stack, bytes 3..6007 (<= 8,192 B) would have
+    // forced an early cut before $$ instead of cutting normally at byte 6,000.
+    const straddling = malformedPrefix + "p".repeat(5995 - malformedPrefix.length) + "\\end{aligned} tail";
+    const straddlingSegments = segmentMaterialChunks([chunk("straddling-stray-end", straddling)], 6000);
+    expect(straddlingSegments[0]?.chunk.text.length).toBe(6000);
+  });
 });
