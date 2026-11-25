@@ -2,7 +2,7 @@ import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { OPENING_DATASET_POLICY_VERSION, type OpeningDatasetConsentInput, type OpeningDeidentifiedDataset } from "@aistudy/contracts";
 import { projectPrivacyGuardedOpeningDataset } from "@aistudy/domain/opening/deidentified-dataset";
-import { cardLinkedToNotePublication } from "./card-sources";
+import { notePublicationCardIds } from "./card-sources";
 import { readOpeningBackupTableRows } from "./opening-backup-record-table-queries";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import type { OpeningScope } from "./opening-sources";
@@ -51,8 +51,14 @@ export function createOpeningDatasetRepository(sql: Sql) {
         const workspace = scope.workspaceId;
         const cards = await tx`SELECT c.id, c.workspace_id, c.owner_user_id, c.source_ids, c.source_document_id, c.origin_observation_root_id
           FROM cards c WHERE c.workspace_id=${workspace} AND c.owner_user_id=${scope.ownerUserId}
-            AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np
-              WHERE np.workspace_id<>${workspace} AND ${cardLinkedToNotePublication(tx)})`;
+            AND NOT COALESCE(c.id::text = ANY(ARRAY(
+              SELECT pub.card_id FROM (
+                SELECT np.context_source_refs FROM opening_note_provenance np
+                WHERE np.workspace_id<>${workspace} AND np.context_source_refs IS NOT NULL
+                  AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+              ) np
+              CROSS JOIN LATERAL (${notePublicationCardIds(tx, () => tx`np.context_source_refs`)}) AS pub(card_id)
+            )), false)`;
         const memories = await tx`SELECT id, workspace_id, course_id, kind, status, source_turn_ids, expires_at, updated_at
           FROM opening_memories WHERE workspace_id=${workspace}`;
         const sources = await tx`SELECT id, workspace_id, upload_state FROM opening_sources WHERE workspace_id=${workspace}`;

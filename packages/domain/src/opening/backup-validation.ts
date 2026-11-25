@@ -493,6 +493,23 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
   return refs.map((id) => id.toLowerCase());
 }
 
+const noteMetadataKeys = new Set([
+  "publicationCardIds",
+  "answerKeyBlockIds",
+  "originTurnIds",
+  "snippetLineageVersion",
+  "memoryDependencyIds",
+]);
+
+export function containsDisallowedNoteMetadataOrArray(node: unknown): boolean {
+  if (Array.isArray(node)) return true;
+  if (!isRecord(node)) return false;
+  for (const [key, child] of Object.entries(node)) {
+    if (noteMetadataKeys.has(key) || containsDisallowedNoteMetadataOrArray(child)) return true;
+  }
+  return false;
+}
+
 export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
   if (!Array.isArray(row.context_source_refs)) return null;
   const refs: unknown[] = [];
@@ -500,6 +517,8 @@ export function noteProvenanceSourceReferences(row: Record<string, unknown>): st
     if (notePublicationMetadata(ref)) continue;
     if (isRecord(ref) && "memoryDependencyIds" in ref) {
       if (!turnMemoryDependencyMetadata(ref)) return null;
+    } else if (containsDisallowedNoteMetadataOrArray(ref)) {
+      return null;
     } else refs.push(ref);
   }
   return sourceReferences({ ...row, context_source_refs: refs });

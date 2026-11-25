@@ -1,7 +1,7 @@
 import type { TransactionSql } from "postgres";
 import { openingAdaptivePrefsSchema, type Scope, type SystemQueryRequest } from "@aistudy/contracts";
 import type { OpeningSystemQueryDraft } from "./opening-system-query";
-import { cardLinkedToNotePublication, cardReadable } from "./card-sources";
+import { cardReadable, notePublicationCardIds } from "./card-sources";
 
 import { contextSourceRefsIncluded, isVerifiedSnippetLineage, memoryOnlyRefSourceIds, noteContextSourceRefs, noteOriginTurnIds, openingSnippetOriginsAvailable, parseNoteContextProvenanceRefs } from "./opening-context-provenance";
 import { openingCredentialMemoriesAvailable } from "./opening-memory-admission";
@@ -112,7 +112,17 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
           : tx`AND (s.due_at IS NULL OR (s.due_at,c.id) > (${String(after.cursor_due_at)}::timestamptz,${String(after.id)}::uuid))`}
       ORDER BY s.due_at NULLS LAST,c.id LIMIT ${batchSize}`, async batch => {
       const batchIds = batch.map(row => String(row.id));
-      const documents = await tx`SELECT
+      const documents = await tx`WITH pub_links AS MATERIALIZED (
+          SELECT np.document_id, pub.card_id
+          FROM (
+            SELECT np.document_id, np.context_source_refs
+            FROM opening_note_provenance np
+            WHERE np.workspace_id=${scope.workspaceId} AND np.context_source_refs IS NOT NULL
+              AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+          ) np
+          CROSS JOIN LATERAL (${notePublicationCardIds(tx, () => tx`np.context_source_refs`)}) AS pub(card_id)
+        )
+        SELECT
           c.id AS card_id, linked.id AS document_id,
           d.id IS NOT NULL AND d.deleted_at IS NULL AND (np.document_id IS NULL OR
             (np.workspace_id=c.workspace_id AND ${contextSourceRefsIncluded(tx, scope.workspaceId,
@@ -122,8 +132,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
         FROM cards c
         CROSS JOIN LATERAL (
           SELECT c.source_document_id AS id WHERE c.source_document_id IS NOT NULL
-          UNION SELECT np.document_id FROM opening_note_provenance np
-            WHERE np.workspace_id=c.workspace_id AND ${cardLinkedToNotePublication(tx)}
+          UNION SELECT pl.document_id FROM pub_links pl WHERE pl.card_id=c.id::text
           UNION SELECT linked.id FROM opening_learning_observations o
             LEFT JOIN opening_teaching_activity_specs spec ON spec.activity_id=o.activity_id AND spec.workspace_id=o.workspace_id
             LEFT JOIN opening_teaching_units unit ON unit.id=spec.teaching_unit_id AND unit.workspace_id=o.workspace_id

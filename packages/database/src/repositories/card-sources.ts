@@ -10,34 +10,48 @@ export function cardSourcesIncluded(db: Db, workspaceId: string, ids: ReturnType
       AND s.workspace_id=${workspaceId} AND s.upload_state='uploaded'
       AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspaceId} AND e.source_id=s.id)))`;
 }
+/** Extract normalized publication card IDs from any depth, fast-filtering rows without publicationCardIds. */
+export function notePublicationCardIds(db: Db, refs: () => ReturnType<Db>) {
+  return db`WITH RECURSIVE pub_walk(node, in_pub) AS (
+    SELECT root.val, false
+    FROM (SELECT ${refs()} AS val) AS root
+    WHERE root.val IS NOT NULL
+      AND COALESCE(jsonb_path_exists(root.val, '$.**.publicationCardIds'), false)
+    UNION ALL
+    SELECT child.val, child.next_in_pub
+    FROM pub_walk pw
+    CROSS JOIN LATERAL (
+      SELECT elem AS val, pw.in_pub AS next_in_pub
+      FROM jsonb_array_elements(
+        CASE WHEN jsonb_typeof(pw.node)='array' THEN pw.node ELSE '[]'::jsonb END
+      ) AS elem
+      WHERE pw.in_pub OR COALESCE(jsonb_path_exists(elem, '$.**.publicationCardIds'), false)
+      UNION ALL
+      SELECT kv.value AS val, (kv.key='publicationCardIds') AS next_in_pub
+      FROM jsonb_each(
+        CASE WHEN NOT pw.in_pub AND jsonb_typeof(pw.node)='object' THEN pw.node ELSE '{}'::jsonb END
+      ) AS kv(key, value)
+      WHERE kv.key='publicationCardIds' OR COALESCE(jsonb_path_exists(kv.value, '$.**.publicationCardIds'), false)
+    ) AS child
+  )
+  SELECT DISTINCT lower(btrim(linked.id)) AS card_id
+  FROM pub_walk pw
+  CROSS JOIN LATERAL (
+    VALUES
+      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='string' THEN pw.node #>> '{}' END),
+      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'id')='string' THEN pw.node->>'id' END),
+      (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'cardId')='string' THEN pw.node->>'cardId' END)
+  ) AS linked(id)
+  WHERE linked.id IS NOT NULL AND btrim(linked.id)<>''`;
+}
+
 /** Historical publication links survive reassignment of the card or its teaching spec. */
 export function cardLinkedToNotePublication(db: Db) {
-  return db`EXISTS (
-    WITH RECURSIVE pub_walk(node, in_pub) AS (
-      SELECT np.context_source_refs, false
-      WHERE np.context_source_refs IS NOT NULL
-      UNION ALL
-      SELECT child.val, child.next_in_pub
-      FROM pub_walk pw
-      CROSS JOIN LATERAL (
-        SELECT elem AS val, pw.in_pub AS next_in_pub
-        FROM jsonb_array_elements(
-          CASE WHEN jsonb_typeof(pw.node)='array' THEN pw.node ELSE '[]'::jsonb END
-        ) AS elem
-        UNION ALL
-        SELECT pw.node->'publicationCardIds', true
-        WHERE NOT pw.in_pub AND jsonb_typeof(pw.node)='object' AND pw.node ? 'publicationCardIds'
-      ) AS child
-    )
-    SELECT 1 FROM pub_walk pw
-    CROSS JOIN LATERAL (
-      VALUES
-        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='string' THEN pw.node #>> '{}' END),
-        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'id')='string' THEN pw.node->>'id' END),
-        (CASE WHEN pw.in_pub AND jsonb_typeof(pw.node)='object' AND jsonb_typeof(pw.node->'cardId')='string' THEN pw.node->>'cardId' END)
-    ) AS linked(id)
-    WHERE lower(btrim(linked.id))=c.id::text
-  )`;
+  return db`(COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+    AND EXISTS (
+      SELECT 1 FROM (${notePublicationCardIds(db, () => db`np.context_source_refs`)}) AS pub(card_id)
+      WHERE pub.card_id=c.id::text
+    ))`;
 }
 
 export function cardReadable(db: Db, workspaceId: string) {
@@ -45,12 +59,19 @@ export function cardReadable(db: Db, workspaceId: string) {
     AND (c.source_document_id IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=c.source_document_id AND d.workspace_id=${workspaceId}))
     AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=c.source_document_id
       AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})))
-    AND NOT EXISTS (
-      SELECT 1 FROM opening_note_provenance np
+    AND NOT COALESCE(c.id::text = ANY(ARRAY(
+      SELECT pub.card_id
+      FROM (
+        SELECT np.document_id, np.workspace_id, np.context_source_refs
+        FROM opening_note_provenance np
+        WHERE np.context_source_refs IS NOT NULL
+          AND COALESCE(jsonb_path_exists(np.context_source_refs, '$.**.publicationCardIds'), false)
+      ) np
       LEFT JOIN library_documents d ON d.id=np.document_id AND d.workspace_id=np.workspace_id
-      WHERE ${cardLinkedToNotePublication(db)} AND (np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
-        OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)}))
-    )`;
+      CROSS JOIN LATERAL (${notePublicationCardIds(db, () => db`np.context_source_refs`)}) AS pub(card_id)
+      WHERE np.workspace_id<>${workspaceId} OR d.id IS NULL OR d.deleted_at IS NOT NULL
+        OR NOT (${contextSourceRefsIncluded(db, workspaceId, () => noteContextSourceRefs(db, () => db`np.context_source_refs`), true)})
+    )), false)`;
 }
 
 export function withPublicationCardSourceIds(existing: unknown, publicationIds: Iterable<string>) {

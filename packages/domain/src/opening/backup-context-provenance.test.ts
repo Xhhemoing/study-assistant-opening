@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import {
+  projectOpeningBackupCardSources,
+  projectOpeningBackupProvenance,
+} from "../../../database/src/repositories/opening-backup-library";
 import { planOpeningRestoreApply } from "./backup-apply-plan";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
 import {
@@ -237,5 +241,87 @@ describe("context provenance at the backup boundary", () => {
     const deletedPreview = validateOpeningRestore(deletedBackup, [], deletedFacts);
     expect(deletedPreview.allowed).toBe(false);
     expect(deletedPreview.errors).toContain("table opening_turns references a deleted memory");
+  });
+
+  it.each([
+    {
+      name: "mixed source ref with scalar publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, publicationCardIds: candidateId }],
+    },
+    {
+      name: "mixed source ref with array publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "nested array publicationCardIds",
+      refs: [[{ publicationCardIds: [candidateId] }]],
+    },
+    {
+      name: "valid source ref alongside nested array publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1 }, [[{ publicationCardIds: [candidateId] }]]],
+    },
+    {
+      name: "nested object metadata under valid source ref",
+      refs: [{ sourceId, sourceVersion: 1, nested: { publicationCardIds: [candidateId] } }],
+    },
+    {
+      name: "mixed source ref with answerKeyBlockIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, answerKeyBlockIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with originTurnIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, originTurnIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with snippetLineageVersion alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, snippetLineageVersion: 1 }, { publicationCardIds: [candidateId] }],
+    },
+    {
+      name: "mixed source ref with memoryDependencyIds alongside publicationCardIds",
+      refs: [{ sourceId, sourceVersion: 1, memoryDependencyIds: [turnId] }, { publicationCardIds: [candidateId] }],
+    },
+  ])("fails closed on $name so linked root-null and observation cards are excluded from backup", ({ refs }) => {
+    const docId = "99999999-9999-4999-8999-999999999999";
+    const obsCardId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const keepCardId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const obsId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const activityId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const rootNullCard = {
+      id: candidateId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: null,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const observationCard = {
+      id: obsCardId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: obsId,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const cleanCard = {
+      id: keepCardId,
+      workspace_id: workspaceId,
+      origin_observation_root_id: null,
+      source_document_id: null,
+      source_ids: [],
+    };
+    const provenanceRow = {
+      document_id: docId,
+      workspace_id: workspaceId,
+      context_source_refs: refs,
+    };
+
+    expect(noteProvenanceSourceReferences(provenanceRow)).toBeNull();
+    expect(projectOpeningBackupCardSources({
+      cards: [rootNullCard, observationCard, cleanCard],
+      library_documents: [{ id: docId, deleted_at: null }],
+      opening_sources: [{ id: sourceId }],
+      opening_learning_observations: [{ id: obsId, activity_id: activityId }],
+      opening_teaching_activities: [{ id: activityId, source_ids: [sourceId] }],
+      opening_teaching_activity_specs: [{ activity_id: activityId, document_id: docId, source_refs: [] }],
+    }, [provenanceRow])).toEqual([cleanCard]);
+    expect(projectOpeningBackupProvenance([provenanceRow], new Set([candidateId, obsCardId]))).toEqual([provenanceRow]);
   });
 });

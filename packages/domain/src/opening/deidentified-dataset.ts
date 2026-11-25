@@ -1,7 +1,7 @@
 import type { OpeningDeidentifiedDataset } from "@aistudy/contracts";
 import { resolveCohortSurfacePolicy, type CohortSurfacePolicy, type CohortSurfacePolicyInput } from "../commercial-resilience";
 import type { CryptoShredTombstoneReceipt } from "../resilience-canary-shredding";
-import { canSupplyBackupMemory, isRecord, isUuid, notePublicationMetadata, turnMemoryDependencyIds, turnMemoryDependencyMetadata } from "./backup-validation";
+import { canSupplyBackupMemory, containsDisallowedNoteMetadataOrArray, isRecord, isUuid, notePublicationMetadata, turnMemoryDependencyIds, turnMemoryDependencyMetadata } from "./backup-validation";
 
 type Row = Record<string, unknown>;
 export type OpeningDatasetProjectionInput = {
@@ -105,14 +105,14 @@ function collectPublicationCardIds(node: unknown, inPub: boolean, out: Set<strin
     return;
   }
   if (!isRecord(node)) return;
-  if (!inPub && "publicationCardIds" in node) {
-    collectPublicationCardIds(node.publicationCardIds, true, out);
+  if (!inPub) {
+    for (const [key, child] of Object.entries(node)) {
+      collectPublicationCardIds(child, key === "publicationCardIds", out);
+    }
     return;
   }
-  if (inPub) {
-    for (const id of [node.id, node.cardId]) {
-      if (typeof id === "string") out.add(id);
-    }
+  for (const id of [node.id, node.cardId]) {
+    if (typeof id === "string") out.add(id);
   }
 }
 
@@ -343,7 +343,7 @@ export function projectPrivacyGuardedOpeningDataset(
         if (metadata?.originTurnIds) for (const id of metadata.originTurnIds) declaredOrigins.add(id);
         else if (metadata?.snippetLineageVersion === 1) verifiedSnippet = true;
         else if (!metadata) {
-          if (!validSourceRef(ref) || "publicationCardIds" in ref) exclude(document);
+          if (!validSourceRef(ref) || containsDisallowedNoteMetadataOrArray(ref)) exclude(document);
           else if (ref.memoryOnly === true) hasUnattributedMemory = true;
         }
       }

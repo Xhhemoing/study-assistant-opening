@@ -492,7 +492,7 @@ describe("synthetic deidentified dataset repository", () => {
   it.each(["notes", "cards", "courses"] as const)("keeps %s pagination inside the request offset limit", async name => {
     const fixture = await createOpeningFixture();
     try {
-      const { sql, scope } = fixture;
+      const { sql, scope, otherScope } = fixture;
       if (name === "notes") {
         await sql`WITH inserted AS (
             INSERT INTO library_documents(workspace_id,title,lifecycle)
@@ -502,6 +502,15 @@ describe("synthetic deidentified dataset repository", () => {
           INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,reason,blocks)
           SELECT ${scope.workspaceId}, id, 1, title, 'confirmed', 'create', '[]'::jsonb FROM inserted`;
       } else if (name === "cards") {
+        const bgSourceId = await insertSource(sql, otherScope);
+        await sql`WITH foreign_docs AS (
+            INSERT INTO library_documents(workspace_id,title,lifecycle)
+            SELECT ${otherScope.workspaceId}, 'Prior suite note ' || n, 'confirmed' FROM generate_series(1,250) n
+            RETURNING id
+          )
+          INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+          SELECT id, ${otherScope.workspaceId}, ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0 }])}::jsonb
+          FROM foreign_docs`;
         await sql`INSERT INTO cards(workspace_id,owner_user_id,front,back)
           SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n`;
       } else {
@@ -510,11 +519,13 @@ describe("synthetic deidentified dataset repository", () => {
       }
       const read = createScopedOpeningSystemQueryReader(sql, scope);
       const page = (offset: number) => read({ name, arguments: { offset, limit: 1 } }, new AbortController().signal);
+      const started = performance.now();
       const next = await page(999);
       expect(next).toMatchObject({ status: "partial", reason: "truncated", nextOffset: 1000, data: [expect.any(Object)] });
       const final = await page(next.nextOffset!);
       expect(final).toMatchObject({ status: "partial", reason: "truncated", nextOffset: null, data: [expect.any(Object)] });
       expect(final.data).not.toEqual(next.data);
+      if (name === "cards") expect(performance.now() - started).toBeLessThan(2000);
     } finally { await fixture.close(); }
   }, 30_000);
 
@@ -719,8 +730,10 @@ describe("synthetic deidentified dataset repository", () => {
         workspaceId: scope.workspaceId, title: "Publication note", lifecycle: "confirmed",
         blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Body" } }],
       });
+      const noteSourceId = await insertSource(sql, scope);
+      await backupRows(sql, scope).chunk(noteSourceId, 0);
       await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-        VALUES(${doc.id},${scope.workspaceId},${sql.json([{ publicationCardIds: [targetCard.id] }])})`;
+        VALUES(${doc.id},${scope.workspaceId},${sql.json([{ sourceId: noteSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [targetCard.id] }])})`;
 
       const read = createScopedOpeningSystemQueryReader(sql, scope);
       const queryCards = async () => (await read({ name: "cards", arguments: { limit: 10, offset: 0 } }, new AbortController().signal)).data.map(r => r.id);
@@ -732,14 +745,18 @@ describe("synthetic deidentified dataset repository", () => {
         [{ publicationCardIds: [targetCard.id, { bad: 1 }] }],
         [{ publicationCardIds: [{ id: targetCard.id }] }],
         [[{ publicationCardIds: targetCard.id }]],
+        [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: targetCard.id }],
+        [{ sourceId: noteSourceId, sourceVersion: 0, publicationCardIds: [targetCard.id] }],
+        [{ sourceId: noteSourceId, sourceVersion: 0, nested: [[{ publicationCardIds: [targetCard.id] }]] }],
       ]) {
         await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json(malformed)} WHERE document_id=${doc.id}`;
         expect(await queryCards()).toEqual([cleanCard.id]);
         await expect(cardRepo.getCard({ workspaceId: scope.workspaceId, cardId: targetCard.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+        expect((await readOpeningBackupRecords(sql, scope)).tables.cards.map(r => r.id)).toEqual([cleanCard.id]);
       }
 
       // Restore valid publicationCardIds, then mark doc as a private exam: root-null targetCard must be excluded from Opening backup!
-      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ publicationCardIds: [targetCard.id] }])} WHERE document_id=${doc.id}`;
+      await sql`UPDATE opening_note_provenance SET context_source_refs=${sql.json([{ sourceId: noteSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [targetCard.id] }])} WHERE document_id=${doc.id}`;
       await sql`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
         VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},'Private exam',${doc.id},1,'{"extras":{"kind":"course_exam"}}')`;
       const backup = await readOpeningBackupRecords(sql, scope);

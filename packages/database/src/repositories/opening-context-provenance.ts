@@ -117,12 +117,39 @@ export async function openingSnippetOriginsAvailable(db: Db, scope: OpeningScope
   return turns.length === origins.length && turns.some(turn => turn.role === "assistant");
 }
 
+const NOTE_METADATA_KEYS = new Set([
+  "publicationCardIds",
+  "answerKeyBlockIds",
+  "originTurnIds",
+  "snippetLineageVersion",
+  "memoryDependencyIds",
+]);
+
+function containsDisallowedNoteMetadataOrArray(node: unknown): boolean {
+  if (Array.isArray(node)) return true;
+  if (!node || typeof node !== "object") return false;
+  for (const [key, child] of Object.entries(node as Record<string, unknown>)) {
+    if (NOTE_METADATA_KEYS.has(key) || containsDisallowedNoteMetadataOrArray(child)) return true;
+  }
+  return false;
+}
+
+function hasValidNoteMetadataStructure(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.every(ref =>
+    notePublicationMetadata(ref) !== null
+    || isMemoryDependencyMetadata(ref)
+    || !containsDisallowedNoteMetadataOrArray(ref),
+  );
+}
+
 export function parseNoteContextProvenanceRefs(value: unknown): ContextProvenanceRef[] | null {
-  return parseContextProvenanceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
+  if (!hasValidNoteMetadataStructure(value)) return null;
+  return parseContextProvenanceRefs(value.filter(ref => !notePublicationMetadata(ref)));
 }
 
 export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
-  return parseContextSourceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
+  if (!hasValidNoteMetadataStructure(value)) return null;
+  return parseContextSourceRefs(value.filter(ref => !notePublicationMetadata(ref)));
 }
 
 /** Strip the exact note-only metadata shapes before applying source admission. */
@@ -173,6 +200,11 @@ export function contextSourceRefsIncluded(
         )
         AND (
           jsonb_typeof(provenance_ref) IS DISTINCT FROM 'object'
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.publicationCardIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.answerKeyBlockIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.originTurnIds'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.snippetLineageVersion'), false)
+          OR COALESCE(jsonb_path_exists(provenance_ref, '$.**.memoryDependencyIds'), false)
           OR jsonb_typeof(provenance_ref->'sourceId') IS DISTINCT FROM 'string'
           OR (provenance_ref->>'sourceId') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           OR (provenance_ref ? 'memoryOnly' AND jsonb_typeof(provenance_ref->'memoryOnly') IS DISTINCT FROM 'boolean')
