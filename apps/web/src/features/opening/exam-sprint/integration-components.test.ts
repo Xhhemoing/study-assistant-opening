@@ -45,6 +45,7 @@ describe("exam integration evidence presentation", () => {
   it("does not show a topic percentage without historical real papers", () => {
     const html = renderToStaticMarkup(createElement(ForecastResults, { overview, forecast }));
     expect(html).toContain("没有可用真卷");
+    expect(html).not.toContain("短模拟估分条件");
     expect(html).not.toMatch(/\d+%/);
   });
 
@@ -55,6 +56,18 @@ describe("exam integration evidence presentation", () => {
     expect(html).toContain("10%–90%");
     expect(html).toContain("不能保证下一次考试");
     expect(html).toContain("version=1");
+  });
+
+  it.each([
+    ["needs_personal_independent_evidence", "缺少已核对的独立作答记录"],
+    ["needs_external_calibration", "缺少独立的校准样本"],
+  ] as const)("shows the remaining short-mock condition for %s", (shortMockReadiness, reason) => {
+    const result = { ...forecast, shortMockReadiness };
+    const html = renderToStaticMarkup(createElement(ForecastResults, { overview, forecast: result }));
+    expect(html).toContain("短模拟估分条件");
+    expect(html).toContain(reason);
+    expect(html).toContain("尚无历史真卷");
+    expect(html).not.toMatch(/<a\s|<button|\d+%/);
   });
 
   it("keeps model probabilities out of the student view", () => {

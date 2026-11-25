@@ -1,4 +1,4 @@
-import { examRunConversionSchema, examErrorCauseSchema, examWorkReviewProposalSchema, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamWorkReview } from "@aistudy/contracts";
+import { examShortMockReadinessSchema, examRunConversionSchema, examErrorCauseSchema, examWorkReviewProposalSchema, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamWorkReview } from "@aistudy/contracts";
 import { z } from "zod";
 
 const runSchema = z.object({
@@ -81,6 +81,7 @@ export const forecastSchema: z.ZodType<ExamForecastOverview> = z.object({
   papers: z.array(z.object({ id: z.string(), courseId: z.string(), recordedAt: z.string(), sourceId: z.string(), sourceVersion: z.number(), teacher: z.string(), year: z.number(), label: z.string(), kind: z.enum(["past_exam", "sample", "exercise"]), skills: z.array(z.object({ skillId: z.string(), points: z.number() })) })),
   topics: z.array(z.object({ skillId: z.string(), examinedPapers: z.number(), totalPapers: z.number(), probability: z.number().nullable(), lower: z.number().nullable(), upper: z.number().nullable(), meanPoints: z.number().nullable() })),
   status: z.enum(["no_history", "limited_history", "history_based"]), message: z.string(),
+  shortMockReadiness: examShortMockReadinessSchema.optional(),
 });
 
 export const reviewSchema: z.ZodType<ExamWorkReview> = z.object({ id: z.string(), sourceItemId: z.string(), workSourceId: z.string(), workSourceVersion: z.number(), referenceSourceId: z.string(), referenceSourceVersion: z.number(), answerText: z.string(), createdAt: z.string(), status: z.enum(["pending", "ready", "unknown", "failed"]), proposal: examWorkReviewProposalSchema.nullable(), modelLabel: z.string().nullable() });

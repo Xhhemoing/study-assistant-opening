@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { ExamCourseBinding, ExamPack, ExamPaperInput, Scope } from "@aistudy/contracts";
+import type { ExamBindInput, ExamCourseBinding, ExamPack, ExamPaperInput, Scope } from "@aistudy/contracts";
 import { createExamSprintState } from "@aistudy/domain";
+import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
+import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
+import { readCurrentExamNodeIds } from "../../packages/database/src/repositories/opening-exam-integration-facts";
+import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
+import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
 import { createOpeningExamForecastRepository } from "../../packages/database/src/repositories/opening-exam-forecast";
+import { createOpeningKnowledgeRepository } from "../../packages/database/src/repositories/opening-knowledge";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 const pack: ExamPack = {
@@ -30,10 +36,18 @@ beforeEach(async () => {
 });
 afterAll(async () => {
   if (!f) return;
-  await f.sql`DELETE FROM opening_exam_sprints WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.sql`DELETE FROM opening_source_versions WHERE workspace_id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId},${f.otherScope.workspaceId})`;
-  await f.close();
+  const workspaces = [f.scope.workspaceId, f.otherScope.workspaceId];
+  try {
+    await f.sql.begin(async tx => {
+      await tx`DELETE FROM opening_exam_sprints WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM opening_learning_sessions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM opening_learning_item_versions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM opening_source_versions WHERE workspace_id=ANY(${workspaces}::uuid[])`;
+      await tx`DELETE FROM workspaces WHERE id=ANY(${workspaces}::uuid[])`;
+    });
+  } finally {
+    await f.close();
+  }
 });
 
 async function source(scope: Scope = f.scope) {
@@ -50,10 +64,53 @@ async function input(overrides: Partial<ExamPaperInput> = {}): Promise<ExamPaper
     skills: [{ skillId: "first", points: 12 }, { skillId: "second", points: 0 }], ...overrides };
 }
 
+async function completeMathMock(skills: ExamBindInput["skills"] = []) {
+  await f.sql`DELETE FROM opening_exam_sprints WHERE id=${sprintId}`;
+  const sprint = createOpeningExamSprintRepository(f.sql, EXAM_SPRINT_PACK);
+  const integration = createOpeningExamIntegrationRepository(f.sql, EXAM_SPRINT_PACK);
+  const forecast = createOpeningExamForecastRepository(f.sql, EXAM_SPRINT_PACK);
+  const bound = await integration.bind(f.scope, {
+    clientKey: randomUUID(), courseId, milestoneId: null, expectedPackVersion: EXAM_SPRINT_PACK.version,
+    createKnowledgeNodes: true, skills, materials: [],
+  });
+  const started = await sprint.act(f.scope, { action: "start", mode: "mock-a", clientKey: randomUUID() });
+  const attempt = started.currentAttempt!;
+  const question = EXAM_SPRINT_PACK.questions.find(item => item.id === attempt.questionId)!;
+  await sprint.act(f.scope, { action: "answer", attemptId: attempt.id, answer: question.answer, confidence: 4, clientKey: randomUUID() });
+  await sprint.act(f.scope, { action: "finish", runId: started.activeRun!.id, clientKey: randomUUID() });
+  return { binding: bound.binding!, examAttemptId: attempt.id, forecast, integration, skillId: question.skillId };
+}
+
+async function completeMathMockWithExternalNode() {
+  const material = await source(), nodeId = randomUUID();
+  const [chunk] = await f.sql`SELECT id FROM opening_source_chunks WHERE source_id=${material.sourceId}`;
+  await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+    VALUES(${f.scope.workspaceId},${courseId},'source',${material.sourceId},'reference','private')`;
+  await createOpeningKnowledgeRepository(f.sql).replace(f.scope, courseId, {
+    expectedVersion: 0, sourceVersions: { [material.sourceId]: material.sourceVersion },
+    snapshot: { courseId, version: 1, nodes: [{ id: nodeId, courseId, label: "Complex arithmetic", kind: "problem_type",
+      status: "supported", evidenceChunkIds: [String(chunk!.id)] }], edges: [] },
+  });
+
+  const { binding, examAttemptId, forecast, integration, skillId } = await completeMathMock([
+    { skillId: "complex-arithmetic", nodeId },
+  ]);
+  const formal = await integration.read(f.scope);
+  const link = formal.links.find(item => item.examAttemptId === examAttemptId)!;
+  expect(link).toMatchObject({ nodeId, publication: "published" });
+  expect(formal.bkt.eligible).toBe(1);
+  const paper = await input({ skills: [{ skillId, points: 10 }] });
+  const registered = await forecast.record(f.scope, paper);
+  expect(registered.shortMockReadiness).toBe("needs_external_calibration");
+  expect(registered.papers).toHaveLength(1);
+  return { binding, forecast, integration, link, nodeId, paper, registered };
+}
+
 describe("exam paper forecast repository", () => {
   it("registers owned current sources under the bound course and keeps teachers and sample kinds separate", async () => {
     const first = await input();
     const registered = await repository.record(f.scope, first);
+    expect(registered).not.toHaveProperty("shortMockReadiness");
     expect(registered.papers).toHaveLength(1);
     expect(registered.papers[0]).toMatchObject({ courseId, sourceId: first.sourceId, sourceVersion: 1, teacher: "Teacher A" });
     expect(registered.topics[0]).toMatchObject({ skillId: "first", examinedPapers: 1, totalPapers: 1, probability: 2 / 3, meanPoints: 12 });
@@ -82,6 +139,205 @@ describe("exam paper forecast repository", () => {
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
     expect(results.find(result => result.status === "rejected")).toMatchObject({ reason: { code: "CONFLICT" } });
     expect((await repository.read(f.scope, "Teacher A")).papers).toHaveLength(2);
+  });
+
+  it("reports readiness without creating a sprint only for the Math I short-mock pack", async () => {
+    const read = (initialPack: ExamPack) => createOpeningExamForecastRepository(f.sql, initialPack).read(f.otherScope);
+    expect((await read(EXAM_SPRINT_PACK)).shortMockReadiness).toBe("needs_personal_independent_evidence");
+    expect((await read({
+      ...EXAM_SPRINT_PACK, questions: EXAM_SPRINT_PACK.questions.filter(question => question.pool === "mock-b"),
+    })).shortMockReadiness).toBe("needs_personal_independent_evidence");
+    expect(await read({ ...EXAM_SPRINT_PACK, id: "another-pack" })).not.toHaveProperty("shortMockReadiness");
+    expect(await read({
+      ...EXAM_SPRINT_PACK, questions: EXAM_SPRINT_PACK.questions.filter(question => question.pool === "training"),
+    })).not.toHaveProperty("shortMockReadiness");
+    expect(await f.sql`SELECT id FROM opening_exam_sprints WHERE workspace_id=${f.otherScope.workspaceId}`).toEqual([]);
+    const supportedInitialPack = createOpeningExamForecastRepository(f.sql, EXAM_SPRINT_PACK);
+    expect(await supportedInitialPack.read(f.scope)).not.toHaveProperty("shortMockReadiness");
+  });
+
+  it("updates reads, new registrations and receipt replays using live formal short-mock evidence", async () => {
+    await f.sql`DELETE FROM opening_exam_sprints WHERE id=${sprintId}`;
+    const sprint = createOpeningExamSprintRepository(f.sql, EXAM_SPRINT_PACK);
+    const integration = createOpeningExamIntegrationRepository(f.sql, EXAM_SPRINT_PACK);
+    const forecast = createOpeningExamForecastRepository(f.sql, EXAM_SPRINT_PACK);
+    await integration.bind(f.scope, {
+      clientKey: randomUUID(), courseId, milestoneId: null, expectedPackVersion: EXAM_SPRINT_PACK.version,
+      createKnowledgeNodes: true, skills: [], materials: [],
+    });
+    const started = await sprint.act(f.scope, { action: "start", mode: "mock-a", clientKey: randomUUID() });
+    const attempt = started.currentAttempt!;
+    const question = EXAM_SPRINT_PACK.questions.find(item => item.id === attempt.questionId)!;
+    await sprint.act(f.scope, { action: "answer", attemptId: attempt.id, answer: question.answer, confidence: 4, clientKey: randomUUID() });
+
+    const paper = await input({ skills: [{ skillId: question.skillId, points: 10 }] });
+    const waiting = await forecast.record(f.scope, paper);
+    expect(waiting.shortMockReadiness).toBe("needs_personal_independent_evidence");
+    expect(waiting.papers).toHaveLength(1);
+    expect(await forecast.read(f.scope, paper.teacher)).toEqual(waiting);
+    expect(await forecast.record(f.scope, paper)).toEqual(waiting);
+
+    await sprint.act(f.scope, { action: "finish", runId: started.activeRun!.id, clientKey: randomUUID() });
+    const formal = await integration.read(f.scope);
+    expect(formal.bkt.eligible).toBe(1);
+    const link = formal.links.find(item => item.examAttemptId === attempt.id)!;
+    expect(link.publication).toBe("published");
+    const observationId = link.observationId!;
+    const needsCalibration = await forecast.read(f.scope, paper.teacher);
+    expect(needsCalibration).toEqual({ ...waiting, shortMockReadiness: "needs_external_calibration" });
+    expect(await forecast.record(f.scope, paper)).toEqual(needsCalibration);
+    const freshPaper = await input({ skills: paper.skills });
+    const afterFresh = await forecast.record(f.scope, freshPaper);
+    expect(afterFresh.shortMockReadiness).toBe("needs_external_calibration");
+    expect(afterFresh.papers).toHaveLength(2);
+    expect(await forecast.read(f.scope, "No matching teacher")).toMatchObject({
+      papers: [], shortMockReadiness: "needs_external_calibration",
+    });
+    expect((await forecast.read(f.otherScope)).shortMockReadiness).toBe("needs_personal_independent_evidence");
+
+    await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: observationId, revisesObservationId: observationId, expectedHead: observationId,
+      clientKey: randomUUID(), reason: "Retract the captured answer", revisionKind: "retract",
+    });
+    expect((await integration.read(f.scope)).bkt.eligible).toBe(0);
+    const invalidated = await forecast.read(f.scope, paper.teacher);
+    expect(invalidated).toEqual({ ...afterFresh, shortMockReadiness: "needs_personal_independent_evidence" });
+    expect(await forecast.record(f.scope, paper)).toEqual(invalidated);
+  });
+
+  it("requires a formal fact and qualifies an independent B-form skill after an externally assisted answer", async () => {
+    await f.sql`DELETE FROM opening_exam_sprints WHERE id=${sprintId}`;
+    const sprint = createOpeningExamSprintRepository(f.sql, EXAM_SPRINT_PACK);
+    const integration = createOpeningExamIntegrationRepository(f.sql, EXAM_SPRINT_PACK);
+    const forecast = createOpeningExamForecastRepository(f.sql, EXAM_SPRINT_PACK);
+
+    const unbound = await sprint.act(f.scope, { action: "start", mode: "mock-a", clientKey: randomUUID() });
+    const first = unbound.currentAttempt!;
+    const firstQuestion = EXAM_SPRINT_PACK.questions.find(item => item.id === first.questionId)!;
+    await sprint.act(f.scope, { action: "answer", attemptId: first.id, answer: firstQuestion.answer, confidence: 4, clientKey: randomUUID() });
+    await sprint.act(f.scope, { action: "finish", runId: unbound.activeRun!.id, clientKey: randomUUID() });
+    expect((await forecast.read(f.scope)).shortMockReadiness).toBe("needs_personal_independent_evidence");
+    await integration.bind(f.scope, {
+      clientKey: randomUUID(), courseId, milestoneId: null, expectedPackVersion: EXAM_SPRINT_PACK.version,
+      createKnowledgeNodes: true, skills: [], materials: [],
+    });
+
+    const bound = await sprint.act(f.scope, { action: "start", mode: "mock-b", clientKey: randomUUID() });
+    const assisted = bound.currentAttempt!;
+    const assistedQuestion = EXAM_SPRINT_PACK.questions.find(item => item.id === assisted.questionId)!;
+    await sprint.act(f.scope, { action: "help", attemptId: assisted.id, kind: "external", clientKey: randomUUID() });
+    await sprint.act(f.scope, { action: "answer", attemptId: assisted.id, answer: assistedQuestion.answer, confidence: 4, clientKey: randomUUID() });
+    const next = await sprint.act(f.scope, { action: "next", runId: bound.activeRun!.id, clientKey: randomUUID() });
+    const independent = next.currentAttempt!;
+    const independentQuestion = EXAM_SPRINT_PACK.questions.find(item => item.id === independent.questionId)!;
+    expect(independentQuestion.skillId).toBe("complex-roots");
+    await sprint.act(f.scope, { action: "answer", attemptId: independent.id, answer: independentQuestion.answer, confidence: 4, clientKey: randomUUID() });
+    await sprint.act(f.scope, { action: "finish", runId: bound.activeRun!.id, clientKey: randomUUID() });
+
+    const formal = await integration.read(f.scope);
+    expect(formal.bkt.eligible).toBe(1);
+    const observationId = formal.links.find(link => link.examAttemptId === independent.id)!.observationId!;
+    expect((await forecast.read(f.scope)).shortMockReadiness).toBe("needs_external_calibration");
+    await reviseOpeningLearningObservation(f.sql, f.scope, {
+      rootObservationId: observationId, revisesObservationId: observationId, expectedHead: observationId,
+      clientKey: randomUUID(), reason: "Retract the independent answer", revisionKind: "retract",
+    });
+    expect((await forecast.read(f.scope)).shortMockReadiness).toBe("needs_personal_independent_evidence");
+  });
+
+  it("returns the legacy empty history and withdraws short-mock readiness after course archive", async () => {
+    const { forecast, skillId } = await completeMathMock();
+    const paper = await input({ skills: [{ skillId, points: 10 }] });
+    const registered = await forecast.record(f.scope, paper);
+    expect(registered).toMatchObject({ status: "limited_history", shortMockReadiness: "needs_external_calibration" });
+    expect(registered.papers).toHaveLength(1);
+    const emptyHistory = await forecast.read(f.scope, "Unregistered teacher");
+    expect(emptyHistory).toMatchObject({ status: "no_history", papers: [] });
+
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseId} AND workspace_id=${f.scope.workspaceId}`;
+    await expect(forecast.record(f.scope, await input({ skills: paper.skills }))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(forecast.record(f.scope, paper)).rejects.toMatchObject({ code: "NOT_FOUND", examReceiptCommitted: true });
+    expect(await forecast.read(f.scope, paper.teacher)).toEqual({
+      ...emptyHistory, teacher: paper.teacher, shortMockReadiness: "needs_personal_independent_evidence",
+    });
+  });
+
+  it("withdraws readiness across reads and registrations when only the captured pack source is unlinked", async () => {
+    const { binding, forecast, integration, link, nodeId, paper, registered } = await completeMathMockWithExternalNode();
+    const removed = await f.sql`DELETE FROM course_asset_memberships
+      WHERE workspace_id=${f.scope.workspaceId} AND course_id=${courseId}
+        AND asset_type='source' AND asset_id=${binding.packSourceId} RETURNING asset_id`;
+    expect(removed).toEqual([{ asset_id: binding.packSourceId }]);
+    expect((await readCurrentExamNodeIds(f.sql, f.scope, binding)).has(nodeId)).toBe(true);
+    const afterUnlink = await integration.read(f.scope);
+    expect(afterUnlink.bkt.eligible).toBe(1);
+    expect(afterUnlink.links).toContainEqual(link);
+    expect(await f.sql`SELECT o.source_ids,o.source_versions,s.version,v.availability FROM opening_learning_observations o
+      JOIN opening_sources s ON s.workspace_id=o.workspace_id AND s.id=${binding.packSourceId}
+      JOIN opening_source_versions v ON v.workspace_id=s.workspace_id AND v.source_id=s.id AND v.version=s.version
+      WHERE o.id=${link.observationId!} AND o.workspace_id=${f.scope.workspaceId} AND o.owner_user_id=${f.scope.ownerUserId}`)
+      .toMatchObject([{ source_ids: [binding.packSourceId], source_versions: { [binding.packSourceId]: 0 },
+        version: 0, availability: "available" }]);
+
+    const read = await forecast.read(f.scope, paper.teacher);
+    const replay = await forecast.record(f.scope, paper);
+    const another = await input({ skills: paper.skills });
+    const fresh = await forecast.record(f.scope, another);
+    expect(read.papers).toEqual(registered.papers);
+    expect(replay).toEqual(read);
+    expect(fresh.papers.map(item => item.sourceId)).toEqual([paper.sourceId, another.sourceId]);
+    expect({ read: read.shortMockReadiness, replay: replay.shortMockReadiness, fresh: fresh.shortMockReadiness }).toEqual({
+      read: "needs_personal_independent_evidence", replay: "needs_personal_independent_evidence",
+      fresh: "needs_personal_independent_evidence",
+    });
+  });
+
+  it.each(["parsing", "version availability"] as const)("rechecks captured pack %s for reads and registrations without another learner attempt", async dependency => {
+    const { binding, forecast, integration, link, nodeId, paper, registered } = await completeMathMockWithExternalNode();
+    const [current, blocked] = dependency === "parsing" ? ["ready", "failed"] : ["available", "unknown"];
+    const changePackState = (before: string, after: string) => dependency === "parsing"
+      ? f.sql`UPDATE opening_sources SET parse_state=${after}
+          WHERE workspace_id=${f.scope.workspaceId} AND id=${binding.packSourceId} AND parse_state=${before}
+          RETURNING version,parse_state AS state`
+      : f.sql`UPDATE opening_source_versions SET availability=${after}
+          WHERE workspace_id=${f.scope.workspaceId} AND source_id=${binding.packSourceId}
+            AND version=0 AND availability=${before}
+          RETURNING version,availability AS state`;
+    expect(await changePackState(current, blocked)).toEqual([{ version: 0, state: blocked }]);
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE workspace_id=${f.scope.workspaceId}
+      AND course_id=${courseId} AND asset_type='source' AND asset_id=${binding.packSourceId}`)
+      .toEqual([{ asset_id: binding.packSourceId }]);
+    expect((await readCurrentExamNodeIds(f.sql, f.scope, binding)).has(nodeId)).toBe(true);
+    const formal = await integration.read(f.scope);
+    expect(formal.bkt.eligible).toBe(1);
+    expect(formal.links).toContainEqual(link);
+
+    const another = await input({ skills: paper.skills });
+    const failed = {
+      read: await forecast.read(f.scope, paper.teacher),
+      replay: await forecast.record(f.scope, paper),
+      fresh: await forecast.record(f.scope, another),
+    };
+    const missingEvidence = "needs_personal_independent_evidence";
+    expect(failed.read.papers).toEqual(registered.papers);
+    expect(failed.fresh.papers.map(item => item.sourceId)).toEqual([paper.sourceId, another.sourceId]);
+    expect(failed).toMatchObject({
+      read: { shortMockReadiness: missingEvidence },
+      replay: { shortMockReadiness: missingEvidence },
+      fresh: { shortMockReadiness: missingEvidence },
+    });
+    expect(failed.replay).toEqual(failed.read);
+
+    expect(await changePackState(blocked, current)).toEqual([{ version: 0, state: current }]);
+    const restoredRead = await forecast.read(f.scope, paper.teacher);
+    const restoredReplay = await forecast.record(f.scope, paper);
+    const third = await input({ skills: paper.skills });
+    const restoredFresh = await forecast.record(f.scope, third);
+    expect(restoredRead).toEqual({ ...failed.fresh, shortMockReadiness: "needs_external_calibration" });
+    expect(restoredReplay).toEqual(restoredRead);
+    expect(restoredFresh.shortMockReadiness).toBe("needs_external_calibration");
+    expect(restoredFresh.papers.map(item => item.sourceId)).toEqual([paper.sourceId, another.sourceId, third.sourceId]);
+    expect((await integration.read(f.scope)).links).toEqual(formal.links);
   });
 
   it("rejects foreign ownership, foreign sources, unknown skills, archived courses and missing bindings", async () => {
