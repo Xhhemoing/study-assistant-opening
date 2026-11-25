@@ -6,7 +6,7 @@ import { createOpeningPrivacyRepository } from "./opening-privacy";
 import {
   contextSourceRefsIncluded, isLineageUuid, lineageUuid, memoryOnlyRefSourceIds, mergeContextSourceRefs, resolveMemoryDependencyStatus,
   parseContextMemoryDependencyIds, parseContextSourceRefs, turnContextSourceRefs, turnDirectSourcesVersioned,
-  turnHasOwnedSession, turnHasStandaloneSession, turnLineageCourse, turnMemoryOnlyBackingIds, turnSessionMaterialIds,
+  turnHasOwnedSession, turnHasStandaloneSession, turnLearningSessionCourse, turnLineageCourse, turnMemoryOnlyBackingIds, turnSessionMaterialIds,
   type ContextSourceRef, type FragmentFactory, type MemoryDependencyStatus,
 } from "./opening-context-provenance";
 import { readMemoryDependencyStatus, sourceMaterialsActive } from "./opening-memory-admission";
@@ -84,6 +84,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
     WITH prior AS MATERIALIZED (
       SELECT c.id AS conversation_id, current.id AS current_id, u.id, a.id AS assistant_id, u.created_at,
         (extract(epoch FROM u.created_at) * 1000000)::bigint::text AS pos_us,
+        (extract(epoch FROM current.created_at) * 1000000)::bigint::text AS current_pos_us,
         a.query_system, a.system_query, w.privacy_epoch AS current_privacy_epoch, a.intent_hash AS assistant_intent_hash,
         ${recordReferents ? sql`false` : sql`(${hasSavedMemoryReferences(sql, () => sql`a.context_source_refs`)}
           OR ${hasSavedMemoryReferences(sql, () => sql`u.context_source_refs`)})`} AS own_has_memory,
@@ -135,7 +136,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       ${recordReferents ? sql`SELECT NULL::uuid AS conversation_id, NULL::uuid AS assistant_id,
         false AS non_query, NULL::timestamptz AS pos_at, NULL::uuid AS pos_id,
         NULL::text AS intent_hash, false AS is_invalid, NULL::uuid AS valid_course_id,
-        false AS has_mem WHERE false` : sql`
+        NULL::uuid AS hashless_course_id, false AS has_mem WHERE false` : sql`
       SELECT conv.conversation_id,
         dt.id AS assistant_id,
         (dt.query_system IS FALSE AND dt.system_query IS NULL) AS non_query,
@@ -144,9 +145,19 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         dt.intent_hash,
         COALESCE(dt_hash.is_invalid, false) AS is_invalid,
         dt_hash.valid_course_id,
+        CASE WHEN dt.intent_hash IS NULL THEN COALESCE(
+          conv_c.course_id,
+          ${lineageUuid(sql, () => sql`dt.context_anchor->>'courseId'`)},
+          ${turnLearningSessionCourse(sql, () => sql`dt`, () => sql`conv_c.owner_user_id`)},
+          CASE WHEN du.id IS NOT NULL THEN COALESCE(
+            ${lineageUuid(sql, () => sql`du.context_anchor->>'courseId'`)},
+            ${turnLearningSessionCourse(sql, () => sql`du`, () => sql`conv_c.owner_user_id`)}
+          ) END
+        ) END AS hashless_course_id,
         (${hasSavedMemoryReferences(sql, () => sql`dt.context_source_refs`)}
           OR (du.id IS NOT NULL AND ${hasSavedMemoryReferences(sql, () => sql`du.context_source_refs`)})) AS has_mem
       FROM (SELECT DISTINCT conversation_id FROM prior) conv
+      JOIN opening_conversations conv_c ON conv_c.id = conv.conversation_id AND conv_c.workspace_id = ${scope.workspaceId}
       JOIN opening_turns dt ON dt.workspace_id = ${scope.workspaceId} AND dt.conversation_id = conv.conversation_id
       LEFT JOIN opening_tutor_jobs dj ON dj.assistant_turn_id = dt.id
         AND dj.workspace_id = dt.workspace_id AND dj.conversation_id = dt.conversation_id
@@ -166,13 +177,15 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
       WHERE dt.role = 'assistant' AND dt.status = 'complete'
         AND (dt.intent_hash IS NOT NULL
           OR (dt.query_system IS FALSE AND dt.system_query IS NULL
-            AND (${hasSavedMemoryReferences(sql, () => sql`dt.context_source_refs`)}
+            AND (conv_c.course_id IS NULL
+              OR ${hasSavedMemoryReferences(sql, () => sql`dt.context_source_refs`)}
               OR (du.id IS NOT NULL AND ${hasSavedMemoryReferences(sql, () => sql`du.context_source_refs`)}))))`}
     ), conv_hist AS MATERIALIZED (
       ${recordReferents ? sql`SELECT NULL::uuid AS conversation_id,
         NULL::timestamptz AS first_invalid_at, NULL::uuid AS first_invalid_id,
         NULL::timestamptz AS first_scoped_at, NULL::uuid AS first_scoped_id, NULL::uuid AS first_scoped_course_id,
         NULL::timestamptz AS second_scoped_at, NULL::uuid AS second_scoped_id,
+        NULL::timestamptz AS first_hashless_mismatch_at, NULL::uuid AS first_hashless_mismatch_id,
         NULL::timestamptz AS first_memory_at, NULL::uuid AS first_memory_id,
         '[]'::jsonb AS conv_hashes WHERE false` : sql`
       WITH first_inv AS (
@@ -188,6 +201,14 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         FROM conv_scan cs
         JOIN first_sc fs ON fs.conversation_id = cs.conversation_id
         WHERE cs.non_query AND cs.valid_course_id IS NOT NULL AND cs.valid_course_id <> fs.valid_course_id
+        ORDER BY cs.conversation_id, cs.pos_at ASC, cs.pos_id ASC
+      ), first_hm AS (
+        SELECT DISTINCT ON (cs.conversation_id) cs.conversation_id, cs.pos_at, cs.pos_id
+        FROM conv_scan cs
+        JOIN first_sc fs ON fs.conversation_id = cs.conversation_id
+        WHERE cs.non_query AND cs.intent_hash IS NULL
+          AND (cs.pos_at, cs.pos_id) > (fs.pos_at, fs.pos_id)
+          AND cs.hashless_course_id IS DISTINCT FROM fs.valid_course_id
         ORDER BY cs.conversation_id, cs.pos_at ASC, cs.pos_id ASC
       ), first_mem AS (
         SELECT DISTINCT ON (conversation_id) conversation_id, pos_at, pos_id
@@ -209,12 +230,14 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
         first_sc.pos_at AS first_scoped_at, first_sc.pos_id AS first_scoped_id,
         first_sc.valid_course_id AS first_scoped_course_id,
         second_sc.pos_at AS second_scoped_at, second_sc.pos_id AS second_scoped_id,
+        first_hm.pos_at AS first_hashless_mismatch_at, first_hm.pos_id AS first_hashless_mismatch_id,
         first_mem.pos_at AS first_memory_at, first_mem.pos_id AS first_memory_id,
         COALESCE(hashes.conv_hashes, '[]'::jsonb) AS conv_hashes
       FROM (SELECT DISTINCT conversation_id FROM prior) conv
       LEFT JOIN first_inv ON first_inv.conversation_id = conv.conversation_id
       LEFT JOIN first_sc ON first_sc.conversation_id = conv.conversation_id
       LEFT JOIN second_sc ON second_sc.conversation_id = conv.conversation_id
+      LEFT JOIN first_hm ON first_hm.conversation_id = conv.conversation_id
       LEFT JOIN first_mem ON first_mem.conversation_id = conv.conversation_id
       LEFT JOIN hashes ON hashes.conversation_id = conv.conversation_id`}
     ), evaluated AS MATERIALIZED (
@@ -224,6 +247,7 @@ function readSavedExchanges(sql: Db, scope: OpeningScope, currentTurnIds: readon
           WHEN prior.query_system IS FALSE AND prior.system_query IS NULL THEN
             (ch.first_invalid_id IS NOT NULL AND (ch.first_invalid_at, ch.first_invalid_id) < (prior.created_at, prior.id))
             OR (ch.second_scoped_id IS NOT NULL AND (ch.second_scoped_at, ch.second_scoped_id) < (prior.created_at, prior.id))
+            OR (ch.first_hashless_mismatch_id IS NOT NULL AND (ch.first_hashless_mismatch_at, ch.first_hashless_mismatch_id) < (prior.created_at, prior.id))
             OR (ch.first_scoped_id IS NOT NULL AND (ch.first_scoped_at, ch.first_scoped_id) < (prior.created_at, prior.id)
               AND prior.assistant_course_id IS DISTINCT FROM ch.first_scoped_course_id)
           ELSE false END`} AS assistant_misconception_invalid,
@@ -400,6 +424,24 @@ async function resolveExchangeMisconceptions(
       orderedRevisions, prefixCourse, prefixRevCount,
     });
   }
+  const firstHashlessMismatchByConv = new Map<string, { posUs: bigint; posId: string }>();
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]!;
+    if (row.assistant_intent_hash != null || row.query_system || row.system_query != null) continue;
+    const convId = row.conversation_id;
+    if (typeof convId !== "string" || row.pos_us === undefined || row.id === undefined || row.assistant_course_id === undefined) continue;
+    const wm = convWatermarks.get(convId);
+    if (!wm) continue;
+    const posUs = BigInt(row.pos_us);
+    const posId = String(row.id).toLowerCase();
+    const limit = upperBoundMemoryOriginPosition(wm.items, posUs, posId);
+    if (limit > 0 && wm.firstScopedIdx < limit && normalizeHistoryCourse(row.assistant_course_id) !== wm.firstScopedCourse) {
+      const prev = firstHashlessMismatchByConv.get(convId);
+      if (!prev || posUs < prev.posUs || (posUs === prev.posUs && posId < prev.posId)) {
+        firstHashlessMismatchByConv.set(convId, { posUs, posId });
+      }
+    }
+  }
   return rows.map((row, index): ResolvedExchangeMisconception | null => {
     if (row.assistant_misconception_invalid === true) return null;
     const legacy = legacyPositions[index];
@@ -421,7 +463,14 @@ async function resolveExchangeMisconceptions(
     if (!wm || row.pos_us === undefined || row.id === undefined) {
       return { inScope: true, courseId: null, directLineage: undefined, orderedRevisions: undefined, revisionCount: 0 };
     }
-    const limit = upperBoundMemoryOriginPosition(wm.items, BigInt(row.pos_us), String(row.id).toLowerCase());
+    const ownPosUs = BigInt(row.pos_us);
+    const ownPosId = String(row.id).toLowerCase();
+    const hm = firstHashlessMismatchByConv.get(row.conversation_id!);
+    if (hm && !row.query_system && row.system_query == null
+      && (hm.posUs < ownPosUs || (hm.posUs === ownPosUs && hm.posId < ownPosId))) {
+      return null;
+    }
+    const limit = upperBoundMemoryOriginPosition(wm.items, ownPosUs, ownPosId);
     if (limit <= 0) {
       return { inScope: true, courseId: null, directLineage: undefined, orderedRevisions: undefined, revisionCount: 0 };
     }
@@ -799,9 +848,11 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
     };
   });
 
+  const nonExchangeConsumers = !recordReferents && convId && batches ? (batches.consumersByConversation.get(convId) ?? []) : [];
   // Sweep chronologically (oldest = rows.length - 1 -> newest = 0) in O(N + M).
   const out = new Array<ResolvedExchangeMemory | null>(rows.length);
   let p = 0;
+  let cPtr = 0;
   let prefixOwnInvalid = false;
   let prefixMinOwnExpiryMs = Infinity;
   let prefixMisconceptionCourse: string | null | "conflict" = null;
@@ -843,32 +894,49 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
     }
   };
 
+  const advanceJoblessOrigin = (item: (typeof evaluatedNonExchange)[number]) => {
+    if (!item.validOwn) {
+      prefixOwnInvalid = true;
+      return;
+    }
+    prefixMinOwnExpiryMs = combineMinMs(prefixMinOwnExpiryMs, item.ownExpiryMs);
+    foldLineage(item.ownLineage);
+    for (const binding of item.bindings) orderedNonExchangeBindings.push(binding);
+    if (!item.inScopeCurrent) {
+      const mismatchedCourses = item.ownScopedMemoryCourses.filter(c => c !== targetCourseNorm);
+      for (const c of mismatchedCourses) prefixOutOfScopeMemoryCourses.add(c);
+      if (mismatchedCourses.length === 0) {
+        if (materialUse === "practice" && item.materialUse !== "practice") prefixCitationOnlyOutOfScope = true;
+        else prefixNonExchangeOutOfScope = true;
+      }
+    } else {
+      foldCurrentIds(item.currentIds);
+      prefixMinCurrentExpiryMs = combineMinMs(prefixMinCurrentExpiryMs, item.currentExpiryMs);
+    }
+  };
+
   for (let index = rows.length - 1; index >= 0; index--) {
     const row = rows[index]!;
     if (row.pos_us !== undefined && row.id !== undefined) {
       const rowPosUs = BigInt(row.pos_us);
       const rowPosId = String(row.id).toLowerCase();
-      while (p < evaluatedNonExchange.length) {
-        const item = evaluatedNonExchange[p]!;
-        if (!(item.posUs < rowPosUs || (item.posUs === rowPosUs && item.posId < rowPosId))) break;
-        p++;
-        if (!item.validOwn) {
-          prefixOwnInvalid = true;
-          continue;
-        }
-        prefixMinOwnExpiryMs = combineMinMs(prefixMinOwnExpiryMs, item.ownExpiryMs);
-        foldLineage(item.ownLineage);
-        for (const binding of item.bindings) orderedNonExchangeBindings.push(binding);
-        if (!item.inScopeCurrent) {
-          const mismatchedCourses = item.ownScopedMemoryCourses.filter(c => c !== targetCourseNorm);
-          for (const c of mismatchedCourses) prefixOutOfScopeMemoryCourses.add(c);
-          if (mismatchedCourses.length === 0) {
-            if (materialUse === "practice" && item.materialUse !== "practice") prefixCitationOnlyOutOfScope = true;
-            else prefixNonExchangeOutOfScope = true;
-          }
+      while (true) {
+        const nextOrig = p < evaluatedNonExchange.length ? evaluatedNonExchange[p]! : undefined;
+        const origBefore = Boolean(nextOrig && (nextOrig.posUs < rowPosUs || (nextOrig.posUs === rowPosUs && nextOrig.posId < rowPosId)));
+        const nextCons = cPtr < nonExchangeConsumers.length ? nonExchangeConsumers[cPtr]! : undefined;
+        const consBefore = Boolean(nextCons && (nextCons.posUs < rowPosUs || (nextCons.posUs === rowPosUs && nextCons.posId < rowPosId)));
+        if (!origBefore && !consBefore) break;
+        if (origBefore && (!consBefore || nextOrig!.posUs < nextCons!.posUs
+          || (nextOrig!.posUs === nextCons!.posUs && nextOrig!.posId <= nextCons!.posId))) {
+          p++;
+          advanceJoblessOrigin(nextOrig!);
         } else {
-          foldCurrentIds(item.currentIds);
-          prefixMinCurrentExpiryMs = combineMinMs(prefixMinCurrentExpiryMs, item.currentExpiryMs);
+          cPtr++;
+          const consCourse = normalizeHistoryCourse(nextCons!.courseId);
+          if (prefixMisconceptionCourse === "conflict"
+            || (prefixMisconceptionCourse !== null && consCourse !== prefixMisconceptionCourse)) {
+            prefixOwnInvalid = true;
+          }
         }
       }
     }
@@ -982,9 +1050,16 @@ function resolveExchangeMemoryEntry(
     if (nodes?.every(node => allowed(node.dep_id)) && allowed(id)) usable.set(id, nodes);
   }
   const targetAuthorities = getActive(entry.historical ? entry.courseId : target);
-  const backings = entry.backings.map(ids => ids.filter(id => usable.has(id)).sort((a, b) =>
-    Number(Boolean(targetAuthorities?.get(a.toLowerCase())?.lineage))
-      - Number(Boolean(targetAuthorities?.get(b.toLowerCase())?.lineage)) || a.localeCompare(b)));
+  const backings = entry.backings.map(ids => ids.filter(id => usable.has(id)).sort((a, b) => {
+    const authA = targetAuthorities?.get(a.toLowerCase());
+    const authB = targetAuthorities?.get(b.toLowerCase());
+    const linDiff = Number(Boolean(authA?.lineage)) - Number(Boolean(authB?.lineage));
+    if (linDiff !== 0) return linDiff;
+    const expA = authA?.earliestExpiresAtMs ?? Infinity;
+    const expB = authB?.earliestExpiresAtMs ?? Infinity;
+    if (expA !== expB) return expB > expA ? 1 : -1;
+    return a.localeCompare(b);
+  }));
   return resolveMemoryDependencyStatus(usable, entry.memoryIds, backings,
     entry.historical ? entry.courseId : target, undefined, entry.backingSourceIds);
 }
@@ -1108,10 +1183,40 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
     const [userAuthority, assistantAuthority] = memoryAuthority;
     userAuthority!.sourceIds = [...(row.user_direct_ids ?? []), ...userRefs.map(ref => ref.sourceId)];
     assistantAuthority!.sourceIds = [...(row.assistant_direct_ids ?? []), ...assistantRefs.map(ref => ref.sourceId)];
+    const joblessBetweenCourses: (string | null)[] = [];
+    if (checkPriorScope && row.conversation_id && row.pos_us !== undefined && row.id !== undefined) {
+      const jcList = batches.consumersByConversation.get(row.conversation_id) ?? [];
+      if (jcList.length) {
+        const cEnd = row.current_pos_us !== undefined
+          ? upperBoundMemoryOriginPosition(jcList, BigInt(row.current_pos_us), String(row.current_id).toLowerCase())
+          : jcList.length;
+        const rStart = upperBoundMemoryOriginPosition(jcList, BigInt(row.pos_us), String(row.id).toLowerCase());
+        for (let k = rStart; k < cEnd && joblessBetweenCourses.length < 2; k++) {
+          const jc = jcList[k]!;
+          if (jc.assistantTurnId === String(row.assistant_id)) continue;
+          const norm = normalizeHistoryCourse(jc.courseId);
+          if (!joblessBetweenCourses.includes(norm)) joblessBetweenCourses.push(norm);
+        }
+        const state = pendingConvSweeps.get(row.current_id)?.get(row.conversation_id);
+        if (state) {
+          const convItems = batches.byConversation.get(row.conversation_id) ?? [];
+          for (let k = 0; k < cEnd; k++) {
+            const jc = jcList[k]!;
+            const jLimit = upperBoundMemoryOriginPosition(convItems, jc.posUs, jc.posId);
+            if (jLimit > 0) {
+              if (jLimit > state.maxLimit) state.maxLimit = jLimit;
+              const merged = mergeMisconceptionCourses(state.coursesByLimit.get(jLimit), jc.courseId);
+              if (merged) state.coursesByLimit.set(jLimit, merged);
+            }
+          }
+        }
+      }
+    }
     const extraCourses = mergeMisconceptionCourses(
       undefined,
       ...(checkPriorScope ? [row.current_course_id ?? null] : []),
       ...requiredCourses,
+      ...joblessBetweenCourses,
     );
     for (const entry of memoryAuthority) {
       entry.historical = true;

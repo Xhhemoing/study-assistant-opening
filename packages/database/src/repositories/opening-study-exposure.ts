@@ -87,20 +87,56 @@ export async function generateOpeningStudyExposure(tx: TransactionSql, scope: Sc
   return mapOpeningStudyExposure(row!);
 }
 
-export async function releaseOpeningStudyExposure(tx: TransactionSql, scope: Scope, receiptId: string): Promise<StudyExposureReceipt> {
-  const [row] = await tx`SELECT * FROM opening_help_exposures WHERE id=${receiptId} AND workspace_id=${scope.workspaceId}
-    AND owner_user_id=${scope.ownerUserId} AND release_key IS NOT NULL FOR UPDATE`;
+const EXPIRED_EXPOSURE_RELEASE = Symbol("EXPIRED_EXPOSURE_RELEASE");
+
+export async function releaseOpeningStudyExposure(tx: TransactionSql, scope: Scope, receiptId: string): Promise<StudyExposureReceipt>;
+export async function releaseOpeningStudyExposure(
+  tx: TransactionSql, scope: Scope, receiptId: string, options: { expiresAt?: string },
+): Promise<StudyExposureReceipt | null>;
+export async function releaseOpeningStudyExposure(
+  tx: TransactionSql, scope: Scope, receiptId: string, options?: { expiresAt?: string },
+): Promise<StudyExposureReceipt | null> {
+  const expiresAt = options?.expiresAt;
+  const [row] = expiresAt === undefined
+    ? await tx`SELECT * FROM opening_help_exposures WHERE id=${receiptId} AND workspace_id=${scope.workspaceId}
+    AND owner_user_id=${scope.ownerUserId} AND release_key IS NOT NULL FOR UPDATE`
+    : await tx`SELECT *, (clock_timestamp() < ${expiresAt}::timestamptz) AS before_deadline FROM opening_help_exposures WHERE id=${receiptId}
+    AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND release_key IS NOT NULL FOR UPDATE`;
   if (!row) throw learningError("NOT_FOUND", "release receipt not found");
   if (row.released_at != null) return mapOpeningStudyExposure(row);
+  if (expiresAt !== undefined && row.before_deadline === false) return null;
   // Recheck availability immediately before release, never silently rebind to a newer version.
   const anchor = await resolveOpeningStudyContext(tx, scope, row.context_anchor as StudyContextAnchor, { sessionId: row.session_id as string | null, sourceAccess: row.exposure_origin === "assistant" ? "ai" : "human_read",
     associationOnly: row.exposure_origin !== "assistant" && (row.release_intent as OpeningStudyExposureInput | null)?.originReference?.possibleOpenAttemptOnly === true });
   if (anchor.activityId) await assertOpeningSpanTutorOriginCurrent(tx, scope, anchor.activityId);
   if (anchor.activityId) await assertOpeningCourseRouteCurrent(tx, scope, anchor.activityId);
-  const revision = row.course_id == null ? 0 : await nextLearningHistoryRevision(tx, scope, String(row.course_id));
-  const workspaceRevision = await nextWorkspaceLearningHistoryRevision(tx, scope);
-  const [released] = await tx`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),
-    history_revision=${revision},workspace_history_revision=${workspaceRevision} WHERE id=${receiptId} RETURNING *`;
+  const writeRelease = async (db: TransactionSql): Promise<Row | undefined> => {
+    const revision = row.course_id == null ? 0 : await nextLearningHistoryRevision(db, scope, String(row.course_id));
+    const workspaceRevision = await nextWorkspaceLearningHistoryRevision(db, scope);
+    const [updated] = expiresAt === undefined
+      ? await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),
+    history_revision=${revision},workspace_history_revision=${workspaceRevision} WHERE id=${receiptId} RETURNING *`
+      : await db`UPDATE opening_help_exposures SET delivered=TRUE,released_at=clock_timestamp(),delivered_at=clock_timestamp(),
+    history_revision=${revision},workspace_history_revision=${workspaceRevision} WHERE id=${receiptId}
+    AND clock_timestamp() < ${expiresAt}::timestamptz RETURNING *`;
+    return updated;
+  };
+  let released: Row | undefined;
+  if (expiresAt !== undefined && typeof (tx as { savepoint?: unknown }).savepoint === "function") {
+    try {
+      released = await (tx as unknown as { savepoint: <T>(fn: (sp: TransactionSql) => Promise<T>) => Promise<T> }).savepoint(async sp => {
+        const updated = await writeRelease(sp);
+        if (!updated) throw EXPIRED_EXPOSURE_RELEASE;
+        return updated;
+      });
+    } catch (error) {
+      if (error === EXPIRED_EXPOSURE_RELEASE) return null;
+      throw error;
+    }
+  } else {
+    released = await writeRelease(tx);
+    if (expiresAt !== undefined && !released) return null;
+  }
   // Include currently projected answers and same-source unknown associations. Uncertainty cannot grant independence.
   const roots = await tx`SELECT DISTINCT COALESCE(o.root_observation_id,o.id) AS root_id FROM opening_learning_observations o
     WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId}

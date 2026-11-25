@@ -4,6 +4,7 @@ import { createTutorMetadataHandler } from "../../../../apps/worker/src/jobs/tut
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 import { loadTutorHistoryContext, readTutorHistoryAncestorAuthority, readTutorHistoryAncestorStatus } from "./opening-tutor-history";
 import { createOpeningConversationRepository } from "./opening-conversations";
+import { releaseOpeningStudyExposure } from "./opening-study-exposure";
 import { createOpeningMemoryRepository } from "./opening-memory";
 import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "./opening-task-candidate-admission";
 import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
@@ -1213,6 +1214,409 @@ it("closes Round-12 mixed-course/use isolation, paired-assistant prefix course, 
   }
 });
 
+it("closes Round-13 receipt deadline enforcement, intermediate hashless course mismatch, legacy memoryOnly post-delivery visibility, and UUID-independent backing selection", async () => {
+  const unavailable = "关联学习记录已更新或撤回，此回答内容不再显示。";
+  const convId = "c3000000-0000-4000-8000-000000000001";
+  const courseALineage = { kind: "v3_misconception_lineage" as const, courseId, revisionIds: [candidate.revisionId] };
+
+  // 1) Round-13 P1 #1: releaseOpeningStudyExposure enforces expiresAt via savepoint rollback when expiring mid-release,
+  // and listTurns / listSummaries / releaseReturnedTurnIds redact any turn whose receipt expires during sequential release.
+  {
+    const recId = "c3000000-0000-4000-8000-000000000011";
+    const turn1 = "c3000000-0000-4000-8000-000000000012";
+    const turn2 = "c3000000-0000-4000-8000-000000000013";
+    const rec1 = "c3000000-0000-4000-8000-000000000014";
+    const rec2 = "c3000000-0000-4000-8000-000000000015";
+    const memTemp = "c3000000-0000-4000-8000-000000000016";
+    const futureIso = new Date(Date.now() + 60_000).toISOString();
+    let courseRev = 5;
+    let workspaceRev = 9;
+    let rolledBack = false;
+    let expireBeforeUpdate = true;
+
+    const makeSavepointTx = () => {
+      const sim = sqlSimulation(q => {
+        const s = q.text;
+        if (s.startsWith("SELECT *, (clock_timestamp() <")) {
+          return [{
+            id: recId, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+            session_id: null, attempt_id: null, problem_id: null, release_key: "rk", exposure_origin: "assistant",
+            support_domain: "unknown", context_anchor: { purpose: "learning_help", courseId },
+            generated_at: new Date(at).toISOString(), released_at: null, acknowledged_at: null, history_revision: 0,
+            before_deadline: true,
+          }];
+        }
+        if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+        if (s.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+        if (s.startsWith("INSERT INTO opening_learning_history_revisions")) return [{ revision: ++courseRev }];
+        if (s.startsWith("UPDATE opening_workspace_history_revisions")) return [{ revision: ++workspaceRev }];
+        if (s.startsWith("UPDATE opening_help_exposures")) {
+          expect(s).toContain("AND clock_timestamp() < ?::timestamptz");
+          if (expireBeforeUpdate) return [];
+          return [{
+            id: recId, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+            release_key: "rk", exposure_origin: "assistant", support_domain: "unknown",
+            context_anchor: { purpose: "learning_help", courseId }, generated_at: new Date(at).toISOString(),
+            released_at: new Date(at).toISOString(), acknowledged_at: null, history_revision: courseRev,
+          }];
+        }
+        if (s.startsWith("SELECT DISTINCT COALESCE")) return [];
+        if (s.startsWith("SELECT root_observation_id")) return [];
+        return unexpected(q);
+      });
+      const tx = Object.assign(sim.sql, {
+        savepoint: async <T>(fn: (sp: typeof sim.sql) => Promise<T>): Promise<T> => {
+          const snapCourse = courseRev;
+          const snapWs = workspaceRev;
+          try {
+            return await fn(sim.sql);
+          } catch (err) {
+            courseRev = snapCourse;
+            workspaceRev = snapWs;
+            rolledBack = true;
+            throw err;
+          }
+        },
+      });
+      return { tx: tx as never, queries: sim.queries };
+    };
+
+    const sp1 = makeSavepointTx();
+    expect(await releaseOpeningStudyExposure(sp1.tx, scope, recId, { expiresAt: futureIso })).toBeNull();
+    expect(rolledBack).toBe(true);
+    expect({ courseRev, workspaceRev }).toEqual({ courseRev: 5, workspaceRev: 9 });
+
+    expireBeforeUpdate = false;
+    rolledBack = false;
+    const sp2 = makeSavepointTx();
+    await expect(releaseOpeningStudyExposure(sp2.tx, scope, recId, { expiresAt: futureIso }))
+      .resolves.toMatchObject({ id: recId, historyRevision: 6 });
+    expect(rolledBack).toBe(false);
+    expect({ courseRev, workspaceRev }).toEqual({ courseRev: 6, workspaceRev: 10 });
+
+    // Sequential release across two receipts where rec1 succeeds and rec2 expires mid-batch:
+    let rec2ExpiredMidBatch = false;
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT id, title, course_id")) return [{ id: convId, title: "t", course_id: courseId, updated_at: new Date(at).toISOString() }];
+      if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (s.startsWith("SELECT id FROM courses")) return [{ id: courseId }];
+      if (s.includes("opening_workspace_history_revisions") || s.includes("opening_learning_history_revisions")) return [{ revision: 1 }];
+      if (s.startsWith("SELECT c.id,")) {
+        return [
+          { id: convId, title: "c1", course_id: courseId, updated_at: new Date(at).toISOString(), misconception_memory_turn_id: turn1, pending_exposure_ids: [rec1], last_turn_preview: "Valid first" },
+          { id: "c3000000-0000-4000-8000-000000000019", title: "c2", course_id: courseId, updated_at: new Date(at).toISOString(), misconception_memory_turn_id: turn2, pending_exposure_ids: [rec2], last_turn_preview: "Expired second" },
+        ];
+      }
+      if (s.startsWith("SELECT t.id, t.conversation_id") || s.startsWith("SELECT t.id,t.role")) {
+        return [
+          { id: turn1, conversation_id: convId, role: "assistant", mode: "hint", status: "complete", created_at: new Date(at).toISOString(), text: "Valid first", citations: [], misconception_memory_turn_id: turn1, pending_exposure_ids: [rec1], exposure_receipt: { id: rec1, released_at: null } },
+          { id: turn2, conversation_id: convId, role: "assistant", mode: "hint", status: "complete", created_at: new Date(at).toISOString(), text: "Expired second", citations: [], misconception_memory_turn_id: turn2, pending_exposure_ids: [rec2], exposure_receipt: { id: rec2, released_at: null } },
+        ];
+      }
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        return [turn1, turn2].map(tid => ({
+          id: tid, conversation_id: convId, consumer_course_id: courseId, pos_us: "100", pos_id: tid, inherits_prefix: false,
+          origins: [{ id: tid, assistantTurnId: tid, courseId, consumerCourseId: courseId, materialUse: "citation", refs: [{ memoryDependencyIds: [memTemp] }], standalone: false }],
+        }));
+      }
+      if (s.startsWith("SELECT id FROM opening_memories")) {
+        return [{ id: { memoryId: memTemp, hashes: [], courseId, statusActive: true, unexpired: true, active: true, expiresAt: futureIso, origins: [] } }];
+      }
+      if (s.startsWith("SELECT *, (clock_timestamp() <")) {
+        const targetRec = String(q.values[0]);
+        return [{
+          id: targetRec, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          release_key: `rk-${targetRec}`, exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help", courseId }, generated_at: new Date(at).toISOString(),
+          released_at: null, acknowledged_at: null, history_revision: 0,
+          before_deadline: targetRec === rec1 ? true : !rec2ExpiredMidBatch,
+        }];
+      }
+      if (s.startsWith("UPDATE opening_help_exposures")) {
+        const targetRec = String(q.values[2]);
+        if (targetRec === rec1) rec2ExpiredMidBatch = true;
+        return [{
+          id: targetRec, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          release_key: `rk-${targetRec}`, exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help", courseId }, generated_at: new Date(at).toISOString(),
+          released_at: new Date(at).toISOString(), acknowledged_at: null, history_revision: 2,
+        }];
+      }
+      if (s.startsWith("SELECT DISTINCT COALESCE") || s.startsWith("SELECT root_observation_id")) return [];
+      return unexpected(q);
+    });
+    const repo = createOpeningConversationRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+    rec2ExpiredMidBatch = false;
+    const turnsOut = await repo.listTurns(scope, convId);
+    expect(turnsOut.map(t => ({ id: t.id, text: t.text, hasReceipt: Boolean(t.exposureReceipt) }))).toEqual([
+      { id: turn1, text: "Valid first", hasReceipt: true },
+      { id: turn2, text: unavailable, hasReceipt: false },
+    ]);
+    rec2ExpiredMidBatch = false;
+    const sumOut = await repo.listSummaries(scope);
+    expect(sumOut.map(s => s.lastTurnPreview)).toEqual(["Valid first", unavailable]);
+    rec2ExpiredMidBatch = false;
+    const resumeOut = await repo.releaseReturnedTurnIds(scope, convId, [turn1, turn2]);
+    expect(resumeOut).toEqual([
+      { id: turn1, role: "assistant", text: "Valid first", citations: [] },
+      { id: turn2, role: "assistant", text: unavailable, citations: [] },
+    ]);
+  }
+
+  // 2) Round-13 P1 #2: Unbound conversation A/A (memory-bearing OR hashed misconception) -> hashless B (job-backed or jobless) -> hashless A
+  // rejects/redacts the final Course-A answer while keeping ordinary (non-misconception) Course-A memory visible!
+  {
+    const memMiscA = "c3000000-0000-4000-8000-000000000021";
+    const memOrdA = "c3000000-0000-4000-8000-000000000022";
+    const u1 = "c3000000-0000-4000-8000-000000000023";
+    const a1 = "c3000000-0000-4000-8000-000000000024";
+    const bJobless = "c3000000-0000-4000-8000-000000000025";
+    const u3 = "c3000000-0000-4000-8000-000000000026";
+    const a3 = "c3000000-0000-4000-8000-000000000027";
+    const rec3 = "c3000000-0000-4000-8000-000000000028";
+    const currentA = "c3000000-0000-4000-8000-000000000029";
+    let withMisconception = true;
+    const { sql, queries } = sqlSimulation(q => {
+      const s = q.text;
+      const activeMem = withMisconception ? memMiscA : memOrdA;
+      if (s.startsWith("SELECT id, title, course_id")) return [{ id: convId, title: "t", course_id: null, updated_at: new Date(at).toISOString() }];
+      if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (s.startsWith("SELECT id FROM courses")) return [{ id: courseId }, { id: otherCourseId }];
+      if (s.includes("opening_workspace_history_revisions") || s.includes("opening_learning_history_revisions")) return [{ revision: 1 }];
+      if (s.startsWith("SELECT t.id, t.conversation_id") || s.startsWith("SELECT t.id,t.role")) {
+        return [{
+          id: a3, conversation_id: convId, role: "assistant", mode: "hint", status: "complete",
+          created_at: new Date(at).toISOString(), text: "Final hashless A", citations: [],
+          misconception_memory_turn_id: a3, pending_exposure_ids: [rec3], exposure_receipt: { id: rec3, released_at: null },
+        }];
+      }
+      if (s.startsWith("SELECT c.id,")) {
+        return [{
+          id: convId, title: "t", course_id: null, updated_at: new Date(at).toISOString(),
+          misconception_memory_turn_id: a3, pending_exposure_ids: [rec3], last_turn_preview: "Final hashless A",
+        }];
+      }
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        return [
+          {
+            id: a3, origins: [], conversation_id: convId, consumer_course_id: courseId,
+            pos_us: "300", pos_id: u3, inherits_prefix: true,
+            conv_origins: [{
+              posUs: "100", posId: u1,
+              origin: {
+                id: a1, assistantTurnId: a1, courseId, consumerCourseId: null, materialUse: "citation",
+                refs: [{ memoryDependencyIds: [activeMem] }], standalone: false, historical: true, jobBacked: true,
+              },
+            }],
+            conv_consumers: [
+              { posUs: "100", posId: u1, assistantTurnId: a1, courseId },
+              { posUs: "200", posId: bJobless, assistantTurnId: bJobless, courseId: otherCourseId },
+              { posUs: "300", posId: u3, assistantTurnId: a3, courseId },
+            ],
+          },
+          {
+            id: a1,
+            origins: [{
+              id: a1, assistantTurnId: a1, courseId, consumerCourseId: courseId, materialUse: "citation",
+              refs: [{ memoryDependencyIds: [activeMem] }], standalone: false, historical: false, jobBacked: true,
+            }],
+            conversation_id: convId, consumer_course_id: courseId,
+            pos_us: "100", pos_id: u1, inherits_prefix: true,
+            conv_origins: null, conv_consumers: null,
+          },
+        ];
+      }
+      if (s.startsWith("WITH prior AS MATERIALIZED")) {
+        const base = {
+          conversation_id: convId, current_id: currentA, current_pos_us: "400", current_course_id: courseId,
+          material_use: "citation", prior_material_use: "citation", assistant_material_use: "citation",
+          assistant_intent_hash: null, user_source_refs: [], user_direct_ids: [], assistant_direct_ids: [],
+          memory_backing_ids: [], user_memory_backing_ids: [],
+          assistant_direct_versioned: true, origin_allowed: true, current_allowed: true, conv_misconception_hashes: [],
+        };
+        return [
+          { ...base, id: u3, assistant_id: a3, pos_us: "300", prior_course_id: courseId, assistant_course_id: courseId, inherits_memory: true, assistant_source_refs: [], question: "Q3", answer: "Final hashless A" },
+          { ...base, id: u1, assistant_id: a1, pos_us: "100", prior_course_id: courseId, assistant_course_id: courseId, inherits_memory: true, assistant_source_refs: [{ memoryDependencyIds: [activeMem] }], question: "Q1", answer: "Initial A" },
+        ];
+      }
+      if (s.startsWith("SELECT dep_m.id, dep_m.course_id")) {
+        return [{ id: activeMem, course_id: courseId, source_turn_ids: [], expires_at: null }];
+      }
+      if (s.startsWith("SELECT m.id, course.id AS turn_course_id")) return [];
+      if (s.startsWith("SELECT id FROM opening_memories")) {
+        return [{
+          id: {
+            memoryId: activeMem,
+            hashes: withMisconception ? [JSON.stringify(courseALineage)] : [],
+            courseId, active: true, unexpired: true, statusActive: true, notCandidate: true, origins: [],
+          },
+        }];
+      }
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return [{ position: 0 }];
+      if (s.startsWith("SELECT * FROM opening_help_exposures")) {
+        return [{
+          id: rec3, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          release_key: "rk3", exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help", courseId }, generated_at: new Date(at).toISOString(),
+          released_at: null, acknowledged_at: null, history_revision: 0,
+        }];
+      }
+      if (s.startsWith("UPDATE opening_help_exposures")) {
+        return [{
+          id: rec3, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: courseId,
+          release_key: "rk3", exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help", courseId }, generated_at: new Date(at).toISOString(),
+          released_at: new Date(at).toISOString(), acknowledged_at: null, history_revision: 1,
+        }];
+      }
+      if (s.startsWith("SELECT DISTINCT COALESCE") || s.startsWith("SELECT root_observation_id")
+        || s.startsWith("SELECT source_id FROM opening_privacy_exclusions")
+        || s.startsWith("SELECT id, left(text, 12001)")) return [];
+      return unexpected(q);
+    });
+    const repo = createOpeningConversationRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+    expect(await repo.listTurns(scope, convId)).toMatchObject([{ id: a3, text: unavailable }]);
+    expect(await repo.listSummaries(scope)).toMatchObject([{ id: convId, lastTurnPreview: unavailable }]);
+    expect(await repo.releaseReturnedTurnIds(scope, convId, [a3])).toEqual([{ id: a3, role: "assistant", text: unavailable, citations: [] }]);
+    expect(queries.some(q => q.text.startsWith("UPDATE opening_help_exposures"))).toBe(false);
+    expect((await loadTutorHistoryContext(sql, scope, currentA)).history).toEqual([
+      { role: "user", text: "Q1" },
+      { role: "assistant", text: "Initial A" },
+    ]);
+    expect((await readTutorHistoryAncestorStatus(sql, scope, currentA)).valid).toBe(false);
+
+    // Ordinary Course-A memory (no misconception) in Turn 1 stays valid across intermediate hashless Course-B Turn 2!
+    withMisconception = false;
+    expect(await repo.listTurns(scope, convId)).toMatchObject([{ id: a3, text: "Final hashless A" }]);
+    expect((await loadTutorHistoryContext(sql, scope, currentA)).history).toEqual([
+      { role: "user", text: "Q1" },
+      { role: "assistant", text: "Initial A" },
+      { role: "user", text: "Q3" },
+      { role: "assistant", text: "Final hashless A" },
+    ]);
+  }
+
+  // 3) Round-13 P2 #3 & P2 #4:
+  // (a) Standalone legacy memoryOnly answer with expired sole temporary backing remains visible if already released, and redacts if unreleased;
+  // (b) Derived memory ("5555...") with lower-UUID expired backing ("0000...") and higher-UUID unexpired backing ("ffff...") both carrying
+  //     active misconception lineage selects the unexpired backing regardless of UUID order!
+  {
+    const srcId = "c3000000-0000-4000-8000-000000000030";
+    const tempBackExpired = "c3000000-0000-4000-8000-000000000031";
+    const lowExpiredBacking = "00000000-0000-4000-8000-000000000001";
+    const midDerivedMem = "55555555-5555-4555-8555-555555555555";
+    const highValidBacking = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const tLegacyDelivered = "c3000000-0000-4000-8000-000000000032";
+    const tLegacyUnreleased = "c3000000-0000-4000-8000-000000000033";
+    const tDerivedFirstDelivery = "c3000000-0000-4000-8000-000000000034";
+    const rDelivered = "c3000000-0000-4000-8000-000000000035";
+    const rLegacyUnreleased = "c3000000-0000-4000-8000-000000000036";
+    const rDerivedPending = "c3000000-0000-4000-8000-000000000037";
+    const legacyOriginTurn = "c3000000-0000-4000-8000-000000000038";
+    const releasedIso = new Date(at).toISOString();
+    const expiredIso = new Date(Date.now() - 10_000).toISOString();
+    const releasedReceipts: string[] = [];
+    const { sql } = sqlSimulation(q => {
+      const s = q.text;
+      if (s.startsWith("SELECT id, title, course_id")) return [{ id: convId, title: "t", course_id: null, updated_at: releasedIso }];
+      if (s.startsWith("SELECT id FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (s.includes("opening_workspace_history_revisions") || s.includes("opening_learning_history_revisions")) return [{ revision: 1 }];
+      if (s.startsWith("SELECT t.id, t.conversation_id") || s.startsWith("SELECT t.id,t.role")) {
+        return [
+          {
+            id: tLegacyDelivered, conversation_id: convId, role: "assistant", mode: "hint", status: "complete",
+            created_at: releasedIso, text: "Delivered legacy temp", citations: [], misconception_memory_turn_id: tLegacyDelivered,
+            pending_exposure_ids: [],
+            exposure_receipt: { id: rDelivered, release_key: "rd", context_anchor: { purpose: "learning_help" }, exposure_origin: "assistant", support_domain: "unknown", generated_at: releasedIso, released_at: releasedIso, acknowledged_at: null, history_revision: 1 },
+          },
+          {
+            id: tLegacyUnreleased, conversation_id: convId, role: "assistant", mode: "hint", status: "complete",
+            created_at: releasedIso, text: "Unreleased legacy temp", citations: [], misconception_memory_turn_id: tLegacyUnreleased,
+            pending_exposure_ids: [rLegacyUnreleased], exposure_receipt: { id: rLegacyUnreleased, released_at: null },
+          },
+          {
+            id: tDerivedFirstDelivery, conversation_id: convId, role: "assistant", mode: "hint", status: "complete",
+            created_at: releasedIso, text: "Valid derived despite low expired UUID", citations: [], misconception_memory_turn_id: tDerivedFirstDelivery,
+            pending_exposure_ids: [rDerivedPending], exposure_receipt: { id: rDerivedPending, released_at: null },
+          },
+        ];
+      }
+      if (s.startsWith("SELECT t.id, ARRAY(")) {
+        return [
+          { id: tLegacyDelivered, origins: [{ id: tLegacyDelivered, assistantTurnId: tLegacyDelivered, courseId: null, consumerCourseId: null, materialUse: "citation", refs: [{ sourceId: srcId, sourceVersion: 1, memoryOnly: true }], standalone: true }], inherits_prefix: false },
+          { id: tLegacyUnreleased, origins: [{ id: tLegacyUnreleased, assistantTurnId: tLegacyUnreleased, courseId: null, consumerCourseId: null, materialUse: "citation", refs: [{ sourceId: srcId, sourceVersion: 1, memoryOnly: true }], standalone: true }], inherits_prefix: false },
+          { id: tDerivedFirstDelivery, origins: [{ id: tDerivedFirstDelivery, assistantTurnId: tDerivedFirstDelivery, courseId: null, consumerCourseId: null, materialUse: "citation", refs: [{ memoryDependencyIds: [midDerivedMem] }], standalone: true }], inherits_prefix: false },
+        ];
+      }
+      if (s.startsWith("SELECT saved.id,")) {
+        expect(s).toContain("m.kind = 'temporary' AND m.expires_at IS NOT NULL");
+        expect(s).not.toContain("m.expires_at > clock_timestamp()");
+        const parsed = q.values.find(Array.isArray) as Array<{ id: string }>;
+        return parsed.map(item => ({
+          id: item.id,
+          backings: item.id === legacyOriginTurn ? [[lowExpiredBacking, highValidBacking]] : [[tempBackExpired]],
+        }));
+      }
+      if (s.startsWith("SELECT id FROM opening_memories")) {
+        const requested = (q.values[1] as string[]) ?? [];
+        return requested.map(id => {
+          if (id === midDerivedMem) {
+            return {
+              id: {
+                memoryId: midDerivedMem, hashes: [], courseId: null, statusActive: true, notCandidate: true, unexpired: true, active: true, expiresAt: null,
+                origins: [{ id: legacyOriginTurn, assistantTurnId: legacyOriginTurn, courseId: null, consumerCourseId: null, materialUse: "citation", refs: [{ sourceId: srcId, sourceVersion: 1, memoryOnly: true }], standalone: true }],
+              },
+            };
+          }
+          if (id === lowExpiredBacking) {
+            return {
+              id: {
+                memoryId: lowExpiredBacking, hashes: [JSON.stringify(usedLineage)], courseId: null, statusActive: true, notCandidate: true, unexpired: true, active: true, expiresAt: null,
+                origins: [{ id: "c3000000-0000-4000-8000-000000000039", assistantTurnId: "c3000000-0000-4000-8000-000000000039", courseId: null, consumerCourseId: null, materialUse: "citation", refs: [{ memoryDependencyIds: [tempBackExpired] }], standalone: true }],
+              },
+            };
+          }
+          if (id === highValidBacking) {
+            return { id: { memoryId: highValidBacking, hashes: [JSON.stringify(usedLineage)], courseId: null, statusActive: true, notCandidate: true, unexpired: true, active: true, expiresAt: null, origins: [] } };
+          }
+          return { id: { memoryId: tempBackExpired, hashes: [JSON.stringify(usedLineage)], courseId: null, statusActive: true, notCandidate: true, unexpired: false, active: false, expiresAt: expiredIso, origins: [] } };
+        });
+      }
+      if (s.startsWith("WITH tick AS MATERIALIZED")) return [{ position: 0 }];
+      if (s.startsWith("SELECT * FROM opening_help_exposures")) {
+        const targetRec = String(q.values[0]);
+        return [{
+          id: targetRec, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: null,
+          release_key: `rk-${targetRec}`, exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help" }, generated_at: releasedIso,
+          released_at: null, acknowledged_at: null, history_revision: 0,
+        }];
+      }
+      if (s.startsWith("UPDATE opening_help_exposures")) {
+        const targetRec = String(q.values[2]);
+        releasedReceipts.push(targetRec);
+        return [{
+          id: targetRec, workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId, course_id: null,
+          release_key: `rk-${targetRec}`, exposure_origin: "assistant", support_domain: "unknown",
+          context_anchor: { purpose: "learning_help" }, generated_at: releasedIso,
+          released_at: releasedIso, acknowledged_at: null, history_revision: 2,
+        }];
+      }
+      if (s.startsWith("SELECT DISTINCT COALESCE") || s.startsWith("SELECT root_observation_id")) return [];
+      return unexpected(q);
+    });
+    const repo = createOpeningConversationRepository(Object.assign(sql, { begin: (run: (tx: typeof sql) => unknown) => run(sql) }));
+    const listed = await repo.listTurns(scope, convId);
+    expect(listed.map(t => ({ id: t.id, text: t.text, released: t.exposureReceipt?.releasedAt ?? null }))).toEqual([
+      { id: tLegacyDelivered, text: "Delivered legacy temp", released: releasedIso },
+      { id: tLegacyUnreleased, text: unavailable, released: null },
+      { id: tDerivedFirstDelivery, text: "Valid derived despite low expired UUID", released: releasedIso },
+    ]);
+    expect(releasedReceipts).toEqual([rDerivedPending]);
+  }
+});
+
 it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception lineage validation on PostgreSQL 16", async () => {
   // PGlite is provisioned locally for this optional real-SQL test so the workspace lockfile stays unchanged.
   const packageName = "@electric-sql/pglite";
@@ -1280,6 +1684,9 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       [candidate.revisionId, scope.workspaceId, scope.ownerUserId]);
     const plans: { query: string; cost: number }[] = [];
     let explain = false;
+    let spSeq = 0;
+    let useRealTx = false;
+    let txDepth = 0;
     class SqlFragment {
       constructor(readonly parts: readonly string[], readonly values: unknown[] = []) {}
       render(params: unknown[]): string {
@@ -1295,7 +1702,7 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       async execute() {
         const params: unknown[] = [];
         const query = this.render(params).trim();
-        if (explain && /^(SELECT|WITH)\b/.test(query)) {
+        if (explain && txDepth === 0 && /^(SELECT|WITH)\b/.test(query)) {
           const result = await db.query<{ "QUERY PLAN": { Plan: { "Total Cost": number } }[] }>(
             "EXPLAIN (FORMAT JSON) " + query, params);
           const cost = result.rows[0]!["QUERY PLAN"][0]!.Plan["Total Cost"];
@@ -1307,8 +1714,42 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
     }
     const sql = Object.assign(
       (parts: TemplateStringsArray, ...values: unknown[]) => new SqlFragment(parts, values),
-      { unsafe: (text: string) => new SqlFragment([text]), json: JSON.stringify,
-        begin: (run: (tx: Sql) => Promise<unknown>) => run(sql) },
+      {
+        unsafe: (text: string) => new SqlFragment([text]),
+        json: JSON.stringify,
+        begin: async (run: (tx: Sql) => Promise<unknown>) => {
+          if (!useRealTx) return run(sql);
+          if (txDepth === 0) {
+            txDepth++;
+            await db.exec("BEGIN");
+            try {
+              const out = await run(sql);
+              await db.exec("COMMIT");
+              return out;
+            } catch (error) {
+              await db.exec("ROLLBACK");
+              throw error;
+            } finally {
+              txDepth--;
+            }
+          }
+          return (sql as unknown as { savepoint: <T>(fn: (sp: Sql) => Promise<T>) => Promise<T> }).savepoint(run);
+        },
+        savepoint: async <T>(run: (sp: Sql) => Promise<T>): Promise<T> => {
+          if (!useRealTx || txDepth === 0) return run(sql);
+          const sp = `r13_sp_${++spSeq}`;
+          await db.exec(`SAVEPOINT ${sp}`);
+          try {
+            const out = await run(sql);
+            await db.exec(`RELEASE SAVEPOINT ${sp}`);
+            return out;
+          } catch (error) {
+            await db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+            await db.exec(`RELEASE SAVEPOINT ${sp}`);
+            throw error;
+          }
+        },
+      },
     ) as unknown as Sql;
     const read = async () => {
       const [row] = await sql`SELECT ${turnUsesInactiveMisconception(sql)} AS hidden FROM opening_turns t WHERE t.id=${assistantTurnId}`;
@@ -2363,6 +2804,324 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       expect(scaleRes.historyCourseBindings).toEqual([
         { courseId, materialUse: "citation", sourceIds: [], sourceRefs: [], memoryIds: [...r12ScaleMems].sort() },
       ]);
+
+      // 8) Round-13 P1 #1/#2 & P2 #3/#4 on real PostgreSQL 16.4 (< 20,000 EXPLAIN cost gate active):
+      SqlFragment.prototype.execute = origExecute;
+      useRealTx = true;
+
+      // (a) P1 #1: Temporary memory expiring mid-release (after locked reread & revision increments, right before UPDATE opening_help_exposures)
+      // rolls back its savepoint (no orphaned history_revision / workspace_history_revision), leaves released_at NULL, and redacts in
+      // listTurns / listSummaries / releaseReturnedTurnIds while releasing an earlier valid receipt in the same batch!
+      const r13ExpConv = "b4000000-0000-4000-8000-000000000001";
+      const r13ExpTempMem = "b4000000-0000-4000-8000-000000000002";
+      const r13Turn1 = "b4000000-0000-4000-8000-000000000003";
+      const r13Turn2 = "b4000000-0000-4000-8000-000000000004";
+      const r13Rec1 = "b4000000-0000-4000-8000-000000000005";
+      const r13Rec2 = "b4000000-0000-4000-8000-000000000006";
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)",
+        [r13ExpConv, scope.workspaceId, scope.ownerUserId, courseId]);
+      const resetR13ExpiryFixture = async () => {
+        const freshFutureIso = new Date(Date.now() + 120_000).toISOString();
+        await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at)
+          VALUES ($1,$2,$3,$4,'temporary',$5)
+          ON CONFLICT (id) DO UPDATE SET expires_at = EXCLUDED.expires_at, status = 'active'`,
+          [r13ExpTempMem, scope.workspaceId, courseId, JSON.stringify([cleanOriginId]), freshFutureIso]);
+        await db.query("DELETE FROM opening_help_exposures WHERE id = ANY($1::uuid[])", [[r13Rec1, r13Rec2]]);
+        await db.query("DELETE FROM opening_turns WHERE id = ANY($1::uuid[])", [[r13Turn1, r13Turn2]]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+            context_anchor,query_system,created_at,text)
+          VALUES ($1,$3,$4,'assistant','complete',NULL,'[]',$6,false,to_timestamp($7),'R13 valid confirmed turn'),
+                 ($2,$3,$4,'assistant','complete',NULL,$5,$6,false,to_timestamp($8),'R13 mid-release expiring turn')`,
+          [r13Turn1, r13Turn2, scope.workspaceId, r13ExpConv,
+            JSON.stringify([{ memoryDependencyIds: [r13ExpTempMem] }]),
+            JSON.stringify({ courseId }), baseEpochSec + 60_000, baseEpochSec + 60_001]);
+        await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+          VALUES ($1,$3,$4,$5,$6,'assistant','r13-rec-1',$8,NULL),
+                 ($2,$3,$4,$5,$7,'assistant','r13-rec-2',$8,NULL)`,
+          [r13Rec1, r13Rec2, scope.workspaceId, scope.ownerUserId, courseId, r13Turn1, r13Turn2,
+            JSON.stringify({ purpose: "learning_help", courseId })]);
+        return freshFutureIso;
+      };
+      // Hook SqlFragment.execute so right before UPDATE opening_help_exposures for r13Rec2 (AFTER nextLearningHistoryRevision &
+      // nextWorkspaceLearningHistoryRevision ran inside the savepoint!), clock_timestamp() > $expiresAt holds by shifting the
+      // bound deadline parameter into the past (simulating wall-clock passing the deadline mid-savepoint)!
+      const installMidSavepointExpiryHook = () => {
+        SqlFragment.prototype.execute = async function (this: SqlFragment) {
+          const params: unknown[] = [];
+          const rendered = this.render(params).trim();
+          if (rendered.startsWith("UPDATE opening_help_exposures") && rendered.includes("clock_timestamp() <") && params.includes(r13Rec2)) {
+            const pastIso = new Date(Date.now() - 5_000).toISOString();
+            params[params.length - 1] = pastIso;
+            return (await db.query(rendered, params)).rows;
+          }
+          return origExecute.call(this);
+        };
+      };
+
+      await resetR13ExpiryFixture();
+      const readRevs = async () => ({
+        courseRev: Number((await db.query<{ revision: string }>(
+          "SELECT COALESCE((SELECT revision FROM opening_learning_history_revisions WHERE workspace_id=$1 AND owner_user_id=$2 AND course_id=$3), 0)::text AS revision",
+          [scope.workspaceId, scope.ownerUserId, courseId],
+        )).rows[0]!.revision),
+        wsRev: Number((await db.query<{ revision: string }>(
+          "SELECT COALESCE((SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=$1), 0)::text AS revision",
+          [scope.workspaceId],
+        )).rows[0]!.revision),
+      });
+      const revsBeforeList = await readRevs();
+      installMidSavepointExpiryHook();
+      const r13ListedTurns = await repo.listTurns(scope, r13ExpConv);
+      SqlFragment.prototype.execute = origExecute;
+      expect(r13ListedTurns.map(t => ({ id: t.id, text: t.text, hasReceipt: Boolean(t.exposureReceipt) }))).toEqual([
+        { id: r13Turn1, text: "R13 valid confirmed turn", hasReceipt: true },
+        { id: r13Turn2, text: unavailable, hasReceipt: false },
+      ]);
+      const revsAfterList = await readRevs();
+      // Only r13Rec1 incremented revisions (+1); r13Rec2's savepoint rolled back its revision increments!
+      expect(revsAfterList.courseRev).toBe(revsBeforeList.courseRev + 1);
+      expect(revsAfterList.wsRev).toBe(revsBeforeList.wsRev + 1);
+      expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [r13Rec2])).rows[0]?.released_at)
+        .toBeNull();
+
+      await resetR13ExpiryFixture();
+      const revsBeforeSum = await readRevs();
+      // Delete r13Turn1's pending receipt so r13Turn2 (the latest turn) is the preview turn in listSummaries:
+      await db.query("DELETE FROM opening_help_exposures WHERE id=$1", [r13Rec1]);
+      installMidSavepointExpiryHook();
+      const r13Summaries = await repo.listSummaries(scope);
+      SqlFragment.prototype.execute = origExecute;
+      expect(r13Summaries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: r13ExpConv, lastTurnPreview: unavailable }),
+      ]));
+      expect(await readRevs()).toEqual(revsBeforeSum);
+      expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [r13Rec2])).rows[0]?.released_at)
+        .toBeNull();
+
+      await resetR13ExpiryFixture();
+      const revsBeforeResume = await readRevs();
+      installMidSavepointExpiryHook();
+      const r13Resumed = await repo.releaseReturnedTurnIds(scope, r13ExpConv, [r13Turn1, r13Turn2]);
+      SqlFragment.prototype.execute = origExecute;
+      expect(r13Resumed).toEqual([
+        { id: r13Turn1, role: "assistant", text: "R13 valid confirmed turn", citations: [] },
+        { id: r13Turn2, role: "assistant", text: unavailable, citations: [] },
+      ]);
+      const revsAfterResume = await readRevs();
+      expect(revsAfterResume.courseRev).toBe(revsBeforeResume.courseRev + 1);
+      expect(revsAfterResume.wsRev).toBe(revsBeforeResume.wsRev + 1);
+      expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [r13Rec2])).rows[0]?.released_at)
+        .toBeNull();
+
+      // (b) P1 #2: Unbound conversation A/A (BOTH hashed Course-A misconception AND memory-bearing Course-A misconception) ->
+      // intermediate hashless B (both job-backed and jobless, no direct memory refs) -> final hashless A (pending receipt):
+      // listTurns, listSummaries, releaseReturnedTurnIds, sourceTurnsAllowMisconceptionMemory, readMemoryMisconceptionLineages,
+      // loadTutorHistoryContext, and readTutorHistoryAncestorStatus ALL reject/redact final A and leave released_at NULL!
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1,status='candidate' WHERE revision_id=$2",
+        [courseId, candidate.revisionId]);
+      await db.query("UPDATE opening_conversations SET course_id=$1 WHERE id=$2", [courseId, originConversation]);
+      await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]',source_ids='{}' WHERE id=$2",
+        [JSON.stringify(exact), originId]);
+      await db.query("UPDATE opening_memories SET course_id=$1,kind='confirmed',expires_at=NULL WHERE id=$2", [courseId, memoryId]);
+
+      for (const [tag, hashedOrigin, joblessB] of [
+        ["hashed-jobB", true, false],
+        ["hashed-joblessB", true, true],
+        ["mem-jobB", false, false],
+        ["mem-joblessB", false, true],
+      ] as const) {
+        const idx = ["hashed-jobB", "hashed-joblessB", "mem-jobB", "mem-joblessB"].indexOf(tag) + 1;
+        const pfx = `b410000${idx}-0000-4000-8000-0000000000`;
+        const cId = `${pfx}01`, u1 = `${pfx}02`, a1 = `${pfx}03`, u2 = `${pfx}04`, a2 = `${pfx}05`;
+        const u3 = `${pfx}06`, a3 = `${pfx}07`, rec3 = `${pfx}08`, derMem = `${pfx}09`, curA = `${pfx}10`;
+        await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)", [cId, scope.workspaceId, scope.ownerUserId]);
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+            context_anchor,query_system,created_at,text)
+          VALUES ($1,$7,$8,'user','complete',NULL,'[]',$11,false,to_timestamp($13),'Q1 A'),
+                 ($2,$7,$8,'assistant','complete',$9,$10,$11,false,to_timestamp($13),'A1 A'),
+                 ($3,$7,$8,'assistant','complete',NULL,'[]',$12,false,to_timestamp($14),'A2 hashless B'),
+                 ($4,$7,$8,'user','complete',NULL,'[]',$11,false,to_timestamp($15),'Q3 A'),
+                 ($5,$7,$8,'assistant','complete',NULL,'[]',$11,false,to_timestamp($15),'A3 hashless A'),
+                 ($6,$7,$8,'user','complete',NULL,'[]',$11,false,to_timestamp($16),'Current A')`,
+          [u1, a1, a2, u3, a3, curA, scope.workspaceId, cId,
+            hashedOrigin ? JSON.stringify(exact) : null,
+            hashedOrigin ? "[]" : JSON.stringify([{ memoryDependencyIds: [memoryId] }]),
+            JSON.stringify({ courseId }), JSON.stringify({ courseId: otherCourseId }),
+            baseEpochSec + 61_000, baseEpochSec + 61_010, baseEpochSec + 61_020, baseEpochSec + 61_030]);
+        await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$1), ($5,$2,$3,$6,$5)",
+          [a1, scope.workspaceId, cId, u1, a3, u3]);
+        if (!joblessB) {
+          await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+              context_anchor,query_system,created_at,text)
+            VALUES ($1,$2,$3,'user','complete',NULL,'[]',$4,false,to_timestamp($5),'Q2 B')`,
+            [u2, scope.workspaceId, cId, JSON.stringify({ courseId: otherCourseId }), baseEpochSec + 61_010]);
+          await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$1)",
+            [a2, scope.workspaceId, cId, u2]);
+        }
+        await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+          VALUES ($1,$2,$3,$4,$5,'assistant',$6,$7,NULL)`,
+          [rec3, scope.workspaceId, scope.ownerUserId, courseId, a3, `r13-${tag}`, JSON.stringify({ purpose: "learning_help", courseId })]);
+        await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,$3,$4,'confirmed',NULL)",
+          [derMem, scope.workspaceId, courseId, JSON.stringify([a3])]);
+        await db.exec("ANALYZE");
+
+        const turnsRes = await repo.listTurns(scope, cId);
+        const finalRow = turnsRes.find(t => t.id === a3);
+        expect(finalRow, tag).toMatchObject({ id: a3, text: unavailable });
+        expect(finalRow?.exposureReceipt, tag).toBeUndefined();
+        expect(await repo.releaseReturnedTurnIds(scope, cId, [a3]), tag).toEqual([
+          { id: a3, role: "assistant", text: unavailable, citations: [] },
+        ]);
+        // Delete curA temporarily to check listSummaries when a3 is the latest turn:
+        await db.query("UPDATE opening_turns SET created_at=to_timestamp($1) WHERE id=$2", [baseEpochSec + 61_040, a3]);
+        expect(await repo.listSummaries(scope), tag).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: cId, lastTurnPreview: unavailable }),
+        ]));
+        await db.query("UPDATE opening_turns SET created_at=to_timestamp($1) WHERE id=$2", [baseEpochSec + 61_020, a3]);
+        expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [rec3])).rows[0]?.released_at, tag)
+          .toBeNull();
+        expect(await sourceTurnsAllowMisconceptionMemory(sql, scope, [a3], courseId), tag).toBe(false);
+        expect(await readMemoryMisconceptionLineages(sql, scope, [derMem], courseId), tag).toEqual(new Map());
+        expect((await loadTutorHistoryContext(sql, scope, curA)).history, tag).toEqual([
+          { role: "user", text: "Q1 A" },
+          { role: "assistant", text: "A1 A" },
+        ]);
+        expect((await readTutorHistoryAncestorStatus(sql, scope, curA)).valid, tag).toBe(false);
+      }
+
+      // (c) P2 #3: Standalone legacy memoryOnly: true (no memoryDependencyIds) backed solely by a temporary memory:
+      // already-delivered turn remains visible after temporary backing expires (until misconception withdrawal),
+      // whereas unreleased turn is redacted and leaves released_at NULL!
+      const r13LegConv1 = "b4200000-0000-4000-8000-000000000001";
+      const r13LegConv2 = "b4200000-0000-4000-8000-000000000002";
+      const r13LegSrc = "b4200000-0000-4000-8000-000000000003";
+      const r13LegOrigin = "b4200000-0000-4000-8000-000000000004";
+      const r13LegTempBacking = "b4200000-0000-4000-8000-000000000005";
+      const r13LegDelivered = "b4200000-0000-4000-8000-000000000006";
+      const r13LegUnreleased = "b4200000-0000-4000-8000-000000000007";
+      const r13LegDelRec = "b4200000-0000-4000-8000-000000000008";
+      const r13LegUnrelRec = "b4200000-0000-4000-8000-000000000009";
+      const r13GlobalRev = "b4200000-0000-4000-8000-000000000010";
+      const r13GlobalLin = { kind: "v3_misconception_lineage" as const, courseId: null, revisionIds: [r13GlobalRev] };
+      await db.query("INSERT INTO v3_bitemporal_misconception_edges VALUES ($1,$2,$3,NULL,7,'(,)','(,)','candidate')",
+        [r13GlobalRev, scope.workspaceId, scope.ownerUserId]);
+      await db.query("INSERT INTO opening_sources (id,workspace_id,version,upload_state) VALUES ($1,$2,1,'uploaded')",
+        [r13LegSrc, scope.workspaceId]);
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$3,$4,NULL), ($2,$3,$4,NULL)",
+        [r13LegConv1, r13LegConv2, scope.workspaceId, scope.ownerUserId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,source_ids,source_versions,
+          context_source_refs,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',$4,ARRAY[$5]::uuid[],jsonb_build_object($5::text,1),$6,false,to_timestamp($7),'Legacy temp backing origin')`,
+        [r13LegOrigin, scope.workspaceId, r13LegConv1, JSON.stringify(r13GlobalLin), r13LegSrc,
+          JSON.stringify([{ sourceId: r13LegSrc, sourceVersion: 1 }]), baseEpochSec + 62_000]);
+      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,NULL,$3,'temporary',$4)",
+        [r13LegTempBacking, scope.workspaceId, JSON.stringify([r13LegOrigin]), new Date(Date.now() + 120_000).toISOString()]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',NULL,$4,false,to_timestamp($5),'Delivered legacy memoryOnly')`,
+        [r13LegDelivered, scope.workspaceId, r13LegConv1,
+          JSON.stringify([{ sourceId: r13LegSrc, sourceVersion: 1, memoryOnly: true }]), baseEpochSec + 62_010]);
+      await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+        VALUES ($1,$2,$3,NULL,$4,'assistant','r13-leg-del-rec',$5,NULL)`,
+        [r13LegDelRec, scope.workspaceId, scope.ownerUserId, r13LegDelivered, JSON.stringify({ purpose: "learning_help" })]);
+
+      // Deliver r13LegDelivered while r13LegTempBacking is unexpired:
+      const preExpLeg = await repo.listTurns(scope, r13LegConv1);
+      expect(preExpLeg.find(t => t.id === r13LegDelivered)).toMatchObject({
+        id: r13LegDelivered, text: "Delivered legacy memoryOnly",
+        exposureReceipt: expect.objectContaining({ id: r13LegDelRec, releasedAt: expect.any(String) }),
+      });
+
+      // Add unreleased legacy memoryOnly turn in r13LegConv2, then expire r13LegTempBacking:
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',NULL,$4,false,to_timestamp($5),'Unreleased legacy memoryOnly')`,
+        [r13LegUnreleased, scope.workspaceId, r13LegConv2,
+          JSON.stringify([{ sourceId: r13LegSrc, sourceVersion: 1, memoryOnly: true }]), baseEpochSec + 62_020]);
+      await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+        VALUES ($1,$2,$3,NULL,$4,'assistant','r13-leg-unrel-rec',$5,NULL)`,
+        [r13LegUnrelRec, scope.workspaceId, scope.ownerUserId, r13LegUnreleased, JSON.stringify({ purpose: "learning_help" })]);
+      await db.query("UPDATE opening_memories SET expires_at=clock_timestamp()-interval '1 second' WHERE id=$1", [r13LegTempBacking]);
+      await db.exec("ANALYZE");
+
+      // Already-delivered stays visible; unreleased is redacted and its receipt stays NULL!
+      expect((await repo.listTurns(scope, r13LegConv1)).find(t => t.id === r13LegDelivered))
+        .toMatchObject({ id: r13LegDelivered, text: "Delivered legacy memoryOnly" });
+      const postExpUnrel = await repo.listTurns(scope, r13LegConv2);
+      expect(postExpUnrel).toMatchObject([{ id: r13LegUnreleased, text: unavailable }]);
+      expect(postExpUnrel[0]?.exposureReceipt).toBeUndefined();
+      expect(await repo.listSummaries(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: r13LegConv1, lastTurnPreview: "Delivered legacy memoryOnly" }),
+        expect.objectContaining({ id: r13LegConv2, lastTurnPreview: unavailable }),
+      ]));
+      expect(await repo.releaseReturnedTurnIds(scope, r13LegConv1, [r13LegDelivered])).toEqual([
+        { id: r13LegDelivered, role: "assistant", text: "Delivered legacy memoryOnly", citations: [] },
+      ]);
+      expect(await repo.releaseReturnedTurnIds(scope, r13LegConv2, [r13LegUnreleased])).toEqual([
+        { id: r13LegUnreleased, role: "assistant", text: unavailable, citations: [] },
+      ]);
+      expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [r13LegUnrelRec])).rows[0]?.released_at)
+        .toBeNull();
+
+      // Withdrawing r13GlobalRev redacts the already-delivered legacy memoryOnly turn too!
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted' WHERE revision_id=$1", [r13GlobalRev]);
+      expect((await repo.listTurns(scope, r13LegConv1)).find(t => t.id === r13LegDelivered))
+        .toMatchObject({ id: r13LegDelivered, text: unavailable });
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET status='candidate' WHERE revision_id=$1", [r13GlobalRev]);
+
+      // (d) P2 #4: Derived memory ("5555...") from a legacy memoryOnly turn with two confirmed backings carrying active r13GlobalLin:
+      // lower UUID ("00000000-...") has an expired temporary ancestor, higher UUID ("ffffffff-...") is unexpired ->
+      // first delivery succeeds and releases the receipt!
+      const r13UuidConv = "b4300000-0000-4000-8000-000000000001";
+      const r13UuidSrc = "b4300000-0000-4000-8000-000000000002";
+      const r13LowTurn = "b4300000-0000-4000-8000-000000000003";
+      const r13HighTurn = "b4300000-0000-4000-8000-000000000004";
+      const r13MidLegTurn = "b4300000-0000-4000-8000-000000000005";
+      const r13FinalTurn = "b4300000-0000-4000-8000-000000000006";
+      const r13FinalRec = "b4300000-0000-4000-8000-000000000007";
+      const r13MidLegConv = "b4300000-0000-4000-8000-000000000008";
+      const r13FinalConv = "b4300000-0000-4000-8000-000000000009";
+      const r13LowConf = "00000000-0000-4000-8000-000000000099";
+      const r13MidDerived = "55555555-5555-4555-8555-555555555599";
+      const r13HighConf = "ffffffff-ffff-4fff-8fff-ffffffffff99";
+      await db.query("INSERT INTO opening_sources (id,workspace_id,version,upload_state) VALUES ($1,$2,1,'uploaded')",
+        [r13UuidSrc, scope.workspaceId]);
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$4,$5,NULL), ($2,$4,$5,NULL), ($3,$4,$5,NULL)",
+        [r13UuidConv, r13MidLegConv, r13FinalConv, scope.workspaceId, scope.ownerUserId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,source_ids,source_versions,
+          context_source_refs,query_system,created_at,text)
+        VALUES ($1,$5,$6,'assistant','complete',$9,ARRAY[$10]::uuid[],jsonb_build_object($10::text,1),$11,false,to_timestamp($14),'Low backing turn with expired temp'),
+               ($2,$5,$6,'assistant','complete',$9,ARRAY[$10]::uuid[],jsonb_build_object($10::text,1),$12,false,to_timestamp($14),'High backing turn clean'),
+               ($3,$5,$7,'assistant','complete',NULL,'{}','{}'::jsonb,$13,false,to_timestamp($15),'Legacy memoryOnly source turn'),
+               ($4,$5,$8,'assistant','complete',NULL,'{}','{}'::jsonb,$16,false,to_timestamp($17),'First delivery using derived memory')`,
+        [r13LowTurn, r13HighTurn, r13MidLegTurn, r13FinalTurn, scope.workspaceId,
+          r13UuidConv, r13MidLegConv, r13FinalConv,
+          JSON.stringify(r13GlobalLin), r13UuidSrc,
+          JSON.stringify([{ sourceId: r13UuidSrc, sourceVersion: 1 }, { memoryDependencyIds: [r13LegTempBacking] }]),
+          JSON.stringify([{ sourceId: r13UuidSrc, sourceVersion: 1 }]),
+          JSON.stringify([{ sourceId: r13UuidSrc, sourceVersion: 1, memoryOnly: true }]),
+          baseEpochSec + 63_000, baseEpochSec + 63_010,
+          JSON.stringify([{ memoryDependencyIds: [r13MidDerived] }]), baseEpochSec + 63_020]);
+      await db.query(`INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at)
+        VALUES ($1,$4,NULL,$5,'confirmed',NULL),
+               ($2,$4,NULL,$6,'confirmed',NULL),
+               ($3,$4,NULL,$7,'confirmed',NULL)`,
+        [r13LowConf, r13HighConf, r13MidDerived, scope.workspaceId,
+          JSON.stringify([r13LowTurn]), JSON.stringify([r13HighTurn]), JSON.stringify([r13MidLegTurn])]);
+      await db.query(`INSERT INTO opening_help_exposures (id,workspace_id,owner_user_id,course_id,turn_id,exposure_origin,release_key,context_anchor,released_at)
+        VALUES ($1,$2,$3,NULL,$4,'assistant','r13-uuid-order-rec',$5,NULL)`,
+        [r13FinalRec, scope.workspaceId, scope.ownerUserId, r13FinalTurn, JSON.stringify({ purpose: "learning_help" })]);
+      await db.exec("ANALYZE");
+
+      const r13UuidTurns = await repo.listTurns(scope, r13FinalConv);
+      expect(r13UuidTurns.find(t => t.id === r13FinalTurn)).toMatchObject({
+        id: r13FinalTurn,
+        text: "First delivery using derived memory",
+        exposureReceipt: expect.objectContaining({ id: r13FinalRec, releasedAt: expect.any(String) }),
+      });
+      expect(await repo.listSummaries(scope)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: r13FinalConv, lastTurnPreview: "First delivery using derived memory" }),
+      ]));
+      expect((await db.query<{ released_at: string | null }>("SELECT released_at FROM opening_help_exposures WHERE id=$1", [r13FinalRec])).rows[0]?.released_at)
+        .not.toBeNull();
     } finally {
       SqlFragment.prototype.execute = origExecute;
     }
@@ -2371,4 +3130,4 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
   } finally {
     await db.close();
   }
-}, 60_000);
+}, 90_000);

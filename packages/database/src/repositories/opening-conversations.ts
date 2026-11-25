@@ -8,7 +8,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
 import {
   conversationMisconceptionLineage, conversationTurnHasMisconceptionMemories, conversationTurnInactiveMisconception,
-  readTurnsWithInvalidMisconceptionMemories, turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
+  readTurnMisconceptionMemoryStatus, turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
 } from "./v3-bitemporal-misconception-memory";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
@@ -146,9 +146,14 @@ const hasPendingFirstDelivery = (row: Record<string, unknown>) =>
       && (row.exposure_receipt as Record<string, unknown>).released_at == null,
   );
 
-async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
+const redactTurnRow = <T extends Record<string, unknown>>(row: T): T => ({
+  ...row, text: INACTIVE_MISCONCEPTION_MESSAGE, last_turn_preview: INACTIVE_MISCONCEPTION_MESSAGE,
+  citations: [], system_query: null, exposure_receipt: null, pending_exposure_ids: [],
+});
+
+async function redactMemoryMisconceptionsWithDeadlines<T extends Record<string, unknown>>(
   db: Sql | TransactionSql, scope: OpeningConversationScope, rows: readonly T[],
-): Promise<T[]> {
+): Promise<{ rows: T[]; deadlines: Map<string, number> }> {
   const ids: string[] = [];
   const firstDeliveryTurnIds = new Set<string>();
   for (const row of rows) {
@@ -157,13 +162,19 @@ async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
     ids.push(turnId);
     if (hasPendingFirstDelivery(row)) firstDeliveryTurnIds.add(turnId);
   }
-  const invalid = await readTurnsWithInvalidMisconceptionMemories(
+  const { invalid, deadlines } = await readTurnMisconceptionMemoryStatus(
     db, scope, ids, { display: true, ...(firstDeliveryTurnIds.size ? { firstDeliveryTurnIds } : {}) },
   );
-  return rows.map(row => invalid.has(String(row.misconception_memory_turn_id)) ? {
-    ...row, text: INACTIVE_MISCONCEPTION_MESSAGE, last_turn_preview: INACTIVE_MISCONCEPTION_MESSAGE,
-    citations: [], system_query: null, exposure_receipt: null, pending_exposure_ids: [],
-  } : row);
+  return {
+    rows: rows.map(row => invalid.has(String(row.misconception_memory_turn_id)) ? redactTurnRow(row) : row),
+    deadlines,
+  };
+}
+
+async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
+  db: Sql | TransactionSql, scope: OpeningConversationScope, rows: readonly T[],
+): Promise<T[]> {
+  return (await redactMemoryMisconceptionsWithDeadlines(db, scope, rows)).rows;
 }
 
 const memoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='assistant'
@@ -171,17 +182,17 @@ const memoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='a
 const batchedMemoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='assistant'
   AND NOT display_authority.inactive_misconception AND display_authority.has_memory_dependencies THEN t.id END`;
 
-async function readContinuityRows(
+async function readContinuityRowsWithDeadlines(
   db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
   turnIds?: readonly string[], userOnly = false,
-) {
+): Promise<{ rows: Record<string, unknown>[]; deadlines: Map<string, number> }> {
   const questionFilter = !question ? db`` : question.attemptId
     ? db`AND t.status='complete' AND (t.attempt_id=${question.attemptId} OR t.context_anchor->>'attemptId'=${question.attemptId})`
     : db`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
         AND t.context_anchor->>'blockId'=${question.blockId ?? null}
         AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
   if (userOnly) {
-    return db`
+    const rows = await db`
       SELECT t.id, t.role, t.status, NULL::text AS job_status, NULL::jsonb AS job_error,
         t.text, '[]'::jsonb AS citations, NULL::jsonb AS system_query
       FROM opening_turns t
@@ -192,6 +203,7 @@ async function readContinuityRows(
         ${turnIds ? db`AND t.id=ANY(${[...turnIds]}::uuid[]) ORDER BY array_position(${[...turnIds]}::uuid[], t.id)`
           : db`ORDER BY t.created_at ASC`}
     `;
+    return { rows: [...rows], deadlines: new Map() };
   }
   const rows = await db`
     SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
@@ -220,18 +232,69 @@ async function readContinuityRows(
       ${turnIds ? db`AND t.id=ANY(${[...turnIds]}::uuid[]) ORDER BY array_position(${[...turnIds]}::uuid[], t.id)`
         : db`ORDER BY t.created_at ASC`}
   `;
-  return redactMemoryMisconceptions(db, scope, rows);
+  return redactMemoryMisconceptionsWithDeadlines(db, scope, rows);
+}
+
+async function readContinuityRows(
+  db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
+  turnIds?: readonly string[], userOnly = false,
+) {
+  return (await readContinuityRowsWithDeadlines(db, scope, conversationId, question, turnIds, userOnly)).rows;
 }
 
 export function createOpeningConversationRepository(sql: Sql) {
-  const pendingExposureIds = (rows: readonly Record<string, unknown>[]) => rows.flatMap(row =>
+  const rowPendingTurnReceiptIds = (row: Record<string, unknown>) =>
     row.role === "assistant" && row.status === "complete" && row.exposure_receipt
       && (row.exposure_receipt as Record<string, unknown>).released_at == null
-      ? [String((row.exposure_receipt as Record<string, unknown>).id)] : []);
-  async function releaseReturnedExposures(tx: TransactionSql, scope: OpeningConversationScope, ids: string[]) {
+      ? [String((row.exposure_receipt as Record<string, unknown>).id)] : [];
+  const pendingExposureIds = (rows: readonly Record<string, unknown>[]) => rows.flatMap(rowPendingTurnReceiptIds);
+  async function releaseRowsExposures<T extends Record<string, unknown>>(
+    tx: TransactionSql,
+    scope: OpeningConversationScope,
+    rows: readonly T[],
+    deadlines: ReadonlyMap<string, number>,
+    getPendingIds: (row: T) => readonly string[],
+  ): Promise<{ rows: T[]; receipts: Map<string, StudyExposureReceipt> }> {
     const receipts = new Map<string, StudyExposureReceipt>();
-    for (const id of new Set(ids)) receipts.set(id, await releaseOpeningStudyExposure(tx, scope, id));
-    return receipts;
+    const expiredReceiptIds = new Set<string>();
+    const expiredRowIndices = new Set<number>();
+    const expiredMemoryTurnIds = new Set<string>();
+    for (const [index, row] of rows.entries()) {
+      const memoryTurnId = row.misconception_memory_turn_id ? String(row.misconception_memory_turn_id) : undefined;
+      if (memoryTurnId && expiredMemoryTurnIds.has(memoryTurnId)) {
+        expiredRowIndices.add(index);
+        continue;
+      }
+      const deadlineMs = memoryTurnId !== undefined ? deadlines.get(memoryTurnId) : undefined;
+      const hasFiniteDeadline = deadlineMs !== undefined && Number.isFinite(deadlineMs);
+      for (const id of getPendingIds(row)) {
+        if (expiredReceiptIds.has(id)) {
+          expiredRowIndices.add(index);
+          if (memoryTurnId) expiredMemoryTurnIds.add(memoryTurnId);
+          break;
+        }
+        if (receipts.has(id)) continue;
+        const released = hasFiniteDeadline
+          ? await releaseOpeningStudyExposure(tx, scope, id, { expiresAt: new Date(deadlineMs).toISOString() })
+          : await releaseOpeningStudyExposure(tx, scope, id);
+        if (released === null) {
+          expiredReceiptIds.add(id);
+          expiredRowIndices.add(index);
+          if (memoryTurnId) expiredMemoryTurnIds.add(memoryTurnId);
+          break;
+        }
+        receipts.set(id, released);
+      }
+    }
+    const finalRows = expiredRowIndices.size === 0 && expiredMemoryTurnIds.size === 0
+      ? [...rows]
+      : rows.map((row, index) => {
+          const memoryTurnId = row.misconception_memory_turn_id ? String(row.misconception_memory_turn_id) : undefined;
+          return expiredRowIndices.has(index) || Boolean(memoryTurnId && expiredMemoryTurnIds.has(memoryTurnId))
+            ? redactTurnRow(row)
+            : row;
+        });
+    return { rows: finalRows, receipts };
   }
   return {
     async create(
@@ -350,14 +413,14 @@ export function createOpeningConversationRepository(sql: Sql) {
           AND c.owner_user_id = ${scope.ownerUserId}
         ORDER BY c.updated_at DESC
       `;
-      const pending = (rows: readonly Record<string, unknown>[]) =>
-        rows.flatMap(row => (row.pending_exposure_ids as string[] | null | undefined) ?? []);
+      const rowPendingIds = (row: Record<string, unknown>) =>
+        (row.pending_exposure_ids as string[] | null | undefined) ?? [];
+      const pending = (rows: readonly Record<string, unknown>[]) => rows.flatMap(rowPendingIds);
       const initial = await redactMemoryMisconceptions(sql, scope, await readSummaries(sql));
       const rows = pending(initial).length ? await sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const current = await redactMemoryMisconceptions(tx, scope, await readSummaries(tx));
-        await releaseReturnedExposures(tx, scope, pending(current));
-        return [...current];
+        const { rows: current, deadlines } = await redactMemoryMisconceptionsWithDeadlines(tx, scope, await readSummaries(tx));
+        return (await releaseRowsExposures(tx, scope, current, deadlines, rowPendingIds)).rows;
       }) : initial;
       return rows.map((row) => {
         const r = row as Record<string, unknown>;
@@ -425,8 +488,11 @@ export function createOpeningConversationRepository(sql: Sql) {
       if (!pendingExposureIds(initial).length) return mapTurns(initial, new Map());
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const rows = await redactMemoryMisconceptions(tx, scope, await readTurns(tx));
-        return mapTurns(rows, await releaseReturnedExposures(tx, scope, pendingExposureIds(rows)));
+        const { rows: lockedRows, deadlines } = await redactMemoryMisconceptionsWithDeadlines(tx, scope, await readTurns(tx));
+        const { rows: finalRows, receipts } = await releaseRowsExposures(
+          tx, scope, lockedRows, deadlines, rowPendingTurnReceiptIds,
+        );
+        return mapTurns(finalRows, receipts);
       });
     },
 
@@ -434,9 +500,11 @@ export function createOpeningConversationRepository(sql: Sql) {
       if (!turnIds.length) return [];
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
-        const rows = await readContinuityRows(tx, scope, conversationId, undefined, turnIds);
-        await releaseReturnedExposures(tx, scope, rows.flatMap(row => (row.pending_exposure_ids as string[] | undefined) ?? []));
-        return mapContinuityRows(rows, scope);
+        const { rows: lockedRows, deadlines } = await readContinuityRowsWithDeadlines(tx, scope, conversationId, undefined, turnIds);
+        const { rows: finalRows } = await releaseRowsExposures(
+          tx, scope, lockedRows, deadlines, row => (row.pending_exposure_ids as string[] | undefined) ?? [],
+        );
+        return mapContinuityRows(finalRows, scope);
       });
     },
 
