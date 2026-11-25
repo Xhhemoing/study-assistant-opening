@@ -1281,8 +1281,8 @@ describe("material hybrid retrieval", () => {
       expect(JSON.stringify(extFallbackP3)).not.toContain("Secret answer x = 42");
       expect(JSON.stringify(extFallbackP3)).not.toContain("Secret continuation y = 99");
 
-      // Nested local heading stack check: `# Chapter` -> `### Sub-Answer` (page 2) -> `### Public Section` (page 4)
-      // after fence closes on page 3 cleanly pops `### Sub-Answer` back to `"public"`.
+      // Nested subheading check: `# Chapter` -> `### Sub-Answer` (page 2) -> `### Public Section` (page 4)
+      // after fence closes on page 3 cleanly reopens `"public"`.
       const subSrc = "fenced-subheading-source";
       const subChunks: SourceChunk[] = [
         { ...chunk("sub-p1", "```\nCode lead", 1), sourceId: subSrc },
@@ -1307,6 +1307,201 @@ describe("material hybrid retrieval", () => {
       });
       expect(subRanked.map(c => c.id)).toEqual(["sub-p4"]);
       expect(JSON.stringify(subRanked)).not.toContain("Hidden sub-answer");
+    });
+
+    it("keeps a heading inside a nested fenced answer example strictly sealed even on empty-graph preferChunkId fallback", () => {
+      // Exact Round-3 Step-1 P1 #1:
+      // Page 1 opens a 4-backtick Markdown fence.
+      // Page 2 contains `## Answer Key` and opens a 3-backtick example fence.
+      // Page 3 contains `## Public Section` and answer text as literal example content.
+      // Page 4 closes both fences.
+      const nestedExampleSrc = "nested-fenced-answer-example";
+      const page1OuterOpen: SourceChunk = {
+        ...chunk("nfae-p1", "````markdown\nTemplate preamble", 1),
+        sourceId: nestedExampleSrc,
+      };
+      const page2AnswerExampleOpen: SourceChunk = {
+        ...chunk("nfae-p2", "## Answer Key\n```markdown\nExample answer block", 2),
+        sourceId: nestedExampleSrc,
+      };
+      const page3FakePublicHeadingInExample: SourceChunk = {
+        ...chunk("nfae-p3", "## Public Section\nsecret answer text omega = 314", 3),
+        sourceId: nestedExampleSrc,
+      };
+      const page4CloseBothFences: SourceChunk = {
+        ...chunk("nfae-p4", "```\n````", 4),
+        sourceId: nestedExampleSrc,
+      };
+
+      const emptyGraphPreferredPage3 = rankMaterialContext({
+        chunks: [page1OuterOpen, page2AnswerExampleOpen, page3FakePublicHeadingInExample, page4CloseBothFences],
+        query: "secret answer text omega = 314",
+        maxCharacters: 8000,
+        preferChunkId: "nfae-p3",
+        preferPage: 3,
+        dense: [{ chunk: page3FakePublicHeadingInExample, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [nestedExampleSrc],
+            admissibleSourceVersions: { [nestedExampleSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+            allowHintGated: true,
+          },
+        },
+      });
+      expect(emptyGraphPreferredPage3).toEqual([]);
+      expect(JSON.stringify(emptyGraphPreferredPage3)).not.toContain("secret answer text omega = 314");
+
+      // Also verify multi-level nested public fences (`page 1` ````, `page 2` ```, `page 3` ## Answer Key,
+      // `page 4` secret continuation, `page 5` closes both, `page 6` public theorem).
+      const deepSrc = "deep-nested-fences";
+      const deepChunks: SourceChunk[] = [
+        { ...chunk("deep-p1", "````markdown\nOuter showcase", 1), sourceId: deepSrc },
+        { ...chunk("deep-p2", "```text\nInner showcase", 2), sourceId: deepSrc },
+        { ...chunk("deep-p3", "## Answer Key\nDeep secret alpha = 19", 3), sourceId: deepSrc },
+        { ...chunk("deep-p4", "Deep secret continuation beta = 23", 4), sourceId: deepSrc },
+        { ...chunk("deep-p5", "```\n````", 5), sourceId: deepSrc },
+        { ...chunk("deep-p6", "Theorem 1: Public orthogonal decomposition theorem.", 6), sourceId: deepSrc },
+      ];
+      const deepRanked = rankMaterialContext({
+        chunks: deepChunks,
+        query: "Deep secret continuation orthogonal decomposition",
+        maxCharacters: 8000,
+        preferChunkId: "deep-p4",
+        preferPage: 4,
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-tainted", label: "Tainted", evidenceChunkIds: ["deep-p4"], privacyEpoch: 1 },
+            { id: "c-thm", label: "Orthogonal Decomposition", evidenceChunkIds: ["deep-p6"], privacyEpoch: 1 },
+          ],
+          edges: [{ from: "c-tainted", to: "c-thm", kind: "prerequisite", privacyEpoch: 1 }],
+          authorization: {
+            admissibleSourceIds: [deepSrc],
+            admissibleSourceVersions: { [deepSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(deepRanked.map(c => c.id)).toEqual(["deep-p6"]);
+      expect(JSON.stringify(deepRanked)).not.toContain("Deep secret");
+    });
+
+    it("returns later public chunks when a real public heading immediately follows the closing fence on the fence-closing page", () => {
+      // Exact Round-3 Step-1 P1 #2:
+      // Page 1 opens ```, Page 2 has `## Answer Key\nsecret answer`, Page 3 closes ``` followed immediately
+      // on Page 3 by `## Public Section`, and Page 4 has `Theorem 1: public theorem`.
+      const closePageSrc = "heading-on-fence-closing-page";
+      const p1Open: SourceChunk = {
+        ...chunk("hcp-p1", "```\nStarter code", 1),
+        sourceId: closePageSrc,
+      };
+      const p2Sealed: SourceChunk = {
+        ...chunk("hcp-p2", "## Answer Key\nsecret answer kappa = 88", 2),
+        sourceId: closePageSrc,
+      };
+      const p3CloseAndPublicHeading: SourceChunk = {
+        ...chunk("hcp-p3", "```\n## Public Section", 3),
+        sourceId: closePageSrc,
+      };
+      const p4PublicTheorem: SourceChunk = {
+        ...chunk("hcp-p4", "Theorem 1: public theorem on spectral convergence.", 4),
+        sourceId: closePageSrc,
+      };
+
+      const emptyGraphRanked = rankMaterialContext({
+        chunks: [p1Open, p2Sealed, p3CloseAndPublicHeading, p4PublicTheorem],
+        query: "secret answer spectral convergence theorem",
+        maxCharacters: 8000,
+        preferChunkId: "hcp-p2",
+        preferPage: 2,
+        dense: [
+          { chunk: p2Sealed, segmentIndex: 0 },
+          { chunk: p4PublicTheorem, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [closePageSrc],
+            admissibleSourceVersions: { [closePageSrc]: 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(emptyGraphRanked.map(c => c.id)).toEqual(["hcp-p4"]);
+      expect(emptyGraphRanked[0]?.text).toContain("Theorem 1: public theorem");
+      expect(JSON.stringify(emptyGraphRanked)).not.toContain("secret answer kappa = 88");
+
+      // Exact variant moving `## Public Section` from page 4 of the multi-segment continuation fixture
+      // onto page 3 immediately after the closing fence, leaving only the public theorem on page 4.
+      const movedSrc = "moved-heading-continuation-source";
+      const movedChunks: SourceChunk[] = [
+        { ...chunk("mv-p1", "```\nTemplate header", 1), sourceId: movedSrc },
+        { ...chunk("mv-p2", "# Chapter 1\n\n## Answer Key\nSecret answer x = 42", 2), sourceId: movedSrc },
+        {
+          ...chunk(
+            "mv-p3",
+            "Secret continuation y = 99 for spectral convergence. ".repeat(130) + "\n```\n## Public Section",
+            3,
+          ),
+          sourceId: movedSrc,
+        },
+        { ...chunk("mv-p4", "Theorem 1: Public theorem on spectral convergence.", 4), sourceId: movedSrc },
+      ];
+      const movedGraphRanked = rankMaterialContext({
+        chunks: movedChunks,
+        query: "spectral convergence",
+        maxCharacters: 12_000,
+        preferChunkId: "mv-p2",
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-pub-thm", label: "Spectral Convergence", evidenceChunkIds: ["mv-p4"], privacyEpoch: 3 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: [movedSrc],
+            admissibleSourceVersions: { [movedSrc]: 1 },
+            expectedPrivacyEpoch: 3,
+          },
+        },
+      });
+      expect(movedGraphRanked.map(c => c.id)).toEqual(["mv-p4"]);
+      expect(JSON.stringify(movedGraphRanked)).not.toContain("Secret answer x = 42");
+      expect(JSON.stringify(movedGraphRanked)).not.toContain("Secret continuation y = 99");
+
+      // Also verify cross-chunk LaTeX literal (`\begin{verbatim}...\end{verbatim}`) and HTML comment
+      // (`<!-- ... -->`) containers seal `## Answer Key` on opener/middle pages without sealing post-closer pages.
+      for (const [tag, openText, closeText] of [
+        ["verbatim", "\\begin{verbatim}\n## Answer Key\nSecret v = 1", "\\end{verbatim}\n## Public Section"],
+        ["comment", "<!--\n## Answer Key\nSecret v = 1", "-->\n## Public Section"],
+      ] as const) {
+        const srcId = `literal-${tag}-src`;
+        const rows: SourceChunk[] = [
+          { ...chunk(`${tag}-p1`, openText, 1), sourceId: srcId },
+          { ...chunk(`${tag}-p2`, "Secret continuation v = 2", 2), sourceId: srcId },
+          { ...chunk(`${tag}-p3`, closeText, 3), sourceId: srcId },
+          { ...chunk(`${tag}-p4`, "Theorem 2: Public invariant subspace theorem.", 4), sourceId: srcId },
+        ];
+        const res = rankMaterialContext({
+          chunks: rows,
+          query: "Secret continuation invariant subspace theorem",
+          maxCharacters: 8000,
+          preferChunkId: `${tag}-p2`,
+          pedagogicalGraph: {
+            concepts: [],
+            edges: [],
+            authorization: {
+              admissibleSourceIds: [srcId],
+              admissibleSourceVersions: { [srcId]: 1 },
+              expectedPrivacyEpoch: 1,
+            },
+          },
+        });
+        expect(res.map(c => c.id)).toEqual([`${tag}-p4`]);
+        expect(JSON.stringify(res)).not.toContain("Secret");
+      }
     });
   });
 });
