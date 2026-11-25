@@ -818,14 +818,26 @@ function calculusProofContradiction(candidate: ParsedExpression, target: Target,
   });
 }
 
+function standaloneProofEquationBody(claim: string): string {
+  const body = claim.trim().replace(
+    /^(?:(?:Step\s+\d{1,3}|第\s*\d{1,3}\s*步)\s*[:：.)]\s*|\d{1,3}\.\s+(?![\s+\-−*/^=]))/i, "",
+  );
+  const suffix = /[。，；：,;:]+\s*$|(?<!\.)\.\s*$/u.exec(body);
+  if (!suffix) return body;
+  let outside = false;
+  const balanced = scanMathSpans(body, (_char, index) => {
+    if (index === suffix.index) outside = true;
+    return true;
+  });
+  return balanced && outside ? body.slice(0, suffix.index).trimEnd() : body;
+}
+
 /** Corroborate only standalone scalar identities and explicit calculus equations. */
 export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVerification {
   const unverified: ProofClaimVerification = { status: "unverified", unconditional: false };
   if (claim.length > MAX_EXPRESSION_LENGTH) return unverified;
   return bounded(unverified, () => {
-    const body = claim.trim().replace(
-      /^(?:(?:Step\s+\d{1,3}|第\s*\d{1,3}\s*步)\s*[:：.)]\s*|\d{1,3}\.\s+(?![\s+\-−*/^=]))/i, "",
-    );
+    const body = standaloneProofEquationBody(claim);
     if (!keepsSymbolicMeaningWhenRendered(body, true)) return unverified;
     const parts = equalityTerms(body);
     if (!parts || parts.length < 2) return unverified;
@@ -873,15 +885,25 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
   });
 }
 
-const INEQUALITY = /!=|≠|\\(?:neq|ne)(?![a-z])/iu;
+const INEQUALITY = /!=|≠|\\(?:neq|ne)(?![a-z])|\b(?:(?:is|are|was|were)\s+)?not\s+equal\s+to\b|\b(?:does|do|did)\s+not\s+equal\b|不等于/giu;
+const COLLECTIVE_SIDE_DENIAL = /\b(?:sides|(?:both|(?:the\s+)?two)\s+(?:expressions|values|results))\s+(?:of\s+the\s+(?:equation|equality|identity|step)\s+)?(?:are\s+(?:not\s+equal|unequal)|do\s+not\s+(?:equal|match))\b|(?:左右)?(?:两边|两侧)(?:不相等|不等于|不等)/iu;
+const LEFT_SIDE = /\b(?:the\s+)?(?:left(?:[- ]hand)?\s+side|lhs)\b|等号左边|左边|左式/giu;
+const RIGHT_SIDE = /\b(?:the\s+)?(?:right(?:[- ]hand)?\s+side|rhs)\b|等号右边|右边|右式/giu;
 const INEQUALITY_TEXT_TOKEN = /(\${1,2})[^$\r\n]+\1|\\[a-z]+|!=|(\b(?!(?:sqrt|abs|ln|sin|cos|exp)\b)[a-z]{2,}\b|[\p{Script=Han}，。！？；：、,;:!?]|\.(?!\d))/giu;
 
-export function feedbackDeniesProvenEquality(text: string): boolean {
-  if (!INEQUALITY.test(text)) return false;
+export function feedbackDeniesProvenEquality(text: string, claim: string): boolean {
+  if (COLLECTIVE_SIDE_DENIAL.test(text) && verifyStandaloneProofEquationClaim(claim).unconditional) return true;
+  let assertion = text.replace(INEQUALITY, "!=");
+  if (!assertion.includes("!=")) return false;
+  const sides = claim.length <= MAX_EXPRESSION_LENGTH ? equalityTerms(standaloneProofEquationBody(claim)) : null;
+  if (sides && sides.length >= 2) {
+    assertion = assertion.replace(LEFT_SIDE, () => sides[0]!).replace(RIGHT_SIDE, () => sides.at(-1)!);
+  }
+  assertion = assertion.replace(/\bzero\b|零/giu, "0").replace(/\bone\b/giu, "1");
   // Keep fenced math and TeX commands intact while removing surrounding prose.
-  return text.replace(INEQUALITY_TEXT_TOKEN, (token, _fence, boundary) => boundary ? "\n" : token)
+  return assertion.replace(INEQUALITY_TEXT_TOKEN, (token, _fence, boundary) => boundary ? "\n" : token)
     .split("\n").some(assertion => {
-      const operands = assertion.split(INEQUALITY);
+      const operands = assertion.split("!=");
       return operands.length === 2 && verifyStandaloneProofEquationClaim(operands.join("=")).unconditional;
     });
 }
@@ -893,40 +915,94 @@ const DOMAIN_CLAUSE_TOKEN = new RegExp(
   FIELD_CHARACTERISTIC.source + String.raw`|\bgf\s*\([^()\r\n]+\)|/\s*\(\s*[0-9a-z]+\s*\)|!=|([,;:.!?()\r\n，；：。！？—–]|\b(?:but|however|whereas|while|though|although|yet)\b)`,
   "giu",
 );
-const DOMAIN_EXCLUSION = /\b(?:not|never|neither|nor|without|other\s+than|rather\s+than|instead\s+of|unlike|apart\s+from|except(?:\s+in|\s+over|\s+for)?|exclud\w*|avoid\w*)\b|而非|而不是|不在|不是(?:在)?|排除|除了/iu;
-const INLINE_DOMAIN_CONTRAST = /(?=\b(?:other\s+than|rather\s+than|instead\s+of|unlike|apart\s+from|except)\b|而非|而不是)/iu;
+const DOMAIN_EXCLUSION_PREFIX = /(?:\b(?:not|never|neither|nor|without|other\s+than|rather\s+than|instead\s+of|unlike|apart\s+from|except|exclud\w*|avoid\w*)\b(?:\s+(?:work(?:ing)?|reason(?:ing)?|calculat(?:e|ing)|comput(?:e|ing)|operat(?:e|ing)|in|over|on|within|using|under|for|where|the|a|an|field))*|而非(?:在)?|而不是(?:在)?|不在|不是(?:在)?|排除|除了)\s*\${0,2}\s*$/iu;
+const DOMAIN_EXCLUSION_SUFFIX = /^\s*\${0,2}(?:\s+(?:(?:is|are|was|were|be|being|must\s+be|should\s+be)\s+)?(?:excluded|ruled\s+out|disallowed|omitted|avoided|not\s+(?:used|allowed))\b|\s*(?:除外|被排除))/iu;
 const REAL_SCALAR_DOMAIN = /(?:ℝ|\\(?:mathbb|mathbf)\{\s*R\s*\}|\b(?:reals|real\s+(?:numbers?(?:\s+fields?)?|fields?))\b|实数域?)/iu;
-const EXCLUDED_REAL_DOMAIN = new RegExp([
-  String.raw`(?:${DOMAIN_EXCLUSION.source})(?:\s+(?:work(?:ing)?|reason(?:ing)?|calculat(?:e|ing)|in|over|within|the|from))*\s*[$]*${REAL_SCALAR_DOMAIN.source}`,
-  String.raw`${REAL_SCALAR_DOMAIN.source}[$]*(?:\s+(?:is|are|was|were|must\s+be|should\s+be))?\s+(?:exclud\w*|avoid\w*)\b`,
-  String.raw`${FIELD_CHARACTERISTIC.source}\s*(?:(?:is\s+)?not|other\s+than|rather\s+than|instead\s+of)\s*(?:0|zero)\b`,
-].join("|"), "iu");
+const ZERO_CHARACTERISTIC = new RegExp(FIELD_CHARACTERISTIC.source +
+  String.raw`\s*(?:of\s+[^,.;:()]+?\s+)?(?:=|is\b|equals?\b|equal\s+to\b|为|是)?\s*(?:0\b|zero\b|零)`, "iu");
+const EXCLUDED_ZERO_CHARACTERISTIC = new RegExp(FIELD_CHARACTERISTIC.source +
+  String.raw`\s*(?:(?:is\s+)?not|other\s+than|rather\s+than|instead\s+of)\s*(?:0\b|zero\b|零)`, "iu");
 
+const INDEXED_FIELD = /(?:𝔽|ℤ|\\mathbb\{\s*[FZ]\s*\}|\\mathbf\{\s*[FZ]\s*\}|\b[FZ])\s*(?:(?:_\s*)?(?:\{\s*)?(?:[0-9]+(?:\^[0-9a-z]+)?|[pqn])(?![A-Za-z0-9])(?:\s*\})?|[₀-₉]+)/u;
+const GALOIS_FIELD = /\bgf\s*\([0-9a-z^+\s]+\)/iu;
+const FIELD_DESCRIPTION = /\b(?:finite|galois|residue|quotient|splitting|cyclotomic|p-adic|padic|complex|algebraically\s+closed|arbitrary|general|abstract)\s+fields?\b|\bfields?\s+of\s+(?:fractions|complex)\b/iu;
 const NON_REAL_SCALAR_CONTEXT = [
   /(?:ℤ|\\mathbb\{\s*Z\s*\}|\\mathbf\{\s*Z\s*\}|\bZ)\s*\/\s*(?:\(\s*)?(?:[0-9]+|[A-Za-z])(?:\s*(?:ℤ|\\mathbb\{\s*Z\s*\}|\\mathbf\{\s*Z\s*\}|Z))?(?:\s*\))?(?![A-Za-z0-9])/u,
-  /(?:𝔽|ℤ|\\mathbb\{\s*[FZ]\s*\}|\\mathbf\{\s*[FZ]\s*\}|\b[FZ])\s*(?:(?:_\s*)?(?:\{\s*)?(?:[0-9]+(?:\^[0-9a-z]+)?|[pqn])(?![A-Za-z0-9])(?:\s*\})?|[₀-₉]+)/u,
-  /\bgf\s*\([0-9a-z^+\s]+\)|\b(?:modulo|mod)\b|\\(?:pmod|bmod)\b|同余|模\s*[0-9p]/iu,
+  INDEXED_FIELD,
+  GALOIS_FIELD,
+  /\b(?:modulo|mod)\b|\\(?:pmod|bmod)\b|同余|模\s*[0-9p]/iu,
   new RegExp(FIELD_CHARACTERISTIC.source + String.raw`\s*(?:(?:of\s+[^,.;:()]+?\s+)?(?:=|is\b|equals?\b|equal\s+to\b|为|是)?\s*(?:[1-9][0-9]*|[pq]|two|three|five|seven|eleven|prime|positive|nonzero|non-zero)\b|(?:!=|≠|\\neq|\\ne|>)\s*(?:0|zero|零)(?![a-z0-9])|(?:为|是|=)?\s*(?:二|三|五|七|素数|质数|正|非零)|(?:不等于|不为)\s*(?:0|零))`, "iu"),
-  /\b(?:finite|galois|residue|quotient|splitting|cyclotomic|p-adic|padic|complex|algebraically\s+closed|arbitrary|general|abstract)\s+fields?\b|\bfields?\s+of\s+(?:fractions|complex)\b/iu,
+  new RegExp(String.raw`(?:${FIELD_DESCRIPTION.source})(?:\s+\${0,2}(?:${INDEXED_FIELD.source}|${GALOIS_FIELD.source}))?`, "iu"),
   /ℂ|ℍ|\\mathbb\{\s*[CH]\s*\}|\b(?:complex\s+numbers?|quaternions?|rings?|semirings?|boolean|tropical|matrix|matrices|vectors?|linear\s+operators?|operator\s+algebra)\b|有限域|伽罗瓦域|复数域|复数|四元数|布尔|半环|热带|矩阵|向量|算子/iu,
 ];
+
+type ScalarDomain = "real" | "non_real";
+
+const DOMAIN_MENTIONS = [
+  ...NON_REAL_SCALAR_CONTEXT.map(pattern => ({ pattern, domain: "non_real" as const })),
+  { pattern: REAL_SCALAR_DOMAIN, domain: "real" as const },
+  { pattern: ZERO_CHARACTERISTIC, domain: "real" as const },
+  { pattern: EXCLUDED_ZERO_CHARACTERISTIC, domain: "non_real" as const },
+].map(({ pattern, domain }) => ({ pattern: new RegExp(pattern.source, pattern.flags + "g"), domain }));
 
 const PROOF_SUPPOSITION = /\b(?:assume|assuming|suppose|supposing|hypothesi[sz]e)\b|(?:^|[.!?;:。！？；：])\s*(?:if\s+|(?:assumption|hypothesis)\s*[:：]|(?:先|现|暂且)?假设(?!\s*不成立)|不妨设|若)/iu;
 const CONTRADICTION_INTENT = /\b(?:(?:for|by)\s+(?:way\s+of\s+|the\s+sake\s+of\s+)?contradiction|(?:seek\w*|sought|look\w*\s+for|search\w*\s+for|aim\w*\s+(?:for|at|to\s+[a-z]+)|(?:want\w*|need\w*)(?:\s+to\s+[a-z]+)?|(?:try\w*|attempt\w*|hop\w*|in\s+order)\s+to\s+[a-z]+|towards?|to\s+[a-z]+)\s+(?:a\s+|an\s+|some\s+|any\s+|the\s+)?contradiction)\b|(?:用|采用|使用|通过)?反证法?|(?:欲|试图|为了|寻求|寻找)(?:导出|推出|得到|得出)?矛盾/giu;
 const EXPLICIT_COUNTERFACTUAL = /\b(?:(?:derived|resulting)\s+contradiction|(?:derive[sd]?|yield[sd]?|give[sn]?|show[sn]?|is)\s+(?:a|the)\s+contradiction)\b|^\s*contradiction\b|归谬|(?:推出|得到|得出|导出)矛盾/iu;
-const CONTRADICTION_DISCHARGE = /\b(?:contradict\w*|absurd\w*|reductio|(?:reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*)\s+(?:the\s+)?(?:(?:inner|outer)\s+)?(?:assumption|supposition|hypothesis)|(?:assumption|supposition|hypothesis)\s+(?:is\s+|must\s+be\s+)?(?:false|impossible|contradicted|rejected|refuted|discharged)|contrary\s+to\s+(?:the\s+)?(?:assumption|supposition|hypothesis)|which\s+is\s+impossible)\b|矛盾|归谬|荒谬|(?:否定|推翻)(?:原|上述|该)?假设|(?:原|上述|该)?假设不成立/iu;
+const EXPLICIT_REJECTION = /\b(?:(?:reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*|contrary\s+to)\s+(?:the\s+)?(?:(?:inner|outer|first|second|initial|earlier)\s+)?(?:assumption|supposition|hypothesis)|(?:assumption|supposition|hypothesis)\s+(?:is\s+|must\s+be\s+)?(?:false|impossible|contradicted|rejected|refuted|discharged))\b|(?:否定|推翻)(?:原|上述|该|内层|外层)?假设|(?:原|上述|该|内层|外层)?假设不成立/iu;
+const DERIVED_CONTRADICTION = /\b(?:contradict\w*|absurd\w*|reductio|which\s+is\s+impossible)\b|矛盾|归谬|荒谬/iu;
+const INDIRECT_QUESTION = /\b(?:whether|(?:wonder|ask|check|test|see|question)\w*\s+if)\b|是否|能否/iu;
 const NEGATED_PROOF_ROLE = [
+  /\b(?:contradict\w*|assumption|supposition|hypothesis)[^\S\r\n]+(?:[a-z'’-]+[^\S\r\n]+){0,5}(?:yet\s+to\s+be(?:\s+[a-z'’-]+)?|far\s+from|short\s+of|unestablished|unproven|unreached|unresolved|pending|open|missing|absent|lacking)\b/giu,
+  /\b(?:yet\s+to|far\s+from|short\s+of|remains?\s+to|still\s+(?:need\w*|have|must|try\w*|attempt\w*|wait\w*)|prior\s+to|before|until)\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+(?:contradict\w*|absurd\w*|reductio|reject\w*|refut\w*|discharg\w*)\b/giu,
   /\b(?:contradict\w*|assumption|supposition|hypothesis)[^\S\r\n]+(?:[a-z'’-]+[^\S\r\n]+){0,4}(?:not|never|[a-z]+n['’]t)\b/giu,
   /\b(?:not|no|never|neither|nor|without|hardly|fail\w*[^\S\r\n]+to|unable[^\S\r\n]+to|cannot|can['’]t|[a-z]+n['’]t|avoid\w*)\b(?:[^\S\r\n]+[a-z'’-]+){0,6}[^\S\r\n]+(?:assum\w*|suppos\w*|hypothesi[sz]\w*|contradict\w*|absurd\w*|reductio|impossib\w*|reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*)\b/giu,
+  /(?:有待|尚未|仍未|还未|直到|在[^，。！？；：]{0,8}之前)[^，。！？；：]{0,8}(?:矛盾|归谬|荒谬)|(?:矛盾|归谬|荒谬)[^，。！？；：]{0,8}(?:有待|尚未|仍未|还未)/gu,
   /(?:无|没有|未曾?|并未|并非|不会|不能|尚未|不)[^，。！？；：,.!?;:—–()\r\n]{0,8}(?:矛盾|归谬|荒谬|反证|(?:否定|推翻)(?:原|上述|该)?假设)/gu,
 ];
 
-export function proofContextSupportsRealScalarCheck(texts: readonly string[]): boolean {
-  // Preserve punctuation inside field notation when splitting prose into clauses.
-  return !texts.some(text => text.replace(DOMAIN_CLAUSE_TOKEN, (token, boundary) => boundary ? "\n" : token)
-    .split("\n").some(clause => EXCLUDED_REAL_DOMAIN.test(clause) ||
-      clause.split(INLINE_DOMAIN_CONTRAST).some(part => !DOMAIN_EXCLUSION.test(part) &&
-        NON_REAL_SCALAR_CONTEXT.some(pattern => pattern.test(part)))));
+function advanceProofDomain(domain: ScalarDomain, texts: readonly (string | undefined)[]): ScalarDomain {
+  for (const text of texts) {
+    if (!text) continue;
+    // Keep characteristic and field notation intact when splitting clauses.
+    const clauses = text.replace(DOMAIN_CLAUSE_TOKEN, (token, boundary) => boundary ? "\n" : token).split("\n");
+    for (const clause of clauses) {
+      const mentions = DOMAIN_MENTIONS.flatMap(({ pattern, domain }) =>
+        [...clause.matchAll(pattern)].map(match => ({ start: match.index, end: match.index + match[0].length, domain })),
+      ).sort((left, right) => left.start - right.start || right.end - left.end);
+      let previousEnd = 0;
+      for (const mention of mentions) {
+        if (mention.start < previousEnd) continue;
+        const excluded = DOMAIN_EXCLUSION_PREFIX.test(clause.slice(previousEnd, mention.start)) ||
+          DOMAIN_EXCLUSION_SUFFIX.test(clause.slice(mention.end));
+        if (!excluded) domain = mention.domain;
+        else if (mention.domain === "real") domain = "non_real";
+        previousEnd = mention.end;
+      }
+    }
+  }
+  return domain;
+}
+
+export function proofStepUsesRealScalar(
+  steps: readonly ProofStep[], proposalContext: readonly (string | undefined)[],
+): ReadonlyMap<ProofStep, boolean> {
+  let domain = advanceProofDomain("real", proposalContext);
+  const result = new Map<ProofStep, boolean>();
+  for (const step of [...steps].sort((left, right) => left.stepIndex - right.stepIndex)) {
+    domain = advanceProofDomain(domain, [step.claim, step.feedback, step.repairPrompt]);
+    result.set(step, domain === "real");
+  }
+  return result;
+}
+
+function proofRoleText(text: string): string {
+  const sentences = text.match(/[^\r\n.?!。？！]+[.?!。？！]*/gu) ?? [];
+  const assertions = sentences.filter(sentence => !/[?？][.?!。？！]*$/u.test(sentence))
+    .map(sentence => sentence.split(/([,;，；])/u).map(clause => {
+      const indirect = INDIRECT_QUESTION.exec(clause);
+      return indirect ? clause.slice(0, indirect.index) : clause;
+    }).join("")).join("\n");
+  return NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), assertions);
 }
 
 /** Only a discharged supposition scopes other steps. An explicitly counterfactual step can stand on its own. */
@@ -934,22 +1010,35 @@ export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlyS
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
   const exempt = new Set<ProofStep>();
   const openStack: number[] = [];
+  let pendingRejectionFromContradiction = false;
   for (const [pos, step] of ordered.entries()) {
-    const texts = [step.claim, step.feedback].map(text => NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), text));
+    const texts = [step.claim, step.feedback].map(proofRoleText);
     const withoutIntent = texts.map(text => text.replace(CONTRADICTION_INTENT, " "));
     const hasIntent = texts.some((text, index) => text !== withoutIntent[index]);
-    const opensSupposition = hasIntent || texts.some(text => PROOF_SUPPOSITION.test(text));
-    if (opensSupposition) openStack.push(pos);
+    const explicitSupposition = texts.some(text => PROOF_SUPPOSITION.test(text));
+    const opensSupposition = explicitSupposition || (hasIntent && openStack.length === 0);
+    if (opensSupposition) {
+      openStack.push(pos);
+      pendingRejectionFromContradiction = false;
+    }
 
     if (hasIntent || (ordered.length === 1 && withoutIntent.some(text => EXPLICIT_COUNTERFACTUAL.test(text)))) {
       exempt.add(step);
     }
-    const dischargesInClaim = CONTRADICTION_DISCHARGE.test(withoutIntent[0]!);
     const canDischargeFromFeedback = !opensSupposition || pos === ordered.length - 1;
-    if (openStack.length && (dischargesInClaim || (canDischargeFromFeedback && CONTRADICTION_DISCHARGE.test(withoutIntent[1]!)))) {
+    const dischargeTexts = canDischargeFromFeedback ? withoutIntent : withoutIntent.slice(0, 1);
+    const rejects = dischargeTexts.some(text => EXPLICIT_REJECTION.test(text));
+    const derives = !rejects && dischargeTexts.some(text => DERIVED_CONTRADICTION.test(text));
+    if (rejects && pendingRejectionFromContradiction) {
+      // An immediate rejection belongs to the supposition whose contradiction was just derived.
+      exempt.add(step);
+    } else if (openStack.length && (rejects || derives)) {
       const start = openStack.pop()!;
       for (let index = start; index <= pos; index++) exempt.add(ordered[index]!);
+      pendingRejectionFromContradiction = derives;
+      continue;
     }
+    pendingRejectionFromContradiction = false;
   }
   return exempt;
 }

@@ -433,6 +433,138 @@ function incorrectEquality(claim: string, feedback = "The equality is incorrect.
 
 describe("symbolic proof feedback", () => {
   it.each([
+    "$1+1=0$.", "$$1+1=0$$.", "1+1=0。", "1+1=0.", "x+1=x+2;", "Step 1: $1=0$；：",
+  ])("vetoes a false equation followed by prose punctuation: %s", claim => {
+    expect(verifyStandaloneProofEquationClaim(claim).status).toBe("inequivalent");
+    expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+  });
+
+  it.each(["$1+1=0.$", "$$1+1=0。$$", "1. +3=3", "1+1=0..", "2=3!", "$1=0."])(
+    "keeps ambiguous math punctuation intact: %s", claim => {
+      expect(verifyStandaloneProofEquationClaim(claim).status).toBe("unverified");
+    },
+  );
+
+  it.each([
+    ["Work first over F₂. Now switch to ℝ.", "unverified"],
+    ["Work over F₂ without division.", "correct"],
+    ["Work over ℝ without using F₂.", "unverified"],
+    ["Not over F₂, work over ℝ.", "unverified"],
+    ["Work over ℝ instead of F₂.", "unverified"],
+    ["Work over ℝ, GF(2) is ruled out.", "unverified"],
+    ["Work over ℝ, avoid the field F₂.", "unverified"],
+    ["Work over ℝ, avoid the finite field F₂.", "unverified"],
+    ["Work over ℝ, the finite field F₂ is excluded.", "unverified"],
+    ["Work over F₂ but characteristic zero is excluded.", "correct"],
+    ["Work over F₂. Now char(K) = 0.", "unverified"],
+    ["Work over F₂. Now work over ℝ instead of ℂ.", "unverified"],
+    ["先在 F₂ 上运算，而后切换到实数域，有限域除外。", "unverified"],
+  ])("tracks positive domain selections in %s", (domain, expected) => {
+    expect(adjudicate("correct", proof("1+1=0", "correct"), { feedback: domain })).toBe(expected);
+  });
+
+  it("applies proposal context and sorted step domains without revising earlier verdicts", () => {
+    const feedback = proof("1+1=0", "correct");
+    const step = feedback.steps[0]!;
+    feedback.steps.unshift({ ...step, stepIndex: 3, claim: "1=0" },
+      { ...step, stepIndex: 2, required: false, claim: "Now switch to ℝ." });
+    const context = { transcription: "Work over ℝ.", feedback: "Switch to F₂." };
+    expect(adjudicate("correct", feedback, context)).toBe("unverified");
+    feedback.steps[0]!.required = false;
+    expect(adjudicate("correct", feedback, context)).toBe("correct");
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it.each([
+    "A contradiction has yet to be established.", "Have we obtained a contradiction?",
+    "First check whether this yields a contradiction.", "The contradiction remains unestablished.",
+    "Before we derive a contradiction, check this.", "This is far from a contradiction.", "能否推出矛盾？", "矛盾有待推出。",
+  ])("keeps an assumption open after pending or interrogative feedback: %s", comment => {
+    const feedback = proof("Assume x is positive.", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "1=0", feedback: comment });
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it("still recognizes a completed contradiction after a separate question", () => {
+    const feedback = proof("Assume x is positive.", "correct");
+    feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, claim: "1=0",
+      feedback: "Have we obtained a contradiction? This is a contradiction." });
+    expect(adjudicate("correct", feedback)).toBe("correct");
+  });
+
+  it("annotates an open supposition without opening a duplicate frame", () => {
+    const feedback = proof("Assume x+1=x.", "correct");
+    feedback.steps.push(...["We seek a contradiction.", "1=0", "Reject the assumption.", "2=3",
+      "The assumption is false."].map((claim, index) => ({ ...feedback.steps[0]!, stepIndex: index + 2, claim })));
+    expect(adjudicate("correct", feedback)).toBe("unverified");
+  });
+
+  it.each(["Reject the outer assumption.", "The outer assumption is false."])(
+    "uses the immediate explicit rejection to close only the derived inner contradiction before %s", rejection => {
+      const feedback = proof("Assume x+1=x.", "correct");
+      const step = feedback.steps[0]!;
+      feedback.steps.push({ ...step, stepIndex: 2, claim: "Assume y+1=y." },
+        { ...step, stepIndex: 3, claim: "1=0", feedback: "This is a contradiction." },
+        { ...step, stepIndex: 4, claim: "Reject the inner assumption." },
+        { ...step, stepIndex: 5, claim: "1=0" });
+      expect(adjudicate("correct", feedback)).toBe("unverified");
+      feedback.steps.push({ ...step, stepIndex: 6, claim: rejection });
+      expect(adjudicate("correct", feedback)).toBe("correct");
+    },
+  );
+
+  it.each([
+    ["(x+1)^2=x^2+2x+1", "You assumed x is not equal to zero without justification.", "incorrect"],
+    ["2+2=4", "The left side ≠ the right side.", "unverified"],
+    ["2+2=4", "2+2 is not equal to 4.", "unverified"],
+    ["2+2=4", "2+2 does not equal 4.", "unverified"],
+    ["$2+2=4$.", "等号左边不等于等号右边。", "unverified"],
+    ["2+2=4", "Both sides of the equation are not equal.", "unverified"],
+    ["2+2=4", "左侧条件 x 不等于零。", "incorrect"],
+    ["1+0=1", "The lhs is not equal to one.", "unverified"],
+    ["2+2=4", "The left side ≠ 3.", "incorrect"],
+  ])("attributes inequality operands on %s in %s", (claim, comment, expected) => {
+    expect(adjudicate("incorrect", incorrectEquality(claim, comment))).toBe(expected);
+  });
+
+  it.each([
+    ["The equality only holds when x=0.", "unverified"],
+    ["The equality holds only when x=0.", "unverified"],
+    ["It only holds when x=0.", "unverified"],
+    ["The equation fails outside x=0.", "unverified"],
+    ["The identity does not hold for all x.", "unverified"],
+    ["The reasoning fails when x=0 because you divide by x.", "incorrect"],
+    ["The derivation is flawed. It holds only when x=0.", "incorrect"],
+    ["The proof does not hold for all x.", "incorrect"],
+  ])("attributes restrictions in %s", (comment, expected) => {
+    expect(adjudicate("incorrect", incorrectEquality("(x+1)^2=x^2+2x+1", comment))).toBe(expected);
+  });
+
+  it.each([
+    ["Circular reasoning.", "The equality is incorrect."],
+    ["The equality is incorrect.", "Begs the question."],
+    ["The equality is incorrect, but the argument uses a forbidden method.", "Recheck it."],
+    ["The equality is incorrect. You divide by x without proving it is nonzero.", "Recheck it."],
+    ["The equality is incorrect. Division by zero.", "Recheck it."],
+  ])("retains a verdict with independent inference evidence in %s or %s", (comment, repairPrompt) => {
+    const feedback = incorrectEquality("(x+1)^2=x^2+2x+1", comment);
+    feedback.steps[0]!.repairPrompt = repairPrompt;
+    expect(adjudicate("incorrect", feedback)).toBe("incorrect");
+  });
+
+  it("keeps an incorrect criterion with an independent critique in a separate clause", () => {
+    const feedback = proof("(x+1)^2=x^2+2x+1", "incorrect");
+    expect(adjudicate("incorrect", feedback, { criteria: [{ label: "Method", verdict: "incorrect",
+      feedback: "The equality is incorrect. Circular reasoning." }] })).toBe("incorrect");
+  });
+
+  it("does not treat a justified division as an independent inference critique", () => {
+    const feedback = incorrectEquality("(x+1)^2=x^2+2x+1");
+    feedback.steps[0]!.repairPrompt = "You correctly divide by x after establishing it is nonzero.";
+    expect(adjudicate("incorrect", feedback)).toBe("unverified");
+  });
+
+  it.each([
     "We have not established a contradiction.", "We failed to produce a contradiction.",
     "We can’t demonstrate any contradiction.", "The contradiction that we expected never appeared.",
     "尚未通过上一步来推出矛盾。", "Neither statement yields an actual contradiction.",
@@ -521,7 +653,7 @@ describe("symbolic proof feedback", () => {
     ["You assumed x ≠ 0 without justification.", "incorrect"],
     ["You assumed x != 0 without justification.", "incorrect"],
     [String.raw`You assumed $x \neq 0$ without justification.`, "incorrect"],
-    ["The left side ≠ the right side.", "incorrect"],
+    ["The left side ≠ the right side.", "unverified"],
     ["(x+1)^2 ≠ x^2+2x+1", "unverified"],
     ["The calculation says 2+2 != 4.", "unverified"],
     [String.raw`The calculation says $2+2 \ne 4$.`, "unverified"],
@@ -747,12 +879,15 @@ describe("symbolic proof feedback", () => {
     expect(reasons.has("ai_graded_correct")).toBe(true);
   });
 
-  it("retains a negative proof verdict when feedback establishes modular arithmetic", () => {
+  it("uses modular arithmetic feedback only from the current or an earlier step", () => {
     const claim = "sqrt(4) = 2";
     expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "equivalent", unconditional: true });
     const feedback = incorrectEquality(claim);
     feedback.steps.push({ ...feedback.steps[0]!, stepIndex: 2, required: false, claim: "Check the choice of root.",
       feedback: "No principal square root was specified in F₅." });
+    expect(proofFeedbackAllowsOutcome("incorrect", feedback)).toBe(false);
+    expect(adjudicate("incorrect", feedback)).toBe("unverified");
+    feedback.steps[0]!.stepIndex = 3;
     expect(proofFeedbackAllowsOutcome("incorrect", feedback)).toBe(true);
     expect(adjudicate("incorrect", feedback)).toBe("incorrect");
   });
