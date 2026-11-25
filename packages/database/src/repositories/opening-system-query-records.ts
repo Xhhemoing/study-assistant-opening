@@ -90,8 +90,8 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       WHERE d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND d.title ILIKE ${pattern}
         AND (np.document_id IS NULL OR (np.workspace_id=${scope.workspaceId}
           AND ${noteContextSourceRefsIncluded(tx, scope.workspaceId, () => tx`np.context_source_refs`, false)}))
-        ${after ? tx`AND (d.updated_at < ${String(after.cursor_updated_at)}::timestamptz
-          OR (d.updated_at = ${String(after.cursor_updated_at)}::timestamptz AND d.id > ${String(after.id)}::uuid))` : tx``}
+        ${after ? tx`AND (d.updated_at < (${String(after.cursor_updated_at)}::text)::timestamptz
+          OR (d.updated_at = (${String(after.cursor_updated_at)}::text)::timestamptz AND d.id > ${String(after.id)}::uuid))` : tx``}
       ORDER BY d.updated_at DESC,d.id LIMIT ${batchSize}`,
     async () => row => readRecordNoteSources(tx, scope, row, Boolean(collectLineage)));
     for (const { row, sources } of page) {
@@ -109,7 +109,7 @@ export async function readSystemRecordQuery(tx: TransactionSql, scope: Scope,
       WHERE c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND NOT c.archived
         AND ${a.courseId ? tx`c.course_id=${a.courseId}` : tx`TRUE`} AND ${cardReadable(tx, scope.workspaceId)}
         ${!after ? tx`` : after.cursor_due_at == null ? tx`AND s.due_at IS NULL AND c.id > ${String(after.id)}::uuid`
-          : tx`AND (s.due_at IS NULL OR (s.due_at,c.id) > (${String(after.cursor_due_at)}::timestamptz,${String(after.id)}::uuid))`}
+          : tx`AND (s.due_at IS NULL OR (s.due_at,c.id) > ((${String(after.cursor_due_at)}::text)::timestamptz,${String(after.id)}::uuid))`}
       ORDER BY s.due_at NULLS LAST,c.id LIMIT ${batchSize}`, async batch => {
       const batchIds = batch.map(row => String(row.id));
       const documents = await tx`WITH pub_links AS MATERIALIZED (

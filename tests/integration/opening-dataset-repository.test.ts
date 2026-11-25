@@ -495,8 +495,8 @@ describe("synthetic deidentified dataset repository", () => {
       const { sql, scope, otherScope } = fixture;
       if (name === "notes") {
         await sql`WITH inserted AS (
-            INSERT INTO library_documents(workspace_id,title,lifecycle)
-            SELECT ${scope.workspaceId}, 'Note ' || n, 'confirmed' FROM generate_series(1,1002) n
+            INSERT INTO library_documents(workspace_id,title,lifecycle,updated_at)
+            SELECT ${scope.workspaceId}, 'Note ' || n, 'confirmed', '2026-01-01T00:00:00.123456Z'::timestamptz FROM generate_series(1,1002) n
             RETURNING id, title
           )
           INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,reason,blocks)
@@ -514,8 +514,14 @@ describe("synthetic deidentified dataset repository", () => {
             CASE WHEN title LIKE '%1' THEN ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0, publication: true }, { publicationCardIds: [[foreignPubCard.id.toUpperCase()]] }])}::jsonb
                  ELSE ${sql.json([{ sourceId: bgSourceId, sourceVersion: 0 }])}::jsonb END
           FROM foreign_docs`;
-        await sql`INSERT INTO cards(workspace_id,owner_user_id,front,back)
-          SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n`;
+        await sql`WITH inserted_cards AS (
+            INSERT INTO cards(workspace_id,owner_user_id,front,back)
+            SELECT ${scope.workspaceId}, ${scope.ownerUserId}, 'Prompt ' || n, 'Answer' FROM generate_series(1,1002) n
+            RETURNING id
+          )
+          INSERT INTO card_review_states(workspace_id,owner_user_id,card_id,ease,interval_days,due_at)
+          SELECT ${scope.workspaceId}, ${scope.ownerUserId}, id, 2.5, 0, '2026-01-01T00:00:00.123456Z'::timestamptz
+          FROM (SELECT id FROM inserted_cards LIMIT 600) due_cards`;
       } else {
         await sql`INSERT INTO courses(workspace_id,title,slug)
           SELECT ${scope.workspaceId}, 'Course ' || n, 'course-' || n FROM generate_series(1,1002) n`;
