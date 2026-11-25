@@ -63,8 +63,6 @@ const jsAssessmentSolutionsContext = new RegExp(asJsPattern(assessmentSolutionsC
 const jsStandaloneAssessmentItem = new RegExp(standaloneAssessmentItem, "u");
 const horizontalWhitespace = "[ \t\f\v\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+";
 const pdfHorizontalWhitespace = new RegExp(horizontalWhitespace, "gu");
-const closingAtxHashes = String.raw`^( *#{1,6}(?: +.*?)?) +#+ *$`;
-const pdfClosingAtxHashes = new RegExp(closingAtxHashes, "gmu");
 
 // Reopen at the first content line, so earlier answer text on a physical page
 // cannot become public because a later line happens to look like a heading.
@@ -184,12 +182,30 @@ function acceptsPdfHeading(line: string, prefix: RegExpExecArray, prose: RegExp)
     && (prose !== jsEnglishProse || !jsQualifiedEnglishProse.test(suffix));
 }
 
+function stripArchiveClosingAtxHashes(line: string): string {
+  let leadEnd = 0;
+  while (leadEnd < line.length && line[leadEnd] === " ") leadEnd++;
+  let hashEnd = leadEnd;
+  while (hashEnd < line.length && line[hashEnd] === "#") hashEnd++;
+  const openHashes = hashEnd - leadEnd;
+  if (openHashes < 1 || openHashes > 6 || line[hashEnd] !== " ") return line;
+  let trailEnd = line.length;
+  while (trailEnd > hashEnd && line[trailEnd - 1] === " ") trailEnd--;
+  let closeHashStart = trailEnd;
+  while (closeHashStart > hashEnd && line[closeHashStart - 1] === "#") closeHashStart--;
+  if (closeHashStart === trailEnd || line[closeHashStart - 1] !== " ") return line;
+  let bodyEnd = closeHashStart - 1;
+  while (bodyEnd > hashEnd && line[bodyEnd - 1] === " ") bodyEnd--;
+  return line.slice(0, bodyEnd);
+}
+
 export function containsPdfAnswerLabel(text: string, { checkContext = true } = {}): boolean {
-  const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ").replace(pdfClosingAtxHashes, "$1");
+  const normalized = text.replace(/\r/gu, "").replace(pdfHorizontalWhitespace, " ");
   const primary: { rawLine: string; line: string }[] = [];
   const blocks = [primary];
   let block = primary;
-  for (const rawLine of normalized.split("\n")) {
+  for (const splitLine of normalized.split("\n")) {
+    const rawLine = stripArchiveClosingAtxHashes(splitLine);
     let line = rawLine.replace(/\*\*|__/gu, "");
     const auxiliaryHeader = jsVisionAuxiliary.exec(line);
     if (auxiliaryHeader) {
@@ -259,20 +275,22 @@ const furnitureSeparator = String.raw`(?: *[|｜—–] *| +- +)`;
 const furnitureTitleProse = String.raw`\m(?:on|see|at|pages?) +(?:page +)?\d+\M|[。！；!]|(?:见|参见)第 *\d+ *页`;
 const pageCounter = String.raw`(?:[(（\[【]? *(?:(?:(?:scanned|physical|printed|pdf) +)*(?:pages?|slides?) +|pp?\. *)\d+(?: *(?:of +|[/／–—-] *)\d+)? *[)）\]】]?|${chineseCounter}) *[.。．、]?`;
 const containerFurniture = String.raw`(?:(?:${englishContainerPrefix}|${chineseContainerPrefix}).*${furnitureSeparator}|${lineStart}${shortFurniturePrefix})${pageCounter} *$`;
-const titledPageCounter = String.raw`${lineStart}([^|｜—–]{1,96}?)(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
+const titledPageCounterSuffix = String.raw`(?:${furnitureSeparator}| *[:：] +)${pageCounter} *$`;
+const titledPageCounter = String.raw`${lineStart}(?!#{1,6} +#)([^|｜—–]{1,96}?)${titledPageCounterSuffix}`;
 const pageMetadataHeading = String.raw`${lineStart}(?:[\[【(] *)?(?:(?:cached|raw|readable|verified|automatic) +)*(?:transcription|ocr)\M`;
 const ocrPlaceholder = String.raw`${lineStart}[\[【(（] *(?:illegible|unreadable|blank|unclear|ocr|no +(?:readable +)?text|无法识别|无法辨认|空白页|图片描述|图像描述|图示与版面描述|不确定处)(?=[ \]】)）：:]|$)`;
 const continuedContainer = String.raw`(?:${englishContainerPrefix}|${chineseContainerPrefix}).*(?:[(（\[【] *(?:(?:to +be +)?${englishContinuationWord}|续|续上页|接上页) *[)）\]】]|\m${englishContinuationWord}(?: +(?:from|on) +.+)?|续上页|接上页| +续)[ .:：]*$`;
 const bareAnswerCounter = String.raw`${lineStart}(?:[(（\[【]? *(?:${counter}|${pageNumberRatio}) *[)）\]】]?|[-–—] *(?:\d+|${romanCounter}) *[-–—]) *[.。．、]? *$`;
 const inlineRunningHeading = String.raw`${lineStart}(?:\d+(?:\.\d+)*|${romanCounter} *[.。．、]?|[(（\[【] *${counter} *[)）\]】] *[.。．、]?|[-–—] *${counter} *[-–—] *[.。．、]?|${pageNumberRatio} *[)）\]】]? *[.。．、]?|${pageCounter}) *$|${containerFurniture}|${continuedContainer}|${pageMetadataHeading}|${ocrPlaceholder}`;
 const jsInlineRunningHeading = new RegExp(asJsPattern(inlineRunningHeading), "iu");
+const jsTitledPageCounterSuffix = new RegExp(titledPageCounterSuffix, "iu");
 const jsTitledPageCounter = new RegExp(titledPageCounter, "iu");
 const jsFurnitureTitleProse = new RegExp(asJsPattern(furnitureTitleProse), "iu");
 const jsEnglishReferenceVerb = new RegExp(asJsPattern(englishReferenceVerb), "u");
 
 function isArchiveRunningHeading(line: string): boolean {
   if (jsInlineRunningHeading.test(line)) return true;
-  const title = jsTitledPageCounter.exec(line)?.[1];
+  const title = jsTitledPageCounterSuffix.test(line) ? jsTitledPageCounter.exec(line)?.[1] : undefined;
   return Boolean(title && !jsEnglishReferenceVerb.test(title) && !jsFurnitureTitleProse.test(title));
 }
 const inlineTerminal = String.raw`[.。!?！？;；)）\]】□■∎] *$`;
@@ -349,9 +367,9 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
   return sql`pdf_archive_text AS (
     SELECT c.id,c.source_id,c.source_version,c.page,c.created_at,
       max(c.page) OVER (PARTITION BY c.source_id,c.source_version) AS max_source_page,
-      string_to_array(regexp_replace(
+      string_to_array(
         regexp_replace(replace(c.text,chr(13),''),${horizontalWhitespace},' ','g'),
-        ${"(?n)" + closingAtxHashes},${String.raw`\1`},'g'),chr(10)) AS lines
+        chr(10)) AS lines
     FROM opening_source_chunks c
     WHERE ${scope} AND c.page IS NOT NULL
   ), pdf_archive_headings AS (
@@ -388,7 +406,7 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
         NULLIF(regexp_replace(line,${chineseNumberedBlock},''),line) AS chinese_numbered,
         NULLIF(regexp_replace(line,${englishExamplePrefix},'','i'),line) AS english_example,
         NULLIF(regexp_replace(line,${chineseExamplePrefix},''),line) AS chinese_example,
-        (regexp_match(line,${titledPageCounter},'i'))[1] AS furniture_title,
+        CASE WHEN line ~* ${titledPageCounterSuffix} THEN (regexp_match(line,${titledPageCounter},'i'))[1] END AS furniture_title,
         NULLIF(regexp_replace(line,${dottedSectionPrefix},''),line) AS dotted_title
       FROM (
         SELECT id,source_id,source_version,page,max_source_page,created_at,raw_line,line_number,
@@ -407,9 +425,28 @@ function archivedPdfSealSpans(sql: Sql, scope: PendingQuery<Row[]>) {
               THEN replace(replace(raw_line,'**',''),'__','') ELSE raw_line END AS unstarred_line,
             regexp_replace(raw_line,${visionAuxiliary},'') AS aux_stripped
           FROM (
-            SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_line,
-              generate_subscripts(lines,1) AS line_number
-            FROM pdf_archive_text
+            SELECT id,source_id,source_version,page,max_source_page,created_at,line_number,
+              CASE
+                WHEN left(lead_trimmed,1)='#'
+                  AND right(trail_trimmed,1)='#'
+                  AND length(lead_trimmed)-length(after_open_hashes)<=6
+                  AND left(after_open_hashes,1)=' '
+                  AND right(without_close_hashes,1)=' '
+                  AND length(without_close_hashes)>length(raw_piece)-length(after_open_hashes)
+                THEN rtrim(without_close_hashes,' ')
+                ELSE raw_piece
+              END AS raw_line
+            FROM (
+              SELECT *,ltrim(lead_trimmed,'#') AS after_open_hashes,rtrim(trail_trimmed,'#') AS without_close_hashes
+              FROM (
+                SELECT *,ltrim(raw_piece,' ') AS lead_trimmed,rtrim(raw_piece,' ') AS trail_trimmed
+                FROM (
+                  SELECT id,source_id,source_version,page,max_source_page,created_at,unnest(lines) AS raw_piece,
+                    generate_subscripts(lines,1) AS line_number
+                  FROM pdf_archive_text
+                ) unnested_lines
+              ) trimmed_lines
+            ) atx_bounds
           ) raw_lines
         ) vision_lines
         WINDOW vision_block AS (PARTITION BY id ORDER BY line_number ROWS UNBOUNDED PRECEDING)

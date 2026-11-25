@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { describe, expect, it, vi } from "vitest";
-import { isPublicSourceChunk, preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { containsPdfAnswerLabel, isPublicSourceChunk, preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { chunksHaveReadableContent, createOpeningSourceChunksRepository, type NewSourceChunk } from "./opening-source-chunks";
 
 const base = { page: 1, slideLabel: null, startMs: null, endMs: null };
@@ -240,8 +240,41 @@ describe("page-less archived PDF chunks", () => {
     [`${example}\n${stem}\nSolution:\nYes.`, false],
     ["[图片描述]：Answer Key\n1. x = 3.", false],
     ["【图表观察描述，非原文或解答】\nExample 1: Cyclic groups\nSolution: Yes.", false],
+    ["## Answers ##   ", false],
+    [" ## Answers ## ", false],
+    ["## Answer#", true],
+    ["####### Answers ##", true],
+    [`${example}\n## Introduction ##   \nSolution:\nYes.`, false],
+    [`${example}\n ## ## \nSolution:\nYes.`, true],
+    [`${example}\n ## \nSolution:\nYes.`, true],
   ])("checks local answer context in %j", (text, isPublic) => {
     expect(isPublicSourceChunk({ mime: "application/pdf", page: null, text })).toBe(isPublic);
+  });
+
+  it("normalizes closing ATX hashes on long whitespace and hash-space lines in O(N) time (< 50 ms)", () => {
+    expect(containsPdfAnswerLabel("## Answers ##   ")).toBe(true);
+    expect(containsPdfAnswerLabel("## Answer#")).toBe(false);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answers ##   " })).toBe(false);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: "## Answer#" })).toBe(true);
+
+    const longSpaces = "## " + " ".repeat(25_000) + "prose";
+    const longHashSpaces = "## " + "# ".repeat(25_000) + "prose";
+    const longClosingAnswer = "## Answers" + " ".repeat(25_000) + "##   ";
+
+    const t0 = performance.now();
+    expect(containsPdfAnswerLabel(longSpaces)).toBe(false);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: longSpaces })).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(50);
+
+    const t1 = performance.now();
+    expect(containsPdfAnswerLabel(longHashSpaces)).toBe(false);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: longHashSpaces })).toBe(true);
+    expect(performance.now() - t1).toBeLessThan(50);
+
+    const t2 = performance.now();
+    expect(containsPdfAnswerLabel(longClosingAnswer)).toBe(true);
+    expect(isPublicSourceChunk({ mime: "application/pdf", page: 1, text: longClosingAnswer })).toBe(false);
+    expect(performance.now() - t2).toBeLessThan(50);
   });
 });
 

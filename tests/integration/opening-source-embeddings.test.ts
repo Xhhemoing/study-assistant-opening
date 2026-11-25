@@ -2130,4 +2130,58 @@ describe("pgvector material repository", { timeout: 30_000 }, () => {
     await expectArchivedPdfPages(pages, [4], 2);
     await expectArchivedPdfPages(pages, [4], 3);
   });
+
+  it("normalizes archived closing ATX hashes in O(N) without regex backtracking and preserves sealing parity", async () => {
+    const longSpaces = "## " + " ".repeat(25_000) + "prose";
+    const longHashSpaces = "## " + "# ".repeat(25_000) + "prose";
+    const pages = [
+      "Public introduction.",
+      longSpaces,
+      longHashSpaces,
+      "## Answers ##",
+      "Private continuation under Answers.",
+      " ## Chapter 2: Rings ## ",
+      "## Answer#\n## Title#\n####### Answers ##\n ## ## \n ## \n## ",
+    ];
+    const expectedPages = [1, 2, 3, 6, 7];
+    const pdf = await seed(pages);
+    await f.sql`UPDATE opening_sources SET mime='application/pdf' WHERE id=${pdf.sourceId}`;
+    const chunks = createOpeningSourceChunksRepository(f.sql);
+    const publicChunks = pdf.snapshot.chunks.filter(chunk => expectedPages.includes(chunk.page!));
+    const query = { ...model, sourceIds: [pdf.sourceId], vector: [1, 0, 0], limit: 32 };
+
+    const t0 = performance.now();
+    expect(await chunks.listChunks(f.scope, pdf.sourceId)).toEqual(publicChunks);
+    expect(await chunks.listForSources(f.scope, [pdf.sourceId])).toEqual(publicChunks);
+    expect(await chunks.listChunksAtVersion(f.scope, pdf.sourceId, 1, [4, 5, ...expectedPages])).toEqual(publicChunks);
+    expect(performance.now() - t0).toBeLessThan(1000);
+
+    for (const blockedPage of [4, 5]) {
+      await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: blockedPage }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+    await expect(readOpeningSourceContent(f.sql, f.scope, pdf.sourceId, { page: 7 }))
+      .resolves.toMatchObject({ pages: expectedPages, text: pages[6] });
+    expect(await backfilledPages(pdf)).toEqual(expectedPages);
+    expect((await pdf.repository.snapshot(f.scope, pdf.sourceId))?.chunks).toEqual(publicChunks);
+    expect([...new Set((await pdf.repository.search(f.scope, query)).map(({ chunk }) => chunk.page))]
+      .sort((a, b) => a! - b!)).toEqual(expectedPages);
+    expect((await pdf.repository.authorizeChunks(f.scope, pdf.snapshot.chunks)).chunks).toEqual(publicChunks);
+
+    const normalized = await f.sql<{ page: number; raw_line: string }[]>`
+      ${publicPdfSealBoundaries(f.sql, f.scope.workspaceId, { sourceIds: [pdf.sourceId], sourceVersion: 1 })}
+      SELECT page, raw_line FROM pdf_archive_lines WHERE page IN (2, 3, 4, 6, 7) ORDER BY position`;
+    expect(normalized).toEqual([
+      { page: 2, raw_line: "## prose" },
+      { page: 3, raw_line: longHashSpaces },
+      { page: 4, raw_line: "## Answers" },
+      { page: 6, raw_line: " ## Chapter 2: Rings" },
+      { page: 7, raw_line: "## Answer#" },
+      { page: 7, raw_line: "## Title#" },
+      { page: 7, raw_line: "####### Answers ##" },
+      { page: 7, raw_line: " ##" },
+      { page: 7, raw_line: " ## " },
+      { page: 7, raw_line: "## " },
+    ]);
+  });
 });
