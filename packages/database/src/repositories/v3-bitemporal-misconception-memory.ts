@@ -49,7 +49,7 @@ function savedTurn(db: Db, alias: TurnAlias) {
   return alias === "t" ? db`t` : alias === "a" ? db`a` : db`dt`;
 }
 
-function savedTurnUsesInactiveMisconception(db: Db, alias: TurnAlias, allowedCourses: FragmentFactory[]) {
+export function savedTurnUsesInactiveMisconception(db: Db, alias: TurnAlias, allowedCourses: FragmentFactory[]) {
   const turn = () => savedTurn(db, alias);
   const encoded = () => db`(${turn()}).intent_hash`;
   const course = () => lineageUuid(db, () => db`payload.value->>'courseId'`);
@@ -93,7 +93,7 @@ function savedTurnUsesInactiveMisconception(db: Db, alias: TurnAlias, allowedCou
   ) ELSE false END`;
 }
 
-function hasSavedMemoryReferences(db: Db, refs: FragmentFactory) {
+export function hasSavedMemoryReferences(db: Db, refs: FragmentFactory) {
   return db`(${turnHasMemoryDependencies(db, refs)} OR ${refs()} @? '$[*].memoryDependencyIds')`;
 }
 
@@ -254,11 +254,11 @@ export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
 }
 
 type MaterialUse = "citation" | "practice";
-type SavedMemoryOrigin = {
+export type SavedMemoryOrigin = {
   id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null; materialUse: MaterialUse;
   refs: unknown; standalone: boolean; historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
 };
-type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
+export type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
 
 function directMemoryOriginSide(
   db: Db, origin: FragmentFactory, pairedUser: FragmentFactory, course: FragmentFactory,
@@ -324,11 +324,47 @@ type ConversationPrefixMemoryOrigin = {
   origin: SavedMemoryOrigin;
 };
 
-/** Read inherited memory-bearing turns once per conversation independently of restored tutor jobs. */
-export async function readTurnMisconceptionMemoryOrigins(
-  db: Db, scope: OpeningScope, turnIds: readonly string[],
-): Promise<Map<string, (TurnMemoryOrigin | null)[]>> {
-  if (!turnIds.length) return new Map();
+export type ConversationResolvedMemoryOrigin = {
+  posUs: bigint;
+  posId: string;
+  origin: SavedMemoryOrigin;
+  resolved: TurnMemoryOrigin | null;
+};
+
+export type TurnMemoryOriginTarget = {
+  id: string;
+  direct: (TurnMemoryOrigin | null)[];
+  conversationId?: string;
+  consumerCourseId: string | null;
+  posUs?: bigint;
+  posId?: string;
+  inheritsPrefix: boolean;
+};
+
+export type TurnMisconceptionMemoryOriginBatches = {
+  targets: Map<string, TurnMemoryOriginTarget>;
+  byConversation: Map<string, ConversationResolvedMemoryOrigin[]>;
+};
+
+export function upperBoundMemoryOriginPosition(
+  items: readonly { posUs: bigint; posId: string }[], ownPosUs: bigint, ownPosId: string,
+): number {
+  let lo = 0;
+  let hi = items.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const item = items[mid]!;
+    if (item.posUs < ownPosUs || (item.posUs === ownPosUs && item.posId < ownPosId)) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Read direct and conversation-grouped memory-bearing origins without quadratic prefix copying. */
+export async function readTurnMisconceptionMemoryOriginBatches(
+  db: Db, scope: OpeningScope, turnIds: readonly string[], options?: { excludeAssistantIds?: ReadonlySet<string> },
+): Promise<TurnMisconceptionMemoryOriginBatches> {
+  if (!turnIds.length) return { targets: new Map(), byConversation: new Map() };
   const owner: FragmentFactory = () => db`${scope.ownerUserId}::uuid`;
   const rows = await db<{
     id: string;
@@ -410,57 +446,85 @@ export async function readTurnMisconceptionMemoryOrigins(
   if (rows.every(row => row.conv_origins === undefined && row.inherits_prefix === undefined)) {
     const resolved = await resolveMemoryOriginRefs(db, scope, rows.flatMap(row => row.origins));
     let offset = 0;
-    return new Map(rows.map(row => {
+    const targets = new Map<string, TurnMemoryOriginTarget>();
+    for (const row of rows) {
       const end = offset + row.origins.length;
-      const origins = resolved.slice(offset, end);
+      targets.set(row.id, {
+        id: row.id,
+        direct: resolved.slice(offset, end),
+        consumerCourseId: row.consumer_course_id ?? null,
+        inheritsPrefix: false,
+      });
       offset = end;
-      return [row.id, origins];
-    }));
+    }
+    return { targets, byConversation: new Map() };
   }
-  const convEntries = [...rows]
+  const excludedAssistants = options?.excludeAssistantIds;
+  const convEntries = rows
     .filter((row): row is typeof row & { conversation_id: string; conv_origins: ConversationPrefixMemoryOrigin[] } =>
-      typeof row.conversation_id === "string" && Array.isArray(row.conv_origins));
+      typeof row.conversation_id === "string" && Array.isArray(row.conv_origins))
+    .map(entry => ({
+      conversationId: entry.conversation_id,
+      items: excludedAssistants
+        ? entry.conv_origins.filter(item => !excludedAssistants.has(String(item.origin.assistantTurnId ?? item.origin.id)))
+        : entry.conv_origins,
+    }));
   const allToResolve: SavedMemoryOrigin[] = [
     ...rows.flatMap(row => row.origins),
-    ...convEntries.flatMap(entry => entry.conv_origins.map(item => item.origin)),
+    ...convEntries.flatMap(entry => entry.items.map(item => item.origin)),
   ];
   const allResolved = await resolveMemoryOriginRefs(db, scope, allToResolve);
   let offset = 0;
-  const directByTurn = new Map<string, (TurnMemoryOrigin | null)[]>();
+  const targets = new Map<string, TurnMemoryOriginTarget>();
   for (const row of rows) {
     const end = offset + row.origins.length;
-    directByTurn.set(row.id, allResolved.slice(offset, end));
+    targets.set(row.id, {
+      id: row.id,
+      direct: allResolved.slice(offset, end),
+      conversationId: row.conversation_id,
+      consumerCourseId: row.consumer_course_id ?? null,
+      posUs: row.pos_us === undefined ? undefined : BigInt(row.pos_us),
+      posId: row.pos_id?.toLowerCase(),
+      inheritsPrefix: Boolean(row.inherits_prefix),
+    });
     offset = end;
   }
-  const convById = new Map<string, Array<{ posUs: bigint; posId: string; origin: SavedMemoryOrigin; resolved: TurnMemoryOrigin | null }>>();
+  const byConversation = new Map<string, ConversationResolvedMemoryOrigin[]>();
   for (const entry of convEntries) {
-    const end = offset + entry.conv_origins.length;
+    const end = offset + entry.items.length;
     const slice = allResolved.slice(offset, end);
     offset = end;
-    convById.set(entry.conversation_id, entry.conv_origins.map((item, idx) => ({
+    byConversation.set(entry.conversationId, entry.items.map((item, idx) => ({
       posUs: BigInt(item.posUs),
       posId: item.posId.toLowerCase(),
       origin: item.origin,
       resolved: slice[idx]!,
     })));
   }
-  return new Map(rows.map(row => {
-    const out = [...(directByTurn.get(row.id) ?? [])];
-    if (row.inherits_prefix && row.conversation_id && row.pos_us !== undefined && row.pos_id !== undefined) {
-      const ownPosUs = BigInt(row.pos_us);
-      const ownPosId = row.pos_id.toLowerCase();
-      const prefix = convById.get(row.conversation_id) ?? [];
-      for (const item of prefix) {
-        if (item.posUs > ownPosUs || (item.posUs === ownPosUs && item.posId >= ownPosId)) break;
-        if (item.origin.assistantTurnId === row.id) continue;
+  return { targets, byConversation };
+}
+
+/** Read inherited memory-bearing turns once per conversation independently of restored tutor jobs. */
+export async function readTurnMisconceptionMemoryOrigins(
+  db: Db, scope: OpeningScope, turnIds: readonly string[],
+): Promise<Map<string, (TurnMemoryOrigin | null)[]>> {
+  const { targets, byConversation } = await readTurnMisconceptionMemoryOriginBatches(db, scope, turnIds);
+  return new Map([...targets.values()].map(target => {
+    const out = [...target.direct];
+    if (target.inheritsPrefix && target.conversationId && target.posUs !== undefined && target.posId !== undefined) {
+      const prefix = byConversation.get(target.conversationId) ?? [];
+      const limit = upperBoundMemoryOriginPosition(prefix, target.posUs, target.posId);
+      for (let i = 0; i < limit; i++) {
+        const item = prefix[i]!;
+        if (item.origin.assistantTurnId === target.id) continue;
         out.push(item.resolved === null ? null : {
           ...item.resolved,
-          consumerCourseId: row.consumer_course_id ?? null,
+          consumerCourseId: target.consumerCourseId,
           historical: true,
         });
       }
     }
-    return [row.id, out];
+    return [target.id, out];
   }));
 }
 
@@ -719,11 +783,108 @@ export async function readMemoryMisconceptionLineages(
   return new Map([...authorities].map(([id, auth]) => [id, auth.lineage]));
 }
 
+function buildMinSegmentTree(values: readonly number[]) {
+  const n = values.length;
+  const tree = new Array<number>(2 * n);
+  for (let i = 0; i < n; i++) tree[n + i] = values[i]!;
+  for (let i = n - 1; i > 0; i--) tree[i] = Math.min(tree[i << 1]!, tree[(i << 1) | 1]!);
+  return (left: number, right: number): number => {
+    let res = Infinity;
+    for (let l = left + n, r = right + n + 1; l < r; l >>>= 1, r >>>= 1) {
+      if (l & 1) res = Math.min(res, tree[l++]!);
+      if (r & 1) res = Math.min(res, tree[--r]!);
+    }
+    return res;
+  };
+}
+
+function buildConversationPrefixEvaluator(
+  items: readonly ConversationResolvedMemoryOrigin[],
+  evaluateHistorical: (resolved: TurnMemoryOrigin | null, consumerCourseId: string | null) => number,
+) {
+  const m = items.length;
+  const otherVal = new Array<number>(m);
+  const byCourse = new Map<string, { positions: number[]; sameVals: number[] }>();
+  const byAssistant = new Map<string, number[]>();
+  for (let j = 0; j < m; j++) {
+    const item = items[j]!;
+    if (item.origin.assistantTurnId) {
+      const list = byAssistant.get(item.origin.assistantTurnId) ?? [];
+      list.push(j);
+      byAssistant.set(item.origin.assistantTurnId, list);
+    }
+    const originCourse = normalizeCourse(item.origin.courseId);
+    otherVal[j] = evaluateHistorical(item.resolved, null);
+    if (originCourse !== null) {
+      const sameVal = evaluateHistorical(item.resolved, originCourse);
+      if (sameVal !== otherVal[j]) {
+        const group = byCourse.get(originCourse) ?? { positions: [], sameVals: [] };
+        group.positions.push(j);
+        group.sameVals.push(sameVal);
+        byCourse.set(originCourse, group);
+      }
+    }
+  }
+  const rangeMinOther = buildMinSegmentTree(otherVal);
+  const courseTrees = new Map<string, { positions: number[]; rangeMinCourse: (l: number, r: number) => number }>();
+  for (const [course, { positions, sameVals }] of byCourse) {
+    const withGaps = positions.map((pos, r) => {
+      const prevPos = r === 0 ? -1 : positions[r - 1]!;
+      return Math.min(r === 0 ? Infinity : rangeMinOther(prevPos + 1, pos - 1), sameVals[r]!);
+    });
+    courseTrees.set(course, { positions, rangeMinCourse: buildMinSegmentTree(withGaps) });
+  }
+  const lowerBound = (arr: readonly number[], target: number) => {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (arr[mid]! < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const queryInterval = (left: number, right: number, consumerCourse: string | null): number => {
+    if (left > right) return Infinity;
+    const entry = consumerCourse === null ? undefined : courseTrees.get(consumerCourse);
+    if (!entry) return rangeMinOther(left, right);
+    const { positions } = entry;
+    const rStart = lowerBound(positions, left);
+    const rEnd = lowerBound(positions, right + 1) - 1;
+    if (rStart > rEnd) return rangeMinOther(left, right);
+    return Math.min(
+      rangeMinOther(left, positions[rStart]! - 1),
+      sameValueAtStart(entry, byCourse.get(consumerCourse!)!.sameVals, rStart, rEnd),
+      rangeMinOther(positions[rEnd]! + 1, right),
+    );
+  };
+  const sameValueAtStart = (
+    entry: { rangeMinCourse: (l: number, r: number) => number },
+    sameVals: readonly number[],
+    rStart: number,
+    rEnd: number,
+  ) => rStart === rEnd ? sameVals[rStart]! : Math.min(sameVals[rStart]!, entry.rangeMinCourse(rStart + 1, rEnd));
+
+  return (limit: number, turnId: string, consumerCourseId: string | null): number => {
+    if (limit <= 0) return Infinity;
+    const consumerCourse = normalizeCourse(consumerCourseId);
+    const skipped = (byAssistant.get(turnId) ?? []).filter(idx => idx < limit);
+    if (!skipped.length) return queryInterval(0, limit - 1, consumerCourse);
+    let res = Infinity;
+    let cursor = 0;
+    for (const idx of skipped) {
+      res = Math.min(res, queryInterval(cursor, idx - 1, consumerCourse));
+      cursor = idx + 1;
+    }
+    return Math.min(res, queryInterval(cursor, limit - 1, consumerCourse));
+  };
+}
+
 /** Validate memory authority in the original turn, the consuming turn, and the requested destination. */
 export async function readTurnMisconceptionMemoryStatus(
   db: Db, scope: OpeningScope, turnIds: readonly string[], options: { display?: boolean; targetCourseId?: string | null } = {},
 ): Promise<{ invalid: Set<string>; earliestExpiresAtMs: number }> {
-  const originsByTurn = await readTurnMisconceptionMemoryOrigins(db, scope, turnIds);
+  const { targets, byConversation } = await readTurnMisconceptionMemoryOriginBatches(db, scope, turnIds);
   const byCourse = new Map<string | null, Set<string>>();
   const memoryCoursesFor = (origin: TurnMemoryOrigin) => {
     const courses: (string | null)[] = [normalizeCourse(origin.courseId)];
@@ -731,13 +892,17 @@ export async function readTurnMisconceptionMemoryStatus(
     if (!origin.historical && options.targetCourseId !== undefined) courses.push(normalizeCourse(options.targetCourseId));
     return [...new Set(courses)];
   };
-  for (const origins of originsByTurn.values()) for (const origin of origins) {
-    if (!origin) continue;
+  const recordOriginCourses = (origin: TurnMemoryOrigin | null) => {
+    if (!origin) return;
     for (const course of memoryCoursesFor(origin)) {
       const ids = byCourse.get(course) ?? new Set<string>();
       for (const id of [...origin.ids, ...origin.backings.flat()]) ids.add(id.toLowerCase());
       byCourse.set(course, ids);
     }
+  };
+  for (const target of targets.values()) for (const origin of target.direct) recordOriginCourses(origin);
+  for (const items of byConversation.values()) for (const item of items) {
+    if (item.resolved) recordOriginCourses({ ...item.resolved, historical: true });
   }
   const authorities = new Map<string | null, Map<string, MemoryMisconceptionAuthority>>();
   for (const [course, ids] of byCourse) {
@@ -745,57 +910,87 @@ export async function readTurnMisconceptionMemoryStatus(
   }
   const graphs = new Map<MaterialUse, Map<string, MemoryDependencyStatus[]>>();
   if (!options.display) for (const use of ["citation", "practice"] as const) {
-    const ids = [...originsByTurn.values()].flatMap(origins => origins.flatMap(origin => origin?.materialUse === use
-      ? [...origin.ids, ...origin.backings.flat()].map(id => id.toLowerCase())
-          .filter(id => authorities.get(normalizeCourse(origin.courseId))?.has(id)) : []));
-    graphs.set(use, await readMemoryDependencyStatus(db, scope, ids, { materialUse: use }));
+    const useIds = new Set<string>();
+    const collectForUse = (origin: TurnMemoryOrigin | null) => {
+      if (!origin || origin.materialUse !== use) return;
+      const originMap = authorities.get(normalizeCourse(origin.courseId));
+      for (const rawId of [...origin.ids, ...origin.backings.flat()]) {
+        const id = rawId.toLowerCase();
+        if (originMap?.has(id)) useIds.add(id);
+      }
+    };
+    for (const target of targets.values()) for (const origin of target.direct) collectForUse(origin);
+    for (const items of byConversation.values()) for (const item of items) collectForUse(item.resolved);
+    graphs.set(use, await readMemoryDependencyStatus(db, scope, [...useIds], { materialUse: use }));
+  }
+  const nowMs = Date.now();
+  const evaluateSingleOrigin = (origin: TurnMemoryOrigin | null, consumerCourseId: string | null): number => {
+    if (!origin) return -Infinity;
+    const memoryCourses = memoryCoursesFor(origin);
+    const misconceptionCourses = [
+      origin.courseId, consumerCourseId,
+      options.targetCourseId === undefined ? consumerCourseId : options.targetCourseId,
+    ];
+    const active = (rawId: string) => {
+      const id = rawId.toLowerCase();
+      if (!memoryCourses.every(course => authorities.get(course)?.has(id))) return false;
+      const auth = authorities.get(normalizeCourse(origin.courseId))?.get(id);
+      return Boolean(auth && courseAllows(auth.lineage?.courseId ?? null, ...misconceptionCourses)
+        && (options.display || auth.earliestExpiresAtMs > nowMs));
+    };
+    const backings = (options.display && origin.ids.length ? [] : origin.backings).map(ids => ids.filter(active));
+    if (!origin.ids.every(active) || backings.some(ids => !ids.length)) return -Infinity;
+    if (options.display) return Infinity;
+    let earliest = Infinity;
+    for (const rawId of origin.ids) {
+      const auth = authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase());
+      if (auth) earliest = Math.min(earliest, auth.earliestExpiresAtMs);
+    }
+    for (const group of backings) {
+      const groupExpiry = Math.max(-Infinity, ...group.map(rawId =>
+        authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase())?.earliestExpiresAtMs ?? -Infinity));
+      earliest = Math.min(earliest, groupExpiry);
+    }
+    for (const course of memoryCourses) {
+      const nodes = resolveMemoryDependencyStatus(graphs.get(origin.materialUse)!, origin.ids, backings, course,
+        undefined, origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined);
+      if (!nodes) return -Infinity;
+      for (const node of nodes) {
+        if (node.expires_at !== null) {
+          const exp = new Date(node.expires_at).getTime();
+          if (!(exp > nowMs)) return -Infinity;
+          earliest = Math.min(earliest, exp);
+        }
+      }
+    }
+    return earliest;
+  };
+  const convEvaluators = new Map<string, ReturnType<typeof buildConversationPrefixEvaluator>>();
+  for (const [conversationId, items] of byConversation) {
+    convEvaluators.set(conversationId, buildConversationPrefixEvaluator(items, (resolved, consumerCourseId) =>
+      evaluateSingleOrigin(resolved === null ? null : { ...resolved, consumerCourseId, historical: true }, consumerCourseId)));
   }
   const invalid = new Set<string>();
   let earliestExpiresAtMs = Infinity;
-  const nowMs = Date.now();
   for (const turnId of turnIds) {
-    const origins = originsByTurn.get(turnId);
+    const target = targets.get(turnId);
+    if (!target) {
+      invalid.add(turnId);
+      continue;
+    }
     let turnEarliest = Infinity;
-    if (!origins || origins.some(origin => {
-      if (!origin) return true;
-      const memoryCourses = memoryCoursesFor(origin);
-      const misconceptionCourses = [
-        origin.courseId, origin.consumerCourseId,
-        options.targetCourseId === undefined ? origin.consumerCourseId : options.targetCourseId,
-      ];
-      const active = (rawId: string) => {
-        const id = rawId.toLowerCase();
-        if (!memoryCourses.every(course => authorities.get(course)?.has(id))) return false;
-        const auth = authorities.get(normalizeCourse(origin.courseId))?.get(id);
-        return Boolean(auth && courseAllows(auth.lineage?.courseId ?? null, ...misconceptionCourses)
-          && (options.display || auth.earliestExpiresAtMs > nowMs));
-      };
-      const backings = (options.display && origin.ids.length ? [] : origin.backings).map(ids => ids.filter(active));
-      if (!origin.ids.every(active) || backings.some(ids => !ids.length)) return true;
-      if (options.display) return false;
-      for (const rawId of origin.ids) {
-        const auth = authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase());
-        if (auth) turnEarliest = Math.min(turnEarliest, auth.earliestExpiresAtMs);
-      }
-      for (const group of backings) {
-        const groupExpiry = Math.max(-Infinity, ...group.map(rawId =>
-          authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase())?.earliestExpiresAtMs ?? -Infinity));
-        turnEarliest = Math.min(turnEarliest, groupExpiry);
-      }
-      return memoryCourses.some(course => {
-        const nodes = resolveMemoryDependencyStatus(graphs.get(origin.materialUse)!, origin.ids, backings, course,
-          undefined, origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined);
-        if (!nodes) return true;
-        for (const node of nodes) {
-          if (node.expires_at !== null) {
-            const exp = new Date(node.expires_at).getTime();
-            if (!(exp > nowMs)) return true;
-            turnEarliest = Math.min(turnEarliest, exp);
-          }
-        }
-        return false;
-      });
-    })) invalid.add(turnId);
+    for (const origin of target.direct) {
+      turnEarliest = Math.min(turnEarliest, evaluateSingleOrigin(origin, origin?.consumerCourseId ?? target.consumerCourseId));
+      if (turnEarliest === -Infinity) break;
+    }
+    if (turnEarliest !== -Infinity && target.inheritsPrefix && target.conversationId
+      && target.posUs !== undefined && target.posId !== undefined) {
+      const prefix = byConversation.get(target.conversationId) ?? [];
+      const limit = upperBoundMemoryOriginPosition(prefix, target.posUs, target.posId);
+      const evalPrefix = convEvaluators.get(target.conversationId);
+      if (evalPrefix) turnEarliest = Math.min(turnEarliest, evalPrefix(limit, turnId, target.consumerCourseId));
+    }
+    if (turnEarliest === -Infinity) invalid.add(turnId);
     else earliestExpiresAtMs = Math.min(earliestExpiresAtMs, turnEarliest);
   }
   return { invalid, earliestExpiresAtMs };

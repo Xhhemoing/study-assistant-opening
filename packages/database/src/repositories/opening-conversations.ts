@@ -155,13 +155,26 @@ const batchedMemoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.
 
 async function readContinuityRows(
   db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
-  turnIds?: readonly string[],
+  turnIds?: readonly string[], userOnly = false,
 ) {
   const questionFilter = !question ? db`` : question.attemptId
     ? db`AND t.status='complete' AND (t.attempt_id=${question.attemptId} OR t.context_anchor->>'attemptId'=${question.attemptId})`
     : db`AND t.status='complete' AND t.context_anchor->>'activityId'=${question.activityId ?? null}
         AND t.context_anchor->>'blockId'=${question.blockId ?? null}
         AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
+  if (userOnly) {
+    return db`
+      SELECT t.id, t.role, t.status, NULL::text AS job_status, NULL::jsonb AS job_error,
+        t.text, '[]'::jsonb AS citations, NULL::jsonb AS system_query
+      FROM opening_turns t
+      JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
+      WHERE t.conversation_id=${conversationId} AND t.workspace_id=${scope.workspaceId}
+        AND t.role='user' AND t.status IN ('complete', 'pending')
+        ${questionFilter}
+        ${turnIds ? db`AND t.id=ANY(${[...turnIds]}::uuid[]) ORDER BY array_position(${[...turnIds]}::uuid[], t.id)`
+          : db`ORDER BY t.created_at ASC`}
+    `;
+  }
   const rows = await db`
     SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
       ${batchedMemoryDisplayTurnId(db)} AS misconception_memory_turn_id,
@@ -413,10 +426,14 @@ export function createOpeningConversationRepository(sql: Sql) {
       scope: OpeningConversationScope,
       conversationId: string,
       question?: ContinuityQuestion,
+      options?: { userOnly?: boolean },
     ): Promise<ContinuityTurn[]> {
       await this.getOwned(scope, conversationId);
       // Internal routing reads must never release generated answers as delivered help.
-      return mapContinuityRows(await readContinuityRows(sql, scope, conversationId, question), scope);
+      return mapContinuityRows(
+        await readContinuityRows(sql, scope, conversationId, question, undefined, options?.userOnly === true),
+        scope,
+      );
     },
 
     async findTurnByClientKey(

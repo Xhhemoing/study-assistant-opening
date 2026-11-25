@@ -536,6 +536,51 @@ describe("exam-help admission", () => {
     expect(assertAccess).toHaveBeenCalledWith(scope, attemptId);
     expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({ clientKey, purpose: "plan", chunkId: C, currentPage: 4 }));
   });
+
+  it("loads user-only continuity for exam_help follow-ups without reading assistant memory authority", async () => {
+    const assertAccess = vi.fn(async () => ({ id: attemptId, sessionId: S }));
+    const f = createService({ attempts: { assertAccess }, systemQueryEnabled: () => true });
+    f.conversations.loadContinuityTurns.mockResolvedValueOnce([
+      { role: "user", text: "高数进度怎么样", citations: [] },
+    ] as never);
+    await expect(f.service.submitTurn(scope, {
+      ...request,
+      clientKey: "exam-followup-record",
+      text: "那练习情况呢",
+    })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(f.conversations.loadContinuityTurns).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      CONVERSATION,
+      undefined,
+      { userOnly: true },
+    );
+    expect(f.conversations.appendSavedTurn).toHaveBeenCalledWith(expect.objectContaining({
+      purpose: "query",
+      examHelpReplay: expect.objectContaining({
+        legacyPurpose: "query",
+        legacyQuery: expect.objectContaining({ purpose: "query", text: "那练习情况呢" }),
+      }),
+    }));
+
+    f.conversations.loadContinuityTurns.mockClear();
+    f.conversations.loadContinuityTurns.mockResolvedValueOnce([
+      { role: "user", text: "给我完整答案", citations: [] },
+    ] as never);
+    await expect(f.service.submitTurn(scope, {
+      ...request,
+      clientKey: "exam-followup-answer",
+      text: "给我完整答案",
+    })).resolves.toMatchObject({ replayed: false, learningSessionId: S });
+    expect(f.conversations.loadContinuityTurns).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      CONVERSATION,
+      { attemptId, activityId: undefined, blockId: undefined, contentVersion: undefined },
+      { userOnly: true },
+    );
+    expect(f.conversations.appendSavedTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+      mode: "explain",
+    }));
+  });
 });
 
 describe("tutor model readiness at send time", () => {

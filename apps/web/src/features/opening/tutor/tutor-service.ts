@@ -197,18 +197,27 @@ export function createTutorService(deps: {
         });
       }
       const existing = await deps.conversations.findTurnByClientKey(scope, request.clientKey, request.conversationId);
+      const examHelp = request.contextAnchor?.purpose === "exam_help";
       let queryHistory: QueryHistory = [];
       if (!existing?.mode && isRecordFollowup(composerMessageText(request.text))) {
-        queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+        queryHistory = examHelp
+          ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, undefined, { userOnly: true })
+          : await deps.conversations.loadContinuityTurns(scope, request.conversationId);
       } else if (!existing?.mode && request.mode === undefined && requestsFinalAnswer(request.text)) {
         const anchor = request.contextAnchor;
         const attemptId = request.attemptId ?? anchor?.attemptId;
-        if (!attemptId && !anchor) queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId);
-        else if (attemptId || anchor?.blockId) {
+        if (!attemptId && !anchor) {
+          queryHistory = examHelp
+            ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, undefined, { userOnly: true })
+            : await deps.conversations.loadContinuityTurns(scope, request.conversationId);
+        } else if (attemptId || anchor?.blockId) {
           // A second request belongs to the same issued question, never a different block or attempt.
-          queryHistory = await deps.conversations.loadContinuityTurns(scope, request.conversationId, {
+          const question = {
             attemptId, activityId: anchor?.activityId, blockId: anchor?.blockId, contentVersion: anchor?.contentVersion,
-          });
+          };
+          queryHistory = examHelp
+            ? await deps.conversations.loadContinuityTurns(scope, request.conversationId, question, { userOnly: true })
+            : await deps.conversations.loadContinuityTurns(scope, request.conversationId, question);
         }
       }
       const resolved = inferComposerIntent({ ...request, history: queryHistory,
@@ -225,7 +234,6 @@ export function createTutorService(deps: {
         resolved.purpose = existing.purpose ?? "answer";
         resolved.querySystem = existing.querySystem === true || ["query", "explain_state"].includes(resolved.purpose);
       }
-      const examHelp = request.contextAnchor?.purpose === "exam_help";
       const requestedPurpose = retryIntent ? retryIntent.purpose ?? undefined
         : request.purpose ?? (existing?.mode ? existing.purpose : resolved.purpose === "answer" ? undefined : resolved.purpose);
       const purpose = examHelp && !retryIntent && resolved.querySystem && requestedPurpose !== "explain_state"

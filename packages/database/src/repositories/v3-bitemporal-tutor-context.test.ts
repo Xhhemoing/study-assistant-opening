@@ -1230,20 +1230,29 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
         .toEqual(Array.from({ length: earlyIdx }, (_, idx) => `Restored answer #${idx + 1}`));
       expect(continuityAfterHashed.slice(earlyIdx).every(t => t.text === unavailable)).toBe(true);
 
-      // 2) Early withdrawn-misconception-memory-backed exchange at index 9 (intent_hash IS NULL, legacy memoryOnly ref)
-      // redacts #10..#64 (pos >= early_pos), keeps #1..#9 intact, and batches readTurnMisconceptionMemoryOrigins once!
+      // 2) All 64 restored hashless answers reference a memory (plus early legacy memoryOnly ref at index 9):
+      // active before withdrawal, then redacts #10..#64 (pos >= early_pos) while keeping #1..#9 intact,
+      // with single-pass SQL (Actual Loops = 1) and O(N) Node evaluation (zero N(N-1)/2 expansion).
+      const bulkActiveMemory = "ae000000-0000-4000-8000-000000000998";
       const bulkLegacyMemory = "ae000000-0000-4000-8000-000000000999";
+      const cleanOriginId = "ae000000-0000-4000-8000-000000000997";
       await db.query("UPDATE opening_conversations SET course_id=NULL WHERE id=ANY($1::uuid[])", [[originConversation, bulkConv]]);
-      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=NULL,status='retracted'");
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=NULL,status='candidate'");
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',$4,'[]',false,to_timestamp(1759999000),'Clean memory origin')`,
+        [cleanOriginId, scope.workspaceId, originConversation, JSON.stringify(cleanLineage)]);
       await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs=$2,source_ids=ARRAY[$3]::uuid[] WHERE id=$4",
         [JSON.stringify(usedLineage), JSON.stringify([{ sourceId, sourceVersion: 1 }]), sourceId, originId]);
-      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,NULL,$3,'confirmed',NULL)",
-        [bulkLegacyMemory, scope.workspaceId, JSON.stringify([originId])]);
-      await db.query("UPDATE opening_turns SET context_anchor=NULL WHERE conversation_id=$1", [bulkConv]);
-      await db.query("UPDATE opening_turns SET intent_hash=NULL,context_source_refs=$1 WHERE id=$2",
+      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,NULL,$3,'confirmed',NULL), ($4,$2,NULL,$5,'confirmed',NULL)",
+        [bulkActiveMemory, scope.workspaceId, JSON.stringify([cleanOriginId]), bulkLegacyMemory, JSON.stringify([originId])]);
+      await db.query("UPDATE opening_turns SET intent_hash=NULL,context_anchor=NULL,context_source_refs=$1 WHERE conversation_id=$2",
+        [JSON.stringify([{ memoryDependencyIds: [bulkActiveMemory] }]), bulkConv]);
+      await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
         [JSON.stringify([{ sourceId, sourceVersion: 1, memoryOnly: true }]), earlyTurnId]);
+      await db.exec("ANALYZE");
       let backingResolveQueries = 0;
       let originBatchQueries = 0;
+      let memoryLineageQueries = 0;
       SqlFragment.prototype.execute = async function (this: SqlFragment) {
         const params: unknown[] = [];
         const rendered = this.render(params).trim();
@@ -1251,31 +1260,185 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
           originBatchQueries += 1;
           const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
             "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
-          const priorAScan = collectNodes(analyzed.rows[0]!["QUERY PLAN"][0]!.Plan)
+          const planRoot = analyzed.rows[0]!["QUERY PLAN"][0]!.Plan;
+          expect(planRoot["Total Cost"]).toBeLessThan(20_000);
+          const priorAScan = collectNodes(planRoot)
             .find(n => n["Relation Name"] === "opening_turns" && n.Alias === "prior_a");
           expect(priorAScan, "expected single-pass prior_a scan").toBeDefined();
           expect(priorAScan!["Actual Loops"]).toBe(1);
         }
         if (rendered.startsWith("SELECT saved.id,")) backingResolveQueries += 1;
+        if (rendered.startsWith("SELECT id FROM opening_memories AS m(memory_id)")) memoryLineageQueries += 1;
         return origExecute.call(this);
       };
+      const allActiveMemoryTurns = await repo.listTurns(scope, bulkConv);
+      expect(allActiveMemoryTurns.map(t => t.text)).toEqual(bulkTurnIds.map((_, idx) => `Restored answer #${idx + 1}`));
+      expect(originBatchQueries).toBe(1);
+      expect(backingResolveQueries).toBe(1);
+      expect(memoryLineageQueries).toBe(1);
+      await expect(repo.releaseReturnedTurnIds(scope, bulkConv, bulkTurnIds)).resolves.toHaveLength(64);
+      expect(originBatchQueries).toBe(2);
+      expect(backingResolveQueries).toBe(2);
+
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET status='retracted'");
       const afterWithdrawnMemory = await repo.listTurns(scope, bulkConv);
       expect(afterWithdrawnMemory.slice(0, earlyIdx).map(t => t.text))
         .toEqual(Array.from({ length: earlyIdx }, (_, idx) => `Restored answer #${idx + 1}`));
       expect(afterWithdrawnMemory.slice(earlyIdx).every(t => t.text === unavailable)).toBe(true);
-      expect(originBatchQueries).toBe(1);
-      expect(backingResolveQueries).toBe(1);
+      expect(originBatchQueries).toBe(3);
+      expect(backingResolveQueries).toBe(3);
+      const invalidSet = await readTurnsWithInvalidMisconceptionMemories(sql, scope, bulkTurnIds, { display: true });
+      expect([...invalidSet].sort()).toEqual(bulkTurnIds.slice(earlyIdx).sort());
+      expect(originBatchQueries).toBe(4);
 
-      const batchedMap = await readTurnMisconceptionMemoryOrigins(sql, scope, bulkTurnIds.slice(earlyIdx));
-      expect(batchedMap.size).toBe(64 - earlyIdx);
-      expect(batchedMap.get(earlyTurnId)?.[0]).toMatchObject({ id: earlyTurnId, historical: false, backings: [[memoryId, bulkLegacyMemory]] });
-      for (const followId of bulkTurnIds.slice(earlyIdx + 1)) {
-        expect(batchedMap.get(followId)).toEqual([
-          expect.objectContaining({ id: earlyTurnId, assistantTurnId: earlyTurnId, historical: true, backings: [[memoryId, bulkLegacyMemory]] }),
-        ]);
+      const batchedMap = await readTurnMisconceptionMemoryOrigins(sql, scope, bulkTurnIds.slice(earlyIdx, earlyIdx + 3));
+      expect(batchedMap.size).toBe(3);
+      expect(batchedMap.get(earlyTurnId)?.[0]).toMatchObject({
+        id: earlyTurnId,
+        historical: false,
+        ids: [],
+        backings: [[memoryId, bulkLegacyMemory]],
+      });
+      expect(batchedMap.get(bulkTurnIds[earlyIdx + 1]!)?.some(o => o?.id === earlyTurnId && o.historical === true)).toBe(true);
+
+      // 3) Round-10 P2 #3: 32 job-backed answers with valid empty lineage hashes followed by 32 job-backed hashless answers
+      // (64 exchanges total, zero memory refs): single-pass conv_scan (Actual Loops = 1), < 20,000 plan cost, and 1 deduplicated lineage check.
+      const histPerfConv = "af000000-0000-4000-8000-000000000001";
+      const histPerfCurrent = "af000000-0000-4000-8000-000000000002";
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)",
+        [histPerfConv, scope.workspaceId, scope.ownerUserId, courseId]);
+      for (let idx = 0; idx < 64; idx++) {
+        const uId = `af000001-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
+        const aId = `af000002-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
+        const jId = `af000003-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`;
+        const hash = idx < 32 ? JSON.stringify(cleanLineage) : null;
+        await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,
+            context_source_refs,context_anchor,query_system,created_at,text)
+          VALUES ($1,$3,$4,'user','complete',NULL,'[]',$6,false,to_timestamp($7),$8),
+                 ($2,$3,$4,'assistant','complete',$5,'[]',$6,false,to_timestamp($7),$9)`,
+          [uId, aId, scope.workspaceId, histPerfConv, hash, JSON.stringify({ courseId }),
+            baseEpochSec + 10_000 + idx * 2, `Q${idx + 1}`, `A${idx + 1}`]);
+        await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5)",
+          [jId, scope.workspaceId, histPerfConv, uId, aId]);
       }
-      expect(originBatchQueries).toBe(2);
-      expect(backingResolveQueries).toBe(2);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$2,$3,'user','complete','[]',$4,false,to_timestamp($5),'Q65')`,
+        [histPerfCurrent, scope.workspaceId, histPerfConv, JSON.stringify({ courseId }), baseEpochSec + 10_200]);
+      await db.exec("ANALYZE");
+      const historyExplainPlans: ExplainPlanNode[] = [];
+      const activeLineageBatchSizes: number[] = [];
+      SqlFragment.prototype.execute = async function (this: SqlFragment) {
+        const params: unknown[] = [];
+        const rendered = this.render(params).trim();
+        if (rendered.startsWith("WITH prior AS MATERIALIZED")) {
+          const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
+            "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
+          historyExplainPlans.push(analyzed.rows[0]!["QUERY PLAN"][0]!.Plan);
+        }
+        if (rendered.startsWith("WITH tick AS MATERIALIZED") && typeof params[0] === "string") {
+          activeLineageBatchSizes.push((JSON.parse(params[0]) as unknown[]).length);
+        }
+        return origExecute.call(this);
+      };
+      const perfHistory = await loadTutorHistoryContext(sql, scope, histPerfCurrent);
+      expect(perfHistory.history).toHaveLength(40);
+      expect(historyExplainPlans).toHaveLength(1);
+      expect(historyExplainPlans[0]!["Total Cost"]).toBeLessThan(20_000);
+      const histNodes = collectNodes(historyExplainPlans[0]!);
+      const histConvScan = histNodes.find(n => n["Subplan Name"] === "CTE conv_scan");
+      expect(histConvScan, "expected single-pass CTE conv_scan in readSavedExchanges").toBeDefined();
+      expect(histConvScan!["Actual Loops"]).toBe(1);
+      expect(activeLineageBatchSizes).toEqual([1]);
+
+      // 4) Round-10 P1 #1: Unbound conversation where Exchange 1 (job-backed, hashless) consumes a memory carrying a Course A
+      // misconception (or an ordinary Course A memory), followed by Exchange 2 (job-backed, hashless follow-up, no direct refs).
+      // Course B / unbound requests omit BOTH Exchange 1 and Exchange 2; Course A requests retain both and preserve revisions
+      // even when Exchange 1 is omitted by the 12,000-character budget.
+      const p1Conv = "b0000000-0000-4000-8000-000000000001";
+      const p1U1 = "b0000000-0000-4000-8000-000000000002";
+      const p1A1 = "b0000000-0000-4000-8000-000000000003";
+      const p1U2 = "b0000000-0000-4000-8000-000000000004";
+      const p1A2 = "b0000000-0000-4000-8000-000000000005";
+      const p1Current = "b0000000-0000-4000-8000-000000000006";
+      const p1MemCourseOnly = "b0000000-0000-4000-8000-000000000007";
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1,status='candidate'", [courseId]);
+      await db.query("UPDATE opening_conversations SET course_id=$1 WHERE id=$2", [courseId, originConversation]);
+      await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs='[]',source_ids='{}' WHERE id=$2",
+        [JSON.stringify(exact), originId]);
+      await db.query("UPDATE opening_memories SET course_id=$1,kind='confirmed',expires_at=NULL WHERE id=$2", [courseId, memoryId]);
+      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,$3,$4,'confirmed',NULL)",
+        [p1MemCourseOnly, scope.workspaceId, courseId, JSON.stringify([cleanOriginId])]);
+      await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,NULL)",
+        [p1Conv, scope.workspaceId, scope.ownerUserId]);
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,context_source_refs,
+          context_anchor,query_system,created_at,text)
+        VALUES ($1,$6,$7,'user','complete',NULL,'[]',$9,false,to_timestamp($10),'Course A Q1'),
+               ($2,$6,$7,'assistant','complete',NULL,$8,$9,false,to_timestamp($10),'Course A memory answer'),
+               ($3,$6,$7,'user','complete',NULL,'[]',$9,false,to_timestamp($11),'Course A follow-up Q2'),
+               ($4,$6,$7,'assistant','complete',NULL,'[]',$9,false,to_timestamp($11),'Hashless derivative A2'),
+               ($5,$6,$7,'user','complete',NULL,'[]',$12,false,to_timestamp($13),'Course B Q3')`,
+        [p1U1, p1A1, p1U2, p1A2, p1Current, scope.workspaceId, p1Conv,
+          JSON.stringify([{ memoryDependencyIds: [memoryId] }]), JSON.stringify({ courseId }),
+          baseEpochSec + 20_000, baseEpochSec + 20_010, JSON.stringify({ courseId: otherCourseId }), baseEpochSec + 20_020]);
+      await db.query("INSERT INTO opening_tutor_jobs (id,workspace_id,conversation_id,user_turn_id,assistant_turn_id) VALUES ($1,$2,$3,$4,$5), ($6,$2,$3,$7,$8)",
+        [p1A1, scope.workspaceId, p1Conv, p1U1, p1A1, p1A2, p1U2, p1A2]);
+      SqlFragment.prototype.execute = origExecute;
+
+      // Course B and unbound turns must NOT receive Exchange 2!
+      expect((await loadTutorHistoryContext(sql, scope, p1Current)).history).toEqual([]);
+      expect((await readTutorHistoryAncestorStatus(sql, scope, p1Current)).valid).toBe(false);
+      await db.query("UPDATE opening_turns SET context_anchor=NULL WHERE id=$1", [p1Current]);
+      expect((await loadTutorHistoryContext(sql, scope, p1Current)).history).toEqual([]);
+      expect((await readTutorHistoryAncestorStatus(sql, scope, p1Current)).valid).toBe(false);
+
+      // Course A turn retains both exchanges and carries the Course A misconception lineage + courseId collection.
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=$2", [JSON.stringify({ courseId }), p1Current]);
+      const p1CourseAHistory = await loadTutorHistoryContext(sql, scope, p1Current);
+      expect(p1CourseAHistory.history.map(t => t.text)).toEqual([
+        "Course A Q1", "Course A memory answer", "Course A follow-up Q2", "Hashless derivative A2",
+      ]);
+      expect(p1CourseAHistory.historyMisconceptionLineage).toEqual(exact);
+      const p1CollectedCourses = new Set<string>();
+      expect(await readTutorHistoryAncestorStatus(sql, scope, p1Current, { collectCourseIds: p1CollectedCourses }))
+        .toMatchObject({ valid: true });
+      expect(p1CollectedCourses.has(courseId)).toBe(true);
+
+      // Even when Exchange 1 is omitted by the 12,000-character budget, retained hashless Exchange 2 preserves exact lineage!
+      await db.query("UPDATE opening_turns SET text=$1 WHERE id=$2", ["x".repeat(12_000), p1A1]);
+      const p1OmittedOlder = await loadTutorHistoryContext(sql, scope, p1Current);
+      expect(p1OmittedOlder.history.map(t => t.text)).toEqual(["Course A follow-up Q2", "Hashless derivative A2"]);
+      expect(p1OmittedOlder.historyMisconceptionLineage).toEqual(exact);
+      await db.query("UPDATE opening_turns SET text='Course A memory answer' WHERE id=$1", [p1A1]);
+
+      // Ordinary Course-A memory (without misconception) consumed in Exchange 1 also prevents hashless Exchange 2 (anchored to Course A
+      // or unanchored) from leaking into Course B.
+      await db.query("UPDATE opening_turns SET context_source_refs=$1 WHERE id=$2",
+        [JSON.stringify([{ memoryDependencyIds: [p1MemCourseOnly] }]), p1A1]);
+      await db.query("UPDATE opening_turns SET context_anchor=$1 WHERE id=$2", [JSON.stringify({ courseId: otherCourseId }), p1Current]);
+      expect((await loadTutorHistoryContext(sql, scope, p1Current)).history).toEqual([]);
+      await db.query("UPDATE opening_turns SET context_anchor=NULL WHERE id=ANY($1::uuid[])", [[p1U2, p1A2]]);
+      expect((await loadTutorHistoryContext(sql, scope, p1Current)).history).toEqual([]);
+
+      // 5) Round-10 P2 #4: loadContinuityTurns(..., { userOnly: true }) for exam_help follow-ups returns prior user turns
+      // while executing zero opening_memories or conv_scan queries even when prior assistant turns reference memories.
+      let examMemoryQueries = 0;
+      let examConvScanQueries = 0;
+      SqlFragment.prototype.execute = async function (this: SqlFragment) {
+        const params: unknown[] = [];
+        const rendered = this.render(params).trim();
+        if (rendered.includes("opening_memories") || rendered.startsWith("SELECT t.id, ARRAY(")) examMemoryQueries += 1;
+        if (rendered.includes("conv_scan")) examConvScanQueries += 1;
+        return origExecute.call(this);
+      };
+      const userOnlyTurns = await repo.loadContinuityTurns(scope, p1Conv, undefined, { userOnly: true });
+      expect(userOnlyTurns.map(t => ({ role: t.role, text: t.text }))).toEqual([
+        { role: "user", text: "Course A Q1" },
+        { role: "user", text: "Course A follow-up Q2" },
+        { role: "user", text: "Course B Q3" },
+      ]);
+      expect(examMemoryQueries).toBe(0);
+      expect(examConvScanQueries).toBe(0);
     } finally {
       SqlFragment.prototype.execute = origExecute;
     }
@@ -1284,4 +1447,4 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
   } finally {
     await db.close();
   }
-}, 30_000);
+}, 60_000);
