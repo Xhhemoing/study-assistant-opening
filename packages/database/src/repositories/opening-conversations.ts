@@ -137,11 +137,29 @@ const visibleTurnText = (db: Sql | TransactionSql) => db`CASE
   ELSE t.text END`;
 const hiddenTurnDetails = (db: Sql | TransactionSql) => db`display_authority.deleted_source OR display_authority.inactive_misconception`;
 
+const hasPendingFirstDelivery = (row: Record<string, unknown>) =>
+  (Array.isArray(row.pending_exposure_ids) && row.pending_exposure_ids.length > 0)
+  || Boolean(
+    row.role === "assistant"
+      && row.status === "complete"
+      && row.exposure_receipt
+      && (row.exposure_receipt as Record<string, unknown>).released_at == null,
+  );
+
 async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
   db: Sql | TransactionSql, scope: OpeningConversationScope, rows: readonly T[],
 ): Promise<T[]> {
-  const ids = rows.flatMap(row => row.misconception_memory_turn_id ? [String(row.misconception_memory_turn_id)] : []);
-  const invalid = await readTurnsWithInvalidMisconceptionMemories(db, scope, ids, { display: true });
+  const ids: string[] = [];
+  const firstDeliveryTurnIds = new Set<string>();
+  for (const row of rows) {
+    if (!row.misconception_memory_turn_id) continue;
+    const turnId = String(row.misconception_memory_turn_id);
+    ids.push(turnId);
+    if (hasPendingFirstDelivery(row)) firstDeliveryTurnIds.add(turnId);
+  }
+  const invalid = await readTurnsWithInvalidMisconceptionMemories(
+    db, scope, ids, { display: true, ...(firstDeliveryTurnIds.size ? { firstDeliveryTurnIds } : {}) },
+  );
   return rows.map(row => invalid.has(String(row.misconception_memory_turn_id)) ? {
     ...row, text: INACTIVE_MISCONCEPTION_MESSAGE, last_turn_preview: INACTIVE_MISCONCEPTION_MESSAGE,
     citations: [], system_query: null, exposure_receipt: null, pending_exposure_ids: [],

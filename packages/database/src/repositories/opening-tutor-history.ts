@@ -464,7 +464,11 @@ function directExchangeMemoryAuthority(
   const mockHistorical = target && batches && batches.byConversation.size === 0
     ? target.direct.flatMap(origin => origin && origin.historical
       && !exchangeAssistantIds.has(String(origin.assistantTurnId ?? origin.id)) ? [{
-        courseId: origin.courseId, consumerCourseId: origin.consumerCourseId, materialUse: origin.materialUse,
+        courseId: origin.courseId, consumerCourseId: origin.consumerCourseId,
+        ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined
+          ? { extraMisconceptionCourses: [normalizeHistoryCourse(origin.pairedAssistantCourseId)] }
+          : {}),
+        materialUse: origin.materialUse,
         memoryIds: origin.ids, backings: origin.backings,
         backingSourceIds: origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined,
         sourceIds: [], expiresAt: Infinity, historical: true,
@@ -559,25 +563,6 @@ function minExpiryToIsoList(minMs: number): string[] {
   return [new Date(minMs).toISOString()];
 }
 
-function mergeHistoryCourseBindingItem(map: Map<string, HistoryCourseBinding>, binding: HistoryCourseBinding) {
-  const key = `${normalizeHistoryCourse(binding.courseId)}:${binding.materialUse}`;
-  const previous = map.get(key);
-  if (!previous) {
-    map.set(key, {
-      ...binding,
-      sourceIds: [...binding.sourceIds],
-      sourceRefs: [...binding.sourceRefs],
-      ...(binding.memoryIds?.length ? { memoryIds: [...binding.memoryIds] } : {}),
-      ...(binding.memoryBackings?.length ? { memoryBackings: binding.memoryBackings.map(group => [...group]) } : {}),
-    });
-    return;
-  }
-  previous.sourceIds = [...new Set([...previous.sourceIds, ...binding.sourceIds])].sort();
-  previous.sourceRefs = mergeContextSourceRefs(previous.sourceRefs, binding.sourceRefs);
-  if (binding.memoryIds?.length) previous.memoryIds = [...new Set([...(previous.memoryIds ?? []), ...binding.memoryIds])].sort();
-  if (binding.memoryBackings?.length) previous.memoryBackings = [...(previous.memoryBackings ?? []), ...binding.memoryBackings];
-}
-
 async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: HistoryRows,
   excluded: string[], recordReferents = false,
 ) {
@@ -592,6 +577,9 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
     assistantTurnId: item.origin.assistantTurnId ? String(item.origin.assistantTurnId) : undefined,
     entry: item.resolved === null ? null : {
       courseId: item.resolved.courseId,
+      ...(item.resolved.isPairedUser && item.resolved.pairedAssistantCourseId !== undefined
+        ? { extraMisconceptionCourses: [normalizeHistoryCourse(item.resolved.pairedAssistantCourseId)] }
+        : {}),
       materialUse: item.resolved.materialUse,
       memoryIds: item.resolved.ids,
       backings: item.resolved.backings,
@@ -677,6 +665,8 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
     ownExpirations: string[];
     expirations: string[];
     bindings: HistoryCourseBinding[];
+    orderedNonExchangeBindings: readonly HistoryCourseBinding[] | undefined;
+    nonExchangeBindingCount: number;
     misconceptionCourseId: string | null;
     directMisconceptionLineage: TutorMisconceptionLineage | undefined;
     prefixOrderedRevisions: readonly string[] | undefined;
@@ -735,6 +725,8 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
       bindings: historyCourseBindings(rows[index]!, entries.map((entry, i) => ({
         ...entry, backings: entry.backings.map(ids => ids.filter(id => own[i]!.some(node => node.dep_id === id))),
       })), extraBindings),
+      orderedNonExchangeBindings: undefined,
+      nonExchangeBindingCount: 0,
       misconceptionCourseId: directLineage?.courseId ?? null,
       directMisconceptionLineage: directLineage,
       prefixOrderedRevisions: undefined,
@@ -822,7 +814,7 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
   const seenPrefixCurrentIds = new Set<string>();
   const orderedPrefixCurrentIds: string[] = [];
   let prefixMinCurrentExpiryMs = Infinity;
-  const prefixNonExchangeBindings = new Map<string, HistoryCourseBinding>();
+  const orderedNonExchangeBindings: HistoryCourseBinding[] = [];
   const foldLineage = (lineage: TutorMisconceptionLineage | undefined) => {
     if (!lineage) return;
     if (lineage.courseId !== null && prefixMisconceptionCourse !== "conflict") {
@@ -866,7 +858,7 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
         }
         prefixMinOwnExpiryMs = combineMinMs(prefixMinOwnExpiryMs, item.ownExpiryMs);
         foldLineage(item.ownLineage);
-        for (const binding of item.bindings) mergeHistoryCourseBindingItem(prefixNonExchangeBindings, binding);
+        for (const binding of item.bindings) orderedNonExchangeBindings.push(binding);
         if (!item.inScopeCurrent) {
           const mismatchedCourses = item.ownScopedMemoryCourses.filter(c => c !== targetCourseNorm);
           for (const c of mismatchedCourses) prefixOutOfScopeMemoryCourses.add(c);
@@ -890,6 +882,7 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
 
     if (row.assistant_intent_hash == null) {
       const assistantCourse = row.assistant_course_id === undefined ? undefined : normalizeHistoryCourse(row.assistant_course_id);
+      const priorCourse = row.prior_course_id === undefined ? assistantCourse : normalizeHistoryCourse(row.prior_course_id);
       if (prefixOwnInvalid || prefixMisconceptionCourse === "conflict"
         || (prefixMisconceptionCourse !== null && assistantCourse !== undefined && assistantCourse !== prefixMisconceptionCourse)) {
         out[index] = null;
@@ -900,12 +893,15 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
       if (prefixMisconceptionCourse !== null && prefixMisconceptionCourse !== targetCourseNorm) {
         effectiveInScope = false;
       }
-      if (prefixCitationOnlyOutOfScope && (row.assistant_material_use ?? "citation") !== "practice") {
+      if (prefixCitationOnlyOutOfScope && (
+        (row.prior_material_use ?? row.assistant_material_use ?? "citation") !== "practice"
+        || (row.assistant_material_use ?? "citation") !== "practice"
+      )) {
         effectiveInScope = false;
       }
       if (prefixOutOfScopeMemoryCourses.size > 0) {
         const isolatedInTarget = targetCourseNorm !== null && assistantCourse === targetCourseNorm
-          && !prefixOutOfScopeMemoryCourses.has(assistantCourse);
+          && priorCourse === targetCourseNorm && !prefixOutOfScopeMemoryCourses.has(targetCourseNorm);
         if (!isolatedInTarget) effectiveInScope = false;
       }
       const directMiscCourse = direct.directMisconceptionLineage?.courseId ?? null;
@@ -913,13 +909,7 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
         && prefixMisconceptionCourse !== normalizeHistoryCourse(directMiscCourse)) {
         effectiveInScope = false;
       }
-      let mergedBindings = direct.bindings;
-      if (prefixNonExchangeBindings.size > 0 && row.user_direct_ids && row.assistant_direct_ids) {
-        const map = new Map<string, HistoryCourseBinding>();
-        for (const b of direct.bindings) mergeHistoryCourseBindingItem(map, b);
-        for (const b of prefixNonExchangeBindings.values()) mergeHistoryCourseBindingItem(map, b);
-        mergedBindings = [...map.values()];
-      }
+      const nonExchangeBindingCount = row.user_direct_ids && row.assistant_direct_ids ? orderedNonExchangeBindings.length : 0;
       const ownMinMs = combineMinMs(prefixMinOwnExpiryMs, direct.ownExpiryMs);
       const currentMinMs = effectiveInScope ? combineMinMs(prefixMinCurrentExpiryMs, direct.expiryMs) : direct.expiryMs;
       const inheritedIdCount = effectiveInScope ? orderedPrefixCurrentIds.length : 0;
@@ -933,7 +923,9 @@ async function resolveExchangeMemories(sql: Db, scope: OpeningScope, rows: Histo
         expiryMs: currentMinMs,
         ownExpirations: minExpiryToIsoList(ownMinMs),
         expirations: minExpiryToIsoList(currentMinMs),
-        bindings: mergedBindings,
+        bindings: direct.bindings,
+        orderedNonExchangeBindings: nonExchangeBindingCount > 0 ? orderedNonExchangeBindings : undefined,
+        nonExchangeBindingCount,
         misconceptionCourseId: effectiveInScope ? (prefixMisconceptionRawCourse ?? directMiscCourse) : null,
         directMisconceptionLineage: effectiveInScope ? direct.directMisconceptionLineage : undefined,
         prefixOrderedRevisions: prefixRevCount > 0 ? orderedPrefixRevisions : undefined,
@@ -1151,14 +1143,18 @@ export async function readTutorHistoryAncestorAuthority(sql: Db, scope: OpeningS
         const atLimit = state.coursesByLimit.get(j + 1);
         if (atLimit) runningCourses = mergeMisconceptionCourses(runningCourses, ...atLimit);
         const resolved = convItems[j]!.resolved!;
+        const itemExtra = mergeMisconceptionCourses(
+          runningCourses,
+          ...(resolved.isPairedUser && resolved.pairedAssistantCourseId !== undefined ? [resolved.pairedAssistantCourseId] : []),
+        );
         const existing = emitted.get(resolved.id);
         if (existing) {
-          existing.extraMisconceptionCourses = mergeMisconceptionCourses(existing.extraMisconceptionCourses, ...(runningCourses ?? []));
+          existing.extraMisconceptionCourses = mergeMisconceptionCourses(existing.extraMisconceptionCourses, ...(itemExtra ?? []));
         } else {
           const histEntry: HistoryAncestorAuthority = {
             courseId: resolved.courseId,
             consumerCourseId: state.checkPriorScope ? state.currentCourseId : (runningCourses?.[0] ?? null),
-            extraMisconceptionCourses: runningCourses,
+            extraMisconceptionCourses: itemExtra,
             materialUse: resolved.materialUse,
             memoryIds: resolved.ids,
             backings: resolved.backings,
@@ -1289,18 +1285,35 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
   let characters = 0;
   const sourceRefs: ContextSourceRef[] = [];
   const selectedDestinationSourceIds = new Set<string>();
-  const courseBindings = new Map<string, HistoryCourseBinding>();
+  type BindingAccumulator = {
+    courseId: string | null;
+    materialUse: MaterialUse;
+    sourceIdSet: Set<string>;
+    sourceRefs: ContextSourceRef[];
+    memoryIdSet: Set<string>;
+    memoryBackings: string[][];
+    keepEmptyMemoryArrays: boolean;
+  };
+  const courseBindingAcc = new Map<string, BindingAccumulator>();
   const mergeBinding = (binding: HistoryCourseBinding) => {
-    const key = `${binding.courseId}:${binding.materialUse}`;
-    const previous = courseBindings.get(key);
-    if (!previous) {
-      courseBindings.set(key, binding);
-      return;
+    const key = `${normalizeHistoryCourse(binding.courseId)}:${binding.materialUse}`;
+    let acc = courseBindingAcc.get(key);
+    if (!acc) {
+      acc = {
+        courseId: binding.courseId,
+        materialUse: binding.materialUse,
+        sourceIdSet: new Set<string>(),
+        sourceRefs: [],
+        memoryIdSet: new Set<string>(),
+        memoryBackings: [],
+        keepEmptyMemoryArrays: binding.memoryIds !== undefined && binding.memoryBackings !== undefined,
+      };
+      courseBindingAcc.set(key, acc);
     }
-    previous.sourceIds = [...new Set([...previous.sourceIds, ...binding.sourceIds])].sort();
-    previous.sourceRefs = mergeContextSourceRefs(previous.sourceRefs, binding.sourceRefs);
-    if (binding.memoryIds?.length) previous.memoryIds = [...new Set([...(previous.memoryIds ?? []), ...binding.memoryIds])].sort();
-    if (binding.memoryBackings?.length) previous.memoryBackings = [...(previous.memoryBackings ?? []), ...binding.memoryBackings];
+    for (const id of binding.sourceIds) acc.sourceIdSet.add(id);
+    if (binding.sourceRefs.length) acc.sourceRefs.push(...binding.sourceRefs);
+    if (binding.memoryIds?.length) for (const id of binding.memoryIds) acc.memoryIdSet.add(id);
+    if (binding.memoryBackings?.length) acc.memoryBackings.push(...binding.memoryBackings);
   };
   const memoryIdSet = new Set<string>();
   let misconceptionCourseId: string | null = null;
@@ -1366,9 +1379,16 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     addOrderedPrefix(dependencies.inheritedMemoryIds, dependencies.inheritedMemoryIdCount, memoryIdSet);
     characters += question.length + answer.length;
   }
+  let sharedNonExchangeBindings: readonly HistoryCourseBinding[] | undefined;
+  let maxNonExchangeBindingCount = 0;
   if (!recordReferents) for (let index = newestRetained; index < rows.length; index++) {
     for (const expiry of expirations[index]!) earliestExpiry = Math.min(earliestExpiry, expiry);
-    for (const binding of resolved[index]?.bindings ?? []) mergeBinding(binding);
+    const entry = resolved[index];
+    for (const binding of entry?.bindings ?? []) mergeBinding(binding);
+    if (entry?.orderedNonExchangeBindings && entry.nonExchangeBindingCount > maxNonExchangeBindingCount) {
+      sharedNonExchangeBindings = entry.orderedNonExchangeBindings;
+      maxNonExchangeBindingCount = entry.nonExchangeBindingCount;
+    }
     if (index > newestRetainedHashless && !retainedIndices.has(index)) {
       const omitted = resolved[index];
       if (omitted?.inScope) {
@@ -1395,8 +1415,26 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
       }
     }
   }
+  if (sharedNonExchangeBindings) {
+    for (let i = 0; i < maxNonExchangeBindingCount; i++) mergeBinding(sharedNonExchangeBindings[i]!);
+  }
   const mergedRefs = mergeContextSourceRefs(sourceRefs);
-  const destination = courseBindings.get(`${rows[0]?.current_course_id ?? null}:${rows[0]?.material_use ?? "citation"}`);
+  const courseBindings = new Map<string, HistoryCourseBinding>();
+  for (const [key, acc] of courseBindingAcc) {
+    courseBindings.set(key, {
+      courseId: acc.courseId,
+      materialUse: acc.materialUse,
+      sourceIds: [...acc.sourceIdSet].sort(),
+      sourceRefs: acc.sourceRefs.length ? mergeContextSourceRefs(acc.sourceRefs) : [],
+      ...(acc.memoryIdSet.size
+        ? { memoryIds: [...acc.memoryIdSet].sort() }
+        : (acc.keepEmptyMemoryArrays ? { memoryIds: [] } : {})),
+      ...(acc.memoryBackings.length
+        ? { memoryBackings: acc.memoryBackings }
+        : (acc.keepEmptyMemoryArrays ? { memoryBackings: [] } : {})),
+    });
+  }
+  const destination = courseBindings.get(`${normalizeHistoryCourse(rows[0]?.current_course_id ?? null)}:${rows[0]?.material_use ?? "citation"}`);
   if (destination) {
     const versionedDirect = new Set(mergedRefs.filter(ref => ref.memoryOnly !== true).map(ref => ref.sourceId));
     if (destination.sourceIds.some(id => !versionedDirect.has(id))) {

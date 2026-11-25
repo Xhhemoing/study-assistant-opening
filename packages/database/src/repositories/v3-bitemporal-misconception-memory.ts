@@ -255,38 +255,55 @@ export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
 
 type MaterialUse = "citation" | "practice";
 export type SavedMemoryOrigin = {
-  id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null; materialUse: MaterialUse;
+  id: string; assistantTurnId?: string; courseId: string | null; consumerCourseId: string | null;
+  pairedAssistantCourseId?: string | null; materialUse: MaterialUse;
   refs: unknown; standalone: boolean; historical?: boolean; jobBacked?: boolean; isPairedUser?: boolean;
 };
 export type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
 
 function directMemoryOriginSide(
   db: Db, origin: FragmentFactory, pairedUser: FragmentFactory, course: FragmentFactory,
-  owner: FragmentFactory, historical: FragmentFactory,
+  owner: FragmentFactory, historical: FragmentFactory, conversationCourse?: FragmentFactory,
+  knownOriginCourse?: FragmentFactory,
 ) {
-  return db`SELECT jsonb_build_object('id', ${origin()}.id, 'assistantTurnId', ${origin()}.id,
-      'courseId', (SELECT ${turnLineageCourse(db, "dt", undefined, owner)} FROM (SELECT ${origin()}.*) dt OFFSET 0),
-      'consumerCourseId', ${course()},
-      'materialUse', (SELECT ${turnMaterialUse(db, "a")} FROM (SELECT ${origin()}.*) a OFFSET 0),
-      'refs', ${origin()}.context_source_refs, 'standalone', CASE
-        WHEN ${origin()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        THEN ${turnHasStandaloneSessions(db, owner, origin)} ELSE false END,
-      'historical', ${historical()},
-      'jobBacked', ${pairedUser()}.id IS NOT NULL,
-      'isPairedUser', false) AS payload
-    WHERE ${hasSavedMemoryReferences(db, () => db`${origin()}.context_source_refs`)}
-    UNION ALL
-    SELECT jsonb_build_object('id', ${pairedUser()}.id, 'assistantTurnId', ${origin()}.id,
-      'courseId', (SELECT ${turnLineageCourse(db, "u", undefined, owner)} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
-      'consumerCourseId', ${course()},
-      'materialUse', (SELECT ${turnMaterialUse(db, "u")} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
-      'refs', ${pairedUser()}.context_source_refs, 'standalone', CASE
-        WHEN ${pairedUser()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-        THEN ${turnHasStandaloneSession(db, pairedUser, owner)} ELSE false END,
-      'historical', ${historical()},
-      'jobBacked', true,
-      'isPairedUser', true) AS payload
-    WHERE ${pairedUser()}.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`${pairedUser()}.context_source_refs`)}`;
+  const originHasMem = () => hasSavedMemoryReferences(db, () => db`${origin()}.context_source_refs`);
+  const pairedHasMem = () => db`(${pairedUser()}.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`${pairedUser()}.context_source_refs`)})`;
+  const computedOriginCourse = knownOriginCourse
+    ?? (() => db`(SELECT ${turnLineageCourse(db, "dt", conversationCourse, owner)} FROM (SELECT ${origin()}.*) dt OFFSET 0)`);
+  return db`SELECT side_row.payload
+    FROM (
+      SELECT ${computedOriginCourse()} AS id,
+        ${originHasMem()} AS origin_has_mem,
+        ${pairedHasMem()} AS paired_has_mem
+      WHERE ${originHasMem()} OR ${pairedHasMem()}
+      OFFSET 0
+    ) origin_course
+    CROSS JOIN LATERAL (
+      SELECT jsonb_build_object('id', ${origin()}.id, 'assistantTurnId', ${origin()}.id,
+        'courseId', origin_course.id,
+        'consumerCourseId', ${course()},
+        'materialUse', (SELECT ${turnMaterialUse(db, "a")} FROM (SELECT ${origin()}.*) a OFFSET 0),
+        'refs', ${origin()}.context_source_refs, 'standalone', CASE
+          WHEN ${origin()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+          THEN ${turnHasStandaloneSessions(db, owner, origin)} ELSE false END,
+        'historical', ${historical()},
+        'jobBacked', ${pairedUser()}.id IS NOT NULL,
+        'isPairedUser', false) AS payload
+      WHERE origin_course.origin_has_mem
+      UNION ALL
+      SELECT jsonb_build_object('id', ${pairedUser()}.id, 'assistantTurnId', ${origin()}.id,
+        'courseId', (SELECT ${turnLineageCourse(db, "u", conversationCourse, owner)} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
+        'consumerCourseId', ${course()},
+        'pairedAssistantCourseId', origin_course.id,
+        'materialUse', (SELECT ${turnMaterialUse(db, "u")} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
+        'refs', ${pairedUser()}.context_source_refs, 'standalone', CASE
+          WHEN ${pairedUser()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+          THEN ${turnHasStandaloneSession(db, pairedUser, owner)} ELSE false END,
+        'historical', ${historical()},
+        'jobBacked', true,
+        'isPairedUser', true) AS payload
+      WHERE origin_course.paired_has_mem
+    ) side_row`;
 }
 
 function memoryOriginEvidence(db: Db, alias: "t" | "dt", course: FragmentFactory, owner: FragmentFactory) {
@@ -377,7 +394,7 @@ export async function readTurnMisconceptionMemoryOriginBatches(
     conv_origins?: ConversationPrefixMemoryOrigin[] | null;
   }[]>`
     SELECT t.id, ARRAY(
-      ${directMemoryOriginSide(db, () => db`t`, () => db`own_u`, () => db`t.own_course_id`, owner, () => db`false`)}
+      ${directMemoryOriginSide(db, () => db`t`, () => db`own_u`, () => db`t.own_course_id`, owner, () => db`false`, () => db`t.conv_course_id`, () => db`t.own_course_id`)}
     ) AS origins,
       t.conversation_id,
       t.own_course_id AS consumer_course_id,
@@ -391,6 +408,7 @@ export async function readTurnMisconceptionMemoryOriginBatches(
           row_number() OVER (PARTITION BY base.conversation_id ORDER BY base.id) AS conv_rn
         FROM (
           SELECT saved.*,
+            c.course_id AS conv_course_id,
             ${turnLineageCourse(db, "t", () => db`c.course_id`, owner)} AS own_course_id,
             own_j.user_turn_id AS own_user_turn_id,
             (extract(epoch FROM COALESCE(own_u.created_at, saved.created_at)) * 1000000)::bigint::text AS pos_us,
@@ -424,7 +442,7 @@ export async function readTurnMisconceptionMemoryOriginBatches(
               AND prior_u.workspace_id = prior_a.workspace_id AND prior_u.conversation_id = prior_a.conversation_id
               AND prior_u.role = 'user' AND prior_u.status = 'complete'
             CROSS JOIN LATERAL (
-              ${directMemoryOriginSide(db, () => db`prior_a`, () => db`prior_u`, () => db`NULL::uuid`, owner, () => db`true`)}
+              ${directMemoryOriginSide(db, () => db`prior_a`, () => db`prior_u`, () => db`NULL::uuid`, owner, () => db`true`, () => db`c_conv.course_id`)}
             ) side
             WHERE prior_a.workspace_id = ${scope.workspaceId} AND prior_a.conversation_id = conv.conversation_id
               AND prior_a.role = 'assistant' AND prior_a.status = 'complete'
@@ -434,6 +452,7 @@ export async function readTurnMisconceptionMemoryOriginBatches(
             '[]'::jsonb
           ) AS origins
         FROM (SELECT DISTINCT conversation_id FROM target_turns WHERE inherits_prefix) conv
+        JOIN opening_conversations c_conv ON c_conv.id = conv.conversation_id AND c_conv.workspace_id = ${scope.workspaceId}
       )
       SELECT tt.*, cm.origins AS conv_origins
       FROM target_turns tt
@@ -558,10 +577,10 @@ export function mergeTutorMisconceptionLineages(
 
 type MemoryEvidence = {
   memoryId: string; hashes: string[]; courseId?: string | null; expiresAt?: string | Date | null;
-  statusActive?: boolean; active?: boolean; rootActive?: boolean; origins?: SavedMemoryOrigin[];
+  statusActive?: boolean; unexpired?: boolean; active?: boolean; rootActive?: boolean; origins?: SavedMemoryOrigin[];
 };
 type MemoryLineageNode = {
-  memoryCourseId: string | null; courseId: string | null; statusActive: boolean; active: boolean; rootActive: boolean;
+  memoryCourseId: string | null; courseId: string | null; statusActive: boolean; unexpired: boolean; active: boolean; rootActive: boolean;
   expiresAtMs: number; lineage: TutorMisconceptionLineage | undefined; origins: (TurnMemoryOrigin | null)[];
 };
 export type MemoryMisconceptionBinding = {
@@ -575,6 +594,7 @@ export type MemoryMisconceptionAuthority = {
   dependencyIds: string[];
   dependencies: Array<{ id: string; courseId: string | null }>;
   bindings: MemoryMisconceptionBinding[];
+  unexpired: boolean;
   earliestExpiresAtMs: number;
 };
 
@@ -606,6 +626,7 @@ async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]
         ELSE jsonb_build_object('memoryId', m.memory_id, 'hashes', lineage.hashes, 'courseId', m.course_id,
           'expiresAt', CASE WHEN m.kind='temporary' THEN m.expires_at END,
           'statusActive', m.status='active',
+          'unexpired', (m.kind <> 'temporary' OR (m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp())),
           'active', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp())),
           ${asOf === undefined ? db`` : db`'rootActive', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > ${asOf}::timestamptz)),`}
           'origins', lineage.memory_origins) END AS id
@@ -648,7 +669,7 @@ export async function readMemoryMisconceptionAuthorities(
     for (const { id } of rows) {
       if (typeof id === "string") {
         nodes.set(id.toLowerCase(), {
-          memoryCourseId: null, courseId: null, statusActive: true, active: true, rootActive: true,
+          memoryCourseId: null, courseId: null, statusActive: true, unexpired: true, active: true, rootActive: true,
           expiresAtMs: Infinity, lineage: undefined, origins: [],
         });
         continue;
@@ -663,10 +684,11 @@ export async function readMemoryMisconceptionAuthorities(
       const lineage = mergeTutorMisconceptionLineages(...hashes.map(hash => hash ?? undefined));
       const memoryCourseId = normalizeCourse(id.courseId);
       const active = id.active ?? true;
+      const unexpired = id.unexpired ?? active;
       const rootActive = id.rootActive ?? active;
       nodes.set(id.memoryId.toLowerCase(), {
         memoryCourseId, courseId: memoryCourseId ?? lineage?.courseId ?? null,
-        statusActive: id.statusActive ?? active, active, rootActive, expiresAtMs, lineage, origins: current,
+        statusActive: id.statusActive ?? active, unexpired, active, rootActive, expiresAtMs, lineage, origins: current,
       });
       for (const origin of current) {
         for (const dep of [...(origin?.ids ?? []), ...(origin?.backings.flat() ?? [])]) {
@@ -697,6 +719,7 @@ export async function readMemoryMisconceptionAuthorities(
       const lineages = [node.lineage];
       const depMap = new Map<string, string | null>();
       const bindingMap = new Map<string, { courseId: string | null; materialUse: MaterialUse; ids: Set<string> }>();
+      let unexpired = node.unexpired;
       let earliestExpiresAtMs = node.expiresAtMs;
       const addBinding = (courseId: string | null, materialUse: MaterialUse, ids: readonly string[]) => {
         if (!ids.length) return;
@@ -724,11 +747,19 @@ export async function readMemoryMisconceptionAuthorities(
             ? [origin.courseId]
             : [node.memoryCourseId, origin.courseId, origin.isPairedUser ? origin.courseId : origin.consumerCourseId];
           return courseAllows(child.memoryCourseId, ...memoryTargets)
-            && courseAllows(childAuth.lineage?.courseId ?? null, node.courseId, origin.courseId, origin.consumerCourseId);
+            && courseAllows(
+              childAuth.lineage?.courseId ?? null,
+              node.courseId,
+              origin.courseId,
+              origin.consumerCourseId,
+              ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
+            );
         };
         const backings = (display && origin.ids.length ? [] : origin.backings).map((options, backingIndex) =>
           options.find(dep => admits(dep, true, backingIndex) && !resolved.get(dep.toLowerCase())?.lineage
-            && resolved.get(dep.toLowerCase())!.earliestExpiresAtMs === Infinity)
+            && resolved.get(dep.toLowerCase())!.unexpired && resolved.get(dep.toLowerCase())!.earliestExpiresAtMs === Infinity)
+          ?? options.find(dep => admits(dep, true, backingIndex) && !resolved.get(dep.toLowerCase())?.lineage
+            && resolved.get(dep.toLowerCase())!.unexpired)
           ?? options.find(dep => admits(dep, true, backingIndex) && !resolved.get(dep.toLowerCase())?.lineage)
           ?? options.find(dep => admits(dep, true, backingIndex)));
         if (!origin.ids.every(dep => admits(dep, false)) || backings.some(dep => dep === undefined)) return false;
@@ -742,6 +773,7 @@ export async function readMemoryMisconceptionAuthorities(
           if (joblessHistorical && dep !== id) depMap.set(dep, child.memoryCourseId);
           for (const sub of childAuth.dependencies) if (sub.id !== id) depMap.set(sub.id, sub.courseId);
           for (const binding of childAuth.bindings) addBinding(binding.courseId, binding.materialUse, binding.memoryIds);
+          unexpired = unexpired && childAuth.unexpired;
           earliestExpiresAtMs = Math.min(earliestExpiresAtMs, childAuth.earliestExpiresAtMs);
         }
         return true;
@@ -759,6 +791,7 @@ export async function readMemoryMisconceptionAuthorities(
         bindings: [...bindingMap.values()].map(b => ({
           courseId: b.courseId, materialUse: b.materialUse, memoryIds: [...b.ids].sort(),
         })),
+        unexpired,
         earliestExpiresAtMs,
       });
       progress = true;
@@ -814,14 +847,19 @@ function buildConversationPrefixEvaluator(
       byAssistant.set(item.origin.assistantTurnId, list);
     }
     const originCourse = normalizeCourse(item.origin.courseId);
+    const candidateCourse = originCourse ?? (
+      item.origin.isPairedUser && item.origin.pairedAssistantCourseId !== undefined
+        ? normalizeCourse(item.origin.pairedAssistantCourseId)
+        : null
+    );
     otherVal[j] = evaluateHistorical(item.resolved, null);
-    if (originCourse !== null) {
-      const sameVal = evaluateHistorical(item.resolved, originCourse);
+    if (candidateCourse !== null) {
+      const sameVal = evaluateHistorical(item.resolved, candidateCourse);
       if (sameVal !== otherVal[j]) {
-        const group = byCourse.get(originCourse) ?? { positions: [], sameVals: [] };
+        const group = byCourse.get(candidateCourse) ?? { positions: [], sameVals: [] };
         group.positions.push(j);
         group.sameVals.push(sameVal);
-        byCourse.set(originCourse, group);
+        byCourse.set(candidateCourse, group);
       }
     }
   }
@@ -880,9 +918,15 @@ function buildConversationPrefixEvaluator(
   };
 }
 
+export type TurnMisconceptionMemoryStatusOptions = {
+  display?: boolean;
+  targetCourseId?: string | null;
+  firstDeliveryTurnIds?: ReadonlySet<string>;
+};
+
 /** Validate memory authority in the original turn, the consuming turn, and the requested destination. */
 export async function readTurnMisconceptionMemoryStatus(
-  db: Db, scope: OpeningScope, turnIds: readonly string[], options: { display?: boolean; targetCourseId?: string | null } = {},
+  db: Db, scope: OpeningScope, turnIds: readonly string[], options: TurnMisconceptionMemoryStatusOptions = {},
 ): Promise<{ invalid: Set<string>; earliestExpiresAtMs: number }> {
   const { targets, byConversation } = await readTurnMisconceptionMemoryOriginBatches(db, scope, turnIds);
   const byCourse = new Map<string | null, Set<string>>();
@@ -924,33 +968,37 @@ export async function readTurnMisconceptionMemoryStatus(
     graphs.set(use, await readMemoryDependencyStatus(db, scope, [...useIds], { materialUse: use }));
   }
   const nowMs = Date.now();
+  const authDeadline = (auth: MemoryMisconceptionAuthority) => auth.unexpired ? auth.earliestExpiresAtMs : 0;
   const evaluateSingleOrigin = (origin: TurnMemoryOrigin | null, consumerCourseId: string | null): number => {
     if (!origin) return -Infinity;
     const memoryCourses = memoryCoursesFor(origin);
     const misconceptionCourses = [
       origin.courseId, consumerCourseId,
       options.targetCourseId === undefined ? consumerCourseId : options.targetCourseId,
+      ...(origin.isPairedUser && origin.pairedAssistantCourseId !== undefined ? [origin.pairedAssistantCourseId] : []),
     ];
     const active = (rawId: string) => {
       const id = rawId.toLowerCase();
       if (!memoryCourses.every(course => authorities.get(course)?.has(id))) return false;
       const auth = authorities.get(normalizeCourse(origin.courseId))?.get(id);
       return Boolean(auth && courseAllows(auth.lineage?.courseId ?? null, ...misconceptionCourses)
-        && (options.display || auth.earliestExpiresAtMs > nowMs));
+        && (options.display || (auth.unexpired && auth.earliestExpiresAtMs > nowMs)));
     };
     const backings = (options.display && origin.ids.length ? [] : origin.backings).map(ids => ids.filter(active));
     if (!origin.ids.every(active) || backings.some(ids => !ids.length)) return -Infinity;
-    if (options.display) return Infinity;
     let earliest = Infinity;
     for (const rawId of origin.ids) {
       const auth = authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase());
-      if (auth) earliest = Math.min(earliest, auth.earliestExpiresAtMs);
+      if (auth) earliest = Math.min(earliest, authDeadline(auth));
     }
     for (const group of backings) {
-      const groupExpiry = Math.max(-Infinity, ...group.map(rawId =>
-        authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase())?.earliestExpiresAtMs ?? -Infinity));
+      const groupExpiry = Math.max(-Infinity, ...group.map(rawId => {
+        const auth = authorities.get(normalizeCourse(origin.courseId))?.get(rawId.toLowerCase());
+        return auth ? authDeadline(auth) : -Infinity;
+      }));
       earliest = Math.min(earliest, groupExpiry);
     }
+    if (options.display) return earliest;
     for (const course of memoryCourses) {
       const nodes = resolveMemoryDependencyStatus(graphs.get(origin.materialUse)!, origin.ids, backings, course,
         undefined, origin.ids.length ? memoryOnlyRefSourceIds(origin.refs) : undefined);
@@ -990,14 +1038,15 @@ export async function readTurnMisconceptionMemoryStatus(
       const evalPrefix = convEvaluators.get(target.conversationId);
       if (evalPrefix) turnEarliest = Math.min(turnEarliest, evalPrefix(limit, turnId, target.consumerCourseId));
     }
-    if (turnEarliest === -Infinity) invalid.add(turnId);
+    const enforceExpiry = !options.display || Boolean(options.firstDeliveryTurnIds?.has(turnId));
+    if (turnEarliest === -Infinity || (enforceExpiry && !(turnEarliest > nowMs))) invalid.add(turnId);
     else earliestExpiresAtMs = Math.min(earliestExpiresAtMs, turnEarliest);
   }
   return { invalid, earliestExpiresAtMs };
 }
 
 export async function readTurnsWithInvalidMisconceptionMemories(
-  db: Db, scope: OpeningScope, turnIds: readonly string[], options: { display?: boolean; targetCourseId?: string | null } = {},
+  db: Db, scope: OpeningScope, turnIds: readonly string[], options: TurnMisconceptionMemoryStatusOptions = {},
 ) {
   return (await readTurnMisconceptionMemoryStatus(db, scope, turnIds, options)).invalid;
 }
