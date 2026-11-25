@@ -957,16 +957,31 @@ const DOMAIN_MENTIONS = [
   { pattern: EXCLUDED_ZERO_CHARACTERISTIC, domain: "non_real" as const },
 ].map(({ pattern, domain }) => ({ pattern: new RegExp(pattern.source, pattern.flags + "g"), domain }));
 
-const PROOF_SUPPOSITION = /\b(?:assume|assuming|suppose|supposing|hypothesi[sz]e)\b|(?:^|[.!?;:。！？；：])\s*(?:if\s+|(?:assumption|hypothesis)\s*[:：]|(?:先|现|暂且)?假设(?!\s*不成立)|不妨设|若)/iu;
-const CONTRADICTION_INTENT = /\b(?:(?:for|by)\s+(?:way\s+of\s+|the\s+sake\s+of\s+)?contradiction|(?:seek\w*|sought|look\w*\s+for|search\w*\s+for|aim\w*\s+(?:for|at|to\s+[a-z]+)|(?:want\w*|need\w*)(?:\s+to\s+[a-z]+)?|(?:try\w*|attempt\w*|hop\w*|in\s+order)\s+to\s+[a-z]+|towards?|to\s+[a-z]+)\s+(?:a\s+|an\s+|some\s+|any\s+|the\s+)?contradiction)\b|(?:用|采用|使用|通过)?反证法?|(?:欲|试图|为了|寻求|寻找)(?:导出|推出|得到|得出)?矛盾/giu;
-const EXPLICIT_COUNTERFACTUAL = /\b(?:(?:derived|resulting)\s+contradiction|(?:derive[sd]?|yield[sd]?|give[sn]?|show[sn]?|is)\s+(?:a|the)\s+contradiction)\b|^\s*contradiction\b|归谬|(?:推出|得到|得出|导出)矛盾/iu;
+const PROOF_SUPPOSITION = /\b(?:assume|assuming|suppose|supposing|hypothesi[sz]e)\b|(?:^|[,.!?;:，。！？；：\r\n])\s*(?:if\s+|(?:assumption|hypothesis)\s*[:：]|(?:先|现|暂且)?(?:假设|假定)(?!\s*(?:(?:并非|并不|不是)\s*)?(?:不成立|错误|荒谬))|不妨设|(?:先|现|暂且|反)?设(?!置|计|备|施|想|定为)|若)/iu;
+const CONTRADICTION_INTENT = /\b(?:(?:for|by)\s+(?:way\s+of\s+|the\s+sake\s+of\s+)?contradiction|(?:seek\w*|sought|look\w*\s+for|search\w*\s+for|aim\w*\s+(?:for|at|to\s+[a-z]+)|(?:want\w*|need\w*)(?:\s+to\s+[a-z]+)?|(?:try\w*|attempt\w*|hop\w*|in\s+order)\s+to\s+[a-z]+|towards?|to\s+(?!(?:a|an|the)\s)[a-z]+)\s+(?:a\s+|an\s+|some\s+|any\s+|the\s+)?contradiction)\b|(?:用|采用|使用|通过)?反证法?|(?:欲|试图|为了|寻求|寻找)(?:导出|推出|得到|得出)?矛盾/giu;
 const OUTER_REJECTION_QUALIFIER = /(?:outer|first|initial|earlier)/u.source;
 const INNER_REJECTION_QUALIFIER = /(?:inner|second|latter)/u.source;
-const REJECTION_QUALIFIER = String.raw`(?:(${OUTER_REJECTION_QUALIFIER}|${INNER_REJECTION_QUALIFIER})\s+)?(?:assumption|supposition|hypothesis)`;
-const EXPLICIT_REJECTION = new RegExp(String.raw`\b(?:(?:reject\w*|refut\w*|disprov\w*|discharg\w*|falsif\w*|negat\w*|contrary\s+to)\s+(?:the\s+)?${REJECTION_QUALIFIER}|${REJECTION_QUALIFIER}\s+(?:is\s+|must\s+be\s+)?(?:false|impossible|contradicted|rejected|refuted|discharged))\b|(?:否定|推翻)(原|上述|该|内层|外层)?假设|(原|上述|该|内层|外层)?假设不成立`, "iu");
+const REJECTION_TARGET = String.raw`(?:(${OUTER_REJECTION_QUALIFIER}|${INNER_REJECTION_QUALIFIER})\s+)?(?:assumption|supposition|hypothesis|premise)`;
+const REJECTION_ACTION = /(?:(?:reject|refut|disprov|discharg|falsif|negat|contradict)\w*|contrary\s+to)/u.source;
+const REJECTION_RESULT = /(?:false|impossible|contradicted|rejected|refuted|disproved|discharged|falsified|negated)/u.source;
+const REJECTION_COPULA = /(?:(?:is|was|must\s+be|has\s+been|has\s+proved(?:\s+to\s+be)?)\s+)?/u.source;
+const CHINESE_ASSUMPTION = /(?:假设|假定|前提)/u.source;
+const CHINESE_REJECTION_QUALIFIER = /原|上述|该|内层|外层/u.source;
+const CHINESE_REJECTION_ACTION = /(?:否定|推翻|驳倒|反驳|证伪|驳斥)/u.source;
+const CHINESE_REJECTION_RESULT = /(?:不成立|错误|荒谬|被(?:否定|推翻|驳倒|反驳|证伪|驳斥))/u.source;
+const CHINESE_REJECTION_TARGET = String.raw`(${CHINESE_REJECTION_QUALIFIER})?${CHINESE_ASSUMPTION}`;
+const ACTIVE_REJECTION = String.raw`${REJECTION_ACTION}\s+(?:(?:the|this|that)\s+)?${REJECTION_TARGET}`;
+const PASSIVE_REJECTION = String.raw`${REJECTION_TARGET}\s+${REJECTION_COPULA}${REJECTION_RESULT}`;
+const CHINESE_REJECTION = String.raw`(?:${CHINESE_REJECTION_ACTION}${CHINESE_REJECTION_TARGET}|${CHINESE_REJECTION_TARGET}(?:是|为)?${CHINESE_REJECTION_RESULT})`;
+const EXPLICIT_REJECTION = new RegExp(String.raw`\b(?:${ACTIVE_REJECTION}|${PASSIVE_REJECTION})\b|${CHINESE_REJECTION}`, "iu");
 const OUTER_REJECTION = new RegExp(String.raw`^(?:${OUTER_REJECTION_QUALIFIER}|外层|原)$`, "iu");
 const INNER_REJECTION = new RegExp(String.raw`^(?:${INNER_REJECTION_QUALIFIER}|内层)$`, "iu");
-const DERIVED_CONTRADICTION = /\b(?:contradict\w*|absurd\w*|reductio|which\s+is\s+impossible)\b|矛盾|归谬|荒谬/iu;
+const DERIVED_CONTRADICTION = new RegExp([
+  /(?:^|[,，—–])\s*["“(]*(?:(?:a|the)\s+)?contradiction\s*[.!。！"”)\s]*$/iu.source,
+  /\b(?:is|are|was|were|becomes?|constitut\w*|reach\w*|yield\w*|giv(?:e|es|en|ing)|gave|deriv\w*|lead\w*\s+to|led\s+to|result\w*\s+in|produc\w*|obtain\w*|show\w*|have|has|had|found|finds?)\s+(?:(?:a|an|the)\s+)?(?:(?:derived|resulting|logical|direct|clear|actual)\s+)?contradictions?\b(?!\s+(?:of|rule|definition|concept|example|form|notation|principle)\b)/iu.source,
+  /\b(?:contradict(?:s|ed)\s+(?!(?:the\s+)?(?:rule|definition|concept|principle)\s+of\s+contradiction)\S|in\s+contradiction\s+with\b|(?:which|this|that|it)\s+is\s+(?:impossible|absurd)\b(?!\s*(?:\(\s*)?(?:to|that)\b)|by\s+reductio\b)/iu.source,
+  /(?:^|[,，\s])\s*(?:矛盾|归谬|荒谬)[。！!\s]*$|(?:导出|推出|得到|得出|产生|出现|构成|造成|发现|导致|由此(?:可知|可见)?|自相)\s*矛盾(?!\s*的)|(?:这|此结论|此结果)(?:显然|实在|确实)?(?:是|很|太)?(?:荒谬|不可能)(?:(?!的)|的(?=[。！!\s]*$))|与[^，。！？；：,.!?;:\r\n]+矛盾(?!\s*的)|(?:由此|从而|据此)归谬(?!\s*的)/u.source,
+].join("|"), "iu");
 const INDIRECT_QUESTION = /\b(?:whether|(?:wonder|ask|check|test|see|question|consider)\w*\s+(?:if|whether|what)|what\s+if)\b|是否|能否/iu;
 const CONDITIONAL_DOMAIN = /\b(?:if|whether|suppose|supposing|assuming|unless|imagine|in\s+case)\b|(?:如果|假若|若是?|倘若|要是|一旦)\s*(?=在|改在|换成|切换到)/iu;
 const DOMAIN_MODAL = /\b(?:would|could|might)\b/iu;
@@ -978,6 +993,18 @@ const CONTRADICTION_ROLE = /(?:contradict\w*|absurd\w*|reductio)/u.source;
 const CONTRADICTION_ERROR = /(?:invalid|false|wrong|incorrect|mistaken|bogus|spurious|erroneous|flawed|unjustified|unsound|failed)/u.source;
 const MODAL = /(?:might|may|could|would|should|possibly|perhaps|potentially|hopefully)/u.source;
 const MODAL_PROOF_ROLE = /(?:contradict\w*|absurd\w*|reductio|assumption|supposition|hypothesis|reject\w*|refut\w*|discharg\w*|which\s+is\s+impossible)/u.source;
+const ENGLISH_DISCHARGE_HEDGE = String.raw`(?:${MODAL}|not|no|never|neither|nor|without|hardly|fail\w*\s+to|unable\s+to|cannot|[a-z]+n['’]t|avoid\w*|yet\s+to|far\s+from|short\s+of|remains?\s+to|still\s+(?:need\w*|have|must|try\w*|attempt\w*|wait\w*)|prior\s+to|before|until)`;
+const CHINESE_DISCHARGE_HEDGE = /(?:无|没有|未曾?|未能|并未|并非|并不|不是|不会|不能|无法|不足以|尚未|仍未|还未|可能|也许|或许|未必|不一定|有待|仍需)/u.source;
+
+// Classify a denied rejection before masking its individual words as proof roles.
+const NONASSERTED_REJECTION = new RegExp([
+  String.raw`\b${ENGLISH_DISCHARGE_HEDGE}\b(?:[^\S\r\n]+[a-z'’-]+){0,10}[^\S\r\n]+(?:${ACTIVE_REJECTION}|${PASSIVE_REJECTION})\b`,
+  String.raw`\b${REJECTION_TARGET}\b(?:[^\S\r\n]+[a-z'’-]+){0,5}[^\S\r\n]+${ENGLISH_DISCHARGE_HEDGE}\b(?:[^\S\r\n]+[a-z'’-]+){0,5}[^\S\r\n]+${REJECTION_RESULT}\b`,
+  String.raw`${CHINESE_DISCHARGE_HEDGE}[^，。！？；：,.!?;:\r\n]{0,20}${CHINESE_REJECTION}`,
+  String.raw`${CHINESE_REJECTION_TARGET}(?:是|为)?${CHINESE_DISCHARGE_HEDGE}[^，。！？；：,.!?;:\r\n]{0,8}${CHINESE_REJECTION_RESULT}`,
+  String.raw`${CHINESE_REJECTION_TARGET}(?:是|为)?${CHINESE_REJECTION_RESULT}(?:的(?:结论|判断|说法))?\s*${CHINESE_DISCHARGE_HEDGE}`,
+].join("|"), "iu");
+
 const NEGATED_PROOF_ROLE = [
   new RegExp(String.raw`\b${CONTRADICTION_ERROR}\b[^\S\r\n]+(?:(?:purported|alleged|claimed|supposed)[^\S\r\n]+)?${CONTRADICTION_ROLE}\b`, "giu"),
   new RegExp(String.raw`\b${CONTRADICTION_ROLE}\b(?:[^\S\r\n]+(?!(?:assumption|supposition|hypothesis)\b)[a-z'’-]+){0,5}[^\S\r\n]+(?:${CONTRADICTION_ERROR}|fails?|collapses?|breaks?\s+down)\b`, "giu"),
@@ -1092,6 +1119,11 @@ const WORD_CHARACTER = /[\p{L}\p{N}\p{M}_]/u;
 const ALPHABETIC_PROSE = /^[\p{L}\p{M}\s]+[.!?。？！]*$/u;
 const CALCULATION = /[=≠<>≤≥≈]|\\(?:ne|neq|le|leq|ge|geq|approx|equiv)\b|\d\s*[+×÷−-]/u;
 const LATER_DOMAIN_TRANSITION = /\b(?:now|then|next|switch\w*|shift\w*|afterwards?)\b|随后|然后|接下来|切换|改用|改在/iu;
+const DOMAIN_TRANSITION_ACTION = /\b(?:(?:switch\w*|shift\w*|chang\w*|mov\w*)\s+(?:to|into|over\s+to)|(?:work\w*|comput\w*|calculat\w*|operat\w*|reason\w*)\s+(?:in|over|within))\b|(?:继续)?(?:切换至?|切换到|改用|改为|改在|转到|转用|换到|换用|換到|換用)/iu;
+const POST_CLAIM_DOMAIN_BREAK = new RegExp([
+  /[;；]/u.source,
+  String.raw`(?:^|[,，]|(?:\b(?:and|but|whereas|while)\b|并且|而后|且|但(?:是)?))\s*(?:(?:and|but)\s+)?(?:(?:we|you|they)\s+)?(?=${LATER_DOMAIN_TRANSITION.source}|${DOMAIN_TRANSITION_ACTION.source})`,
+].join("|"), "iu");
 
 function prepareTranscription(transcription: string) {
   const sentenceEnds: number[] = [];
@@ -1129,51 +1161,182 @@ function prepareTranscription(transcription: string) {
 
 type Transcription = ReturnType<typeof prepareTranscription>;
 
-function firstTranscribedMatch(transcription: Transcription, candidate: string, cursor: number): TextSpan | undefined {
-  const pattern = candidate.replace(/\s/gu, "");
-  const { chars, context, originalIndex } = transcription;
-  if (!pattern || pattern.length > chars.length - cursor) return undefined;
-  const prose = ALPHABETIC_PROSE.test(candidate);
-  const wordEnding = WORD_CHARACTER.test(pattern.at(-1)!);
+type TranscriptionCandidate = {
+  pattern: string;
+  prose: boolean;
+  spans: TextSpan[];
+  nextSpan: number;
+};
 
-  // A prefix table bounds the search even for long, almost-identical runs.
-  const prefix = [0];
-  for (let index = 1, length = 0; index < pattern.length; index++) {
-    while (length && pattern[index] !== pattern[length]) length = prefix[length - 1]!;
-    if (pattern[index] === pattern[length]) length++;
-    prefix.push(length);
+type MatchNode = {
+  edges: Map<string, number>;
+  depth: number;
+  failure: number;
+  proseOutput: number;
+  mathOutput: number;
+  candidate?: TranscriptionCandidate;
+};
+
+function matchNode(depth: number): MatchNode {
+  return { edges: new Map(), depth, failure: 0, proseOutput: 0, mathOutput: 0 };
+}
+
+const MATH_OPERATOR = /[+\-−±∓*/×÷·⋅^_=≠<>≤≥≈]/u;
+const MATH_CONTINUATION = /[\\{}]/u;
+const DECIMAL_DIGIT = /\d/u;
+const CHINESE_DOMAIN_AFTER_MATH = /(?:(?:且|而后|并且|但(?:是)?)\s*)?(?:(?:随后|然后|接下来)\s*)?(?:切换(?:到|至)|改在|改用)|其中特征/uy;
+
+function isWordAt(text: string, offset: number): boolean {
+  const codeUnit = text.charCodeAt(offset);
+  const codePoint = text.codePointAt(codeUnit >= 0xdc00 && codeUnit <= 0xdfff ? offset - 1 : offset);
+  return codePoint !== undefined && WORD_CHARACTER.test(String.fromCodePoint(codePoint));
+}
+
+function mathBoundary(text: string, offset: number, adjacent: number): boolean {
+  const char = text[offset] ?? "";
+  return !isWordAt(text, offset) && !MATH_OPERATOR.test(char) && !MATH_CONTINUATION.test(char) &&
+    !(char === "." && DECIMAL_DIGIT.test(text[adjacent] ?? ""));
+}
+
+function mathStartsAt(context: string, start: number, preceding: number | undefined): boolean {
+  if (!mathBoundary(context, start - 1, start - 2)) return false;
+  if (preceding === undefined || preceding + 1 === start) return true;
+  const before = context[preceding]!;
+  const coefficient = DECIMAL_DIGIT.test(before) && /[a-z\\]/iu.test(context[start]!) &&
+    !/[a-z]/iu.test(context[preceding - 1] ?? "");
+  return !(MATH_OPERATOR.test(before) || coefficient) || /[\r\n]/u.test(context.slice(preceding + 1, start));
+}
+
+function mathEndsAt(context: string, end: number, following: number | undefined): boolean {
+  if (!mathBoundary(context, end, end + 1)) return false;
+  return following === undefined || !MATH_OPERATOR.test(context[following]!) ||
+    /[\r\n]/u.test(context.slice(end, following));
+}
+
+function indexTranscribedCandidates(transcription: Transcription, candidates: Iterable<TranscriptionCandidate>): void {
+  const nodes = [matchNode(0)];
+  for (const candidate of candidates) {
+    let nodeIndex = 0;
+    for (let index = 0; index < candidate.pattern.length; index++) {
+      const char = candidate.pattern[index]!;
+      const node = nodes[nodeIndex]!;
+      let child = node.edges.get(char);
+      if (child === undefined) {
+        child = nodes.length;
+        node.edges.set(char, child);
+        nodes.push(matchNode(node.depth + 1));
+      }
+      nodeIndex = child;
+    }
+    nodes[nodeIndex]!.candidate = candidate;
   }
-  for (let index = cursor, length = 0; index < chars.length; index++) {
-    while (length && chars[index] !== pattern[length]) length = prefix[length - 1]!;
-    if (chars[index] === pattern[length]) length++;
-    if (length !== pattern.length) continue;
-    const start = originalIndex[index - length + 1]!;
-    const end = originalIndex[index]! + 1;
-    if (!prose || (!WORD_CHARACTER.test(context[start - 1] ?? "") &&
-        (!wordEnding || !WORD_CHARACTER.test(context[end] ?? "")))) return { start, end };
-    length = prefix[length - 1]!;
+  if (nodes.length === 1) return;
+
+  function advance(nodeIndex: number, char: string): number {
+    let target = nodes[nodeIndex]!.edges.get(char);
+    while (target === undefined && nodeIndex !== 0) {
+      nodeIndex = nodes[nodeIndex]!.failure;
+      target = nodes[nodeIndex]!.edges.get(char);
+    }
+    return target ?? 0;
   }
-  return undefined;
+
+  const queue = [...nodes[0]!.edges.values()];
+  for (let head = 0; head < queue.length; head++) {
+    const index = queue[head]!;
+    const node = nodes[index]!;
+    const suffix = nodes[node.failure]!;
+    // Store terminal suffix links by boundary rule so an invalid ending skips that entire chain.
+    node.proseOutput = node.candidate?.prose ? index : suffix.proseOutput;
+    node.mathOutput = node.candidate && !node.candidate.prose ? index : suffix.mathOutput;
+    for (const [char, child] of node.edges) {
+      nodes[child]!.failure = advance(node.failure, char);
+      queue.push(child);
+    }
+  }
+
+  const { chars, context, originalIndex } = transcription;
+  let state = 0;
+  let lastProseStart = -1;
+  let lastMathStart = -1;
+  const mathStarts: boolean[] = [];
+  for (let index = 0; index < chars.length; index++) {
+    const char = chars[index];
+    if (char == null) {
+      state = 0;
+      continue;
+    }
+    const offset = originalIndex[index]!;
+    if (!isWordAt(context, offset - 1)) {
+      lastProseStart = index;
+      if (mathStartsAt(context, offset, originalIndex[index - 1])) {
+        mathStarts[index] = true;
+        lastMathStart = index;
+      }
+    }
+    state = advance(state, char);
+    const { proseOutput, mathOutput } = nodes[state]!;
+    if (!proseOutput && !mathOutput) continue;
+    const end = offset + 1;
+    const endsInsideWord = isWordAt(context, offset) && isWordAt(context, end);
+    if (proseOutput && !endsInsideWord) recordSpans(proseOutput, true, lastProseStart, index, end);
+    CHINESE_DOMAIN_AFTER_MATH.lastIndex = end;
+    if (mathOutput && (mathEndsAt(context, end, originalIndex[index + 1]) || CHINESE_DOMAIN_AFTER_MATH.test(context))) {
+      recordSpans(mathOutput, false, lastMathStart, index, end);
+    }
+  }
+
+  function recordSpans(output: number, prose: boolean, lastStart: number, index: number, end: number): void {
+    while (output !== 0) {
+      const terminal = nodes[output]!;
+      const first = index - terminal.depth + 1;
+      // Every remaining suffix starts later than this one.
+      if (first > lastStart) break;
+      const start = originalIndex[first]!;
+      if (prose ? !isWordAt(context, start - 1) : mathStarts[first]) {
+        terminal.candidate!.spans.push({ start, end });
+      }
+      const suffix = nodes[terminal.failure]!;
+      output = prose ? suffix.proseOutput : suffix.mathOutput;
+    }
+  }
 }
 
 function locateTranscribedSteps(steps: readonly ProofStep[], transcription: Transcription) {
   const locations = new Map<ProofStep, TextSpan>();
-  const { context, originalIndex } = transcription;
-  let cursor = 0;
-  let previousEnd = 0;
-  for (const step of steps) {
+  if (!transcription.chars.length) return locations;
+
+  const candidates = new Map<string, TranscriptionCandidate>();
+  const candidatesByStep = steps.map(step => {
     const body = standaloneProofEquationBody(step.claim);
-    const candidates = new Set([step.claim.trim(), body, unwrapMath(body)]);
+    const patterns = new Set([step.claim.trim(), body, unwrapMath(body)].map(text => text?.replace(/\s/gu, "") ?? ""));
+    patterns.delete("");
+    return [...patterns].map(pattern => {
+      const existing = candidates.get(pattern);
+      if (existing) return existing;
+      const candidate = { pattern, prose: ALPHABETIC_PROSE.test(pattern), spans: [], nextSpan: 0 };
+      candidates.set(pattern, candidate);
+      return candidate;
+    });
+  });
+  indexTranscribedCandidates(transcription, candidates.values());
+
+  const { context } = transcription;
+  let cursor = 0;
+  for (const [index, step] of steps.entries()) {
     let location: TextSpan | undefined;
-    for (const candidate of candidates) {
-      if (!candidate) continue;
-      const match = firstTranscribedMatch(transcription, candidate, cursor);
-      if (!match) continue;
-      let { start, end } = match;
+    for (const candidate of candidatesByStep[index]!) {
+      // Each pattern advances through its sorted, distinct spans at most once.
+      while (candidate.spans[candidate.nextSpan] && candidate.spans[candidate.nextSpan]!.start < cursor) {
+        candidate.nextSpan++;
+      }
+      const span = candidate.spans[candidate.nextSpan];
+      if (!span) continue;
+      let { start, end } = span;
       // An unwrapped match can be inside a fence in the transcription.
       const fence = context[start - 1] === "$" && context[end] === "$"
         ? (context[start - 2] === "$" && context[end + 1] === "$" ? 2 : 1) : 0;
-      if (start - fence >= previousEnd) {
+      if (start - fence >= cursor) {
         start -= fence;
         end += fence;
       }
@@ -1183,8 +1346,7 @@ function locateTranscribedSteps(steps: readonly ProofStep[], transcription: Tran
     }
     if (location) {
       locations.set(step, location);
-      previousEnd = location.end;
-      while (cursor < originalIndex.length && originalIndex[cursor]! < previousEnd) cursor++;
+      cursor = location.end;
     }
   }
   return locations;
@@ -1229,6 +1391,8 @@ export function proofStepUsesRealScalar(
       next = matches.next();
       while (transcribed.sentenceEnds[sentenceIndex]! < location.end) sentenceIndex++;
       end = Math.min(transcribed.sentenceEnds[sentenceIndex]!, next.value?.start ?? transcribed.context.length);
+      const transition = POST_CLAIM_DOMAIN_BREAK.exec(transcribed.context.slice(location.end, end));
+      if (transition) end = location.end + transition.index;
     } else if (cursor === 0 && locations.size) {
       end = Math.min(transcribed.preambleEnd, next.value?.start ?? 0);
     }
@@ -1250,13 +1414,19 @@ export function proofStepUsesRealScalar(
   return result;
 }
 
+const INDEPENDENT_PROSE_CLAUSE = /[;；\r\n]|\b(?:however|moreover|furthermore)\b,?\s+(?=(?:the|this|that|we|you|it|they|there)\b)|\b(?:but|yet|whereas|while)\s+(?=(?:the|this|that|these|those|a|an|we|you|it|they|he|she|there)\b)|[,，]\s*\b(?:and|also)\s+(?=(?:the|this|that|we|you|it|they|there)\b)|(?:但(?:是)?|不过|此外|另外)(?=\s*(?:这|该|其|此|原|假设|前提|论证|证明|结果|还|仍))|[，,]\s*(?:但(?:是)?|不过|此外|另外)/iu;
+
+export function independentProseClauses(sentence: string): string[] {
+  return sentence.split(INDEPENDENT_PROSE_CLAUSE);
+}
+
 function proofRoleText(text: string): string {
-  const assertions = assertiveProseSentences(text)
-    .map(sentence => sentence.split(/([,;，；])/u).map(clause => {
-      const indirect = INDIRECT_QUESTION.exec(clause);
-      return indirect ? clause.slice(0, indirect.index) : clause;
-    }).join("")).join("\n");
-  return NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), assertions);
+  return assertiveProseSentences(text).flatMap(independentProseClauses).map(clause => {
+    const indirect = INDIRECT_QUESTION.exec(clause);
+    const assertion = indirect ? clause.slice(0, indirect.index) : clause;
+    if (NONASSERTED_REJECTION.test(assertion.replace(/[,，()（）]/gu, " "))) return "";
+    return NEGATED_PROOF_ROLE.reduce((value, pattern) => value.replace(pattern, " "), assertion);
+  }).join("\n");
 }
 
 function assertedDischargeText(text: string): string {
@@ -1274,7 +1444,8 @@ export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlyS
   let pendingRejectionFromContradiction = false;
   for (const [pos, step] of ordered.entries()) {
     const texts = [step.claim, step.feedback].map(proofRoleText);
-    const withoutIntent = texts.map(text => text.replace(CONTRADICTION_INTENT, " "));
+    const withoutIntent = texts.map(text => text.replace(CONTRADICTION_INTENT,
+      intent => /^\s*(?:in\s+order\s+)?to\b/iu.test(intent) ? " to " : " "));
     const hasIntent = texts.some((text, index) => text !== withoutIntent[index]);
     const explicitSupposition = texts.some(text => PROOF_SUPPOSITION.test(text));
     const opensSupposition = explicitSupposition || (hasIntent && openStack.length === 0);
@@ -1285,7 +1456,7 @@ export function counterfactualProofSteps(steps: readonly ProofStep[]): ReadonlyS
 
     const assertedDischarge = withoutIntent.map(assertedDischargeText);
     if (ordered.length === 1 && ((explicitSupposition && hasIntent) ||
-        assertedDischarge.some(text => EXPLICIT_COUNTERFACTUAL.test(text)))) {
+        assertedDischarge.some(text => DERIVED_CONTRADICTION.test(text)))) {
       exempt.add(step);
     }
     const canDischargeFromFeedback = !opensSupposition || pos === ordered.length - 1;

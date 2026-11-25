@@ -4,7 +4,7 @@ import { acceptedAiGradingOutcome, evaluateAiCorrectness } from "./ai-evaluation
 import { observation } from "./evidence-eligibility-fixtures";
 import type { EvidenceEligibilityReasonCode } from "./evidence-eligibility-types";
 import { proofFeedbackAllowsOutcome } from "./proof-feedback";
-import { verifyStandaloneProofEquationClaim, verifySymbolicStepEquivalence } from "./symbolic-answer-bridge";
+import { proofStepUsesRealScalar, verifyStandaloneProofEquationClaim, verifySymbolicStepEquivalence } from "./symbolic-answer-bridge";
 import { evaluateTeachingAnswer as check } from "./teaching-answer-check";
 
 const numeric = { kind: "numeric" as const };
@@ -800,6 +800,219 @@ describe("symbolic proof feedback Round 13", () => {
     "没有缺少理由。",
   ])("does not accept an incorrect verdict based on a denied inference defect in %s", feedback => {
     expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+});
+
+describe("symbolic proof feedback Round 14", () => {
+  const identity = "(x+1)^2=x^2+2x+1";
+
+  it.each([
+    ...["refute", "reject", "disprove", "discharge", "falsify", "negate", "contradict"].map(
+      verb => "The contradiction does not " + verb + " the assumption.",
+    ),
+    "The contradiction does not show that the assumption is false.",
+    "The contradiction does not, by itself, refute the assumption.",
+    "The contradiction does not, however, discharge the assumption.",
+    "The assumption is not refuted.", "The assumption is not false.", "The assumption is not impossible.",
+    "We cannot conclude that the assumption is false.", "This might disprove the hypothesis.",
+    "We still need to falsify the assumption.", "The assumption is yet to be discharged.",
+    "不能据此断定原假设不成立。", "不足以说明原假设不成立。", "并未证明假设不成立。",
+    "还不能据此，断定原假设不成立。",
+    "原假设并非不成立。", "无法由此推出该前提错误。", "未能得出原假定不成立。",
+    "原假设是否不成立，仍需证明。", "或许可以推翻该假定。",
+  ])("1. keeps the entire denied or pending rejection non-assertive in %s", rejection => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", rejection), "unverified");
+  });
+
+  it.each([
+    "The contradiction shows the assumption is false.", "The contradiction refutes the assumption.",
+    "The contradiction discharges the hypothesis.", "The hypothesis is falsified.",
+    "由矛盾知原假设不成立。", "矛盾说明原假设不成立。", "原假定错误。", "由此推翻该前提。",
+  ])("1. discharges on the asserted rejection in %s", rejection => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", rejection), "correct");
+  });
+
+  it.each([
+    ...["definition", "meaning", "concept", "notion", "principle", "form", "example", "use", "rule"].map(
+      noun => "The " + noun + " of contradiction is standard.",
+    ),
+    "Recall the notion of contradiction.", "The contradiction appears in the glossary.",
+    "We have a definition of contradiction.", "This is a contradiction rule.",
+    "It is impossible to derive a contradiction.", "This is absurd to call a contradiction.",
+    "The absurdity of the notation is discussed in class.",
+    "矛盾的定义是标准的。", "复习矛盾的概念和含义。", "介绍矛盾的形式或规则。", "这是一种导出矛盾的规则。",
+  ])("2. does not discharge a supposition on a mention in %s", mention => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", mention), "unverified");
+  });
+
+  it.each([
+    "Contradiction.", "This is a contradiction.", "This is the derived contradiction.", "1=0, a contradiction.",
+    ...["reaches", "yields", "gives", "derives", "leads to", "results in", "produces", "obtains", "shows"].map(
+      verb => "This " + verb + " a contradiction.",
+    ),
+    "We have a contradiction.", "This contradicts the premise.", "This is in contradiction with x=0.",
+    "We obtain 1=0, which is impossible.", "That result, which is absurd.", "The result follows by reductio.",
+    "矛盾。", ...["导出", "推出", "得到", "得出", "产生", "出现", "构成"].map(verb => verb + "矛盾。"),
+    "自相矛盾。", "这与前提矛盾。", "由此矛盾。", "这很荒谬。", "这显然是荒谬的。",
+  ])("2. recognizes an asserted contradiction in %s", assertion => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0", assertion), "correct");
+  });
+
+  it.each(["11+1=0", "0.1+1=0", "1+1=01", "a1+1=0", "𝑎1+1=0", "-1+1=0", "- 1+1=0",
+    "x_1+1=0", "x^1+1=0", "\\a1+1=0", "1+1=0^2", "1+1=0.1", "1+1=0+1", "1+1=0 + 1", "1+1=0/2"])(
+    "3. finds the standalone real equation after the earlier token %s", embedded => {
+      expectOutcome("correct", sequence("1+1=0"), "unverified", {
+        transcription: "Work over F₂. " + embedded + ". Now work over ℝ. 1+1=0.",
+      });
+    },
+  );
+
+  it.each([["x=0", "2x=0"], ["x=0", "2 x=0"], ["x=0", "x_1=0"], ["1=0", "x_1=0"], ["2=0", "x^2=0"],
+    ["alpha=0", "\\alpha=0"], ["1=0", "x^{1=0}"]])(
+    "3. locates %s in the real domain instead of inside %s", (claim, embedded) => {
+      const steps = sequence(claim).steps;
+      const transcription = "Work over F₂. " + embedded + ". Now work over ℝ. " + claim + ".";
+      expect(proofStepUsesRealScalar(steps, transcription, []).get(steps[0]!)).toBe(true);
+    },
+  );
+
+  it.each(["$1+1=0$", "$$1+1=0$$", "(1+1=0)", "1+1=0.", "1+1=0;", "Step 1: 1+1=0", "1 + 1 = 0"])(
+    "3. binds a field to the delimited math %s", claim => {
+      expectOutcome("correct", sequence("1+1=0"), "correct", {
+        transcription: "Work over F₂. " + claim + "\nNow work over ℝ. 1+1=0.",
+      });
+    },
+  );
+
+  it.each([
+    "; now switch to F₂.", ", then switch to F₂.", ", and we now work over F₂.",
+    " and work over F₂.", ", work over F₂.", ", we work over F₂.",
+    "；随后改在 F₂。", "，然后改在 F₂。", "且改在 F₂。",
+  ])("4. keeps a later field switch out of the equation in %s", transition => {
+    expectOutcome("correct", sequence("1+1=0"), "unverified", {
+      transcription: "Work over ℝ. 1+1=0" + transition,
+    });
+  });
+
+  it.each([" in F₂.", " over GF(2).", " (mod 2).", "，其中特征为 2。", ", in F₂, then work over ℝ."])(
+    "4. associates an attached qualifier with the equation in %s", qualifier => {
+      expectOutcome("correct", sequence("1+1=0"), "correct", {
+        transcription: "Work over ℝ. 1+1=0" + qualifier,
+      });
+    },
+  );
+
+  it("4. passes the new domain on to the following step", () => {
+    expectOutcome("correct", sequence("1+1=2", "1+1=0"), "correct", {
+      transcription: "Work over ℝ. 1+1=2, then switch to F₂. 1+1=0.",
+    });
+  });
+
+  it.each([
+    "所谓缺少理由的问题不存在。", "没有给出理由的情况并不存在。", "未经证明的问题未出现。",
+    "缺少推导的现象从未出现。", "禁止使用该定理的情况并不存在。", "不得采用此方法的问题没有发生。",
+    "The issue of missing justification does not exist.", "Lack of justification is absent.",
+    "Skipping a necessary step did not occur.", "Omitting required steps never happened.",
+    "Use of a forbidden theorem did not occur.", "The concern about missing proof is unfounded.",
+  ])("5. discards the denied critique in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+
+  it.each(["跳步且没有给出理由。", "直接假设没有依据。", "未经证明就用了该定理。", "Skipping a necessary step is a problem."])(
+    "5. retains the asserted inference critique in %s", feedback => {
+      expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback });
+    },
+  );
+
+  it.each([
+    "Check whether the expansion is valid, but the proof skips a necessary step.",
+    "Check whether the expansion is valid, however it begs the question.",
+    "Check whether the expansion is valid. The proof skips a necessary step.",
+    "If the expansion is valid, the decision stands, but the proof skips a necessary step.",
+    "请检查是否展开正确，但这一步缺少理由。", "请检查是否展开正确，此外还有跳步。",
+  ])("6. keeps an independent critique after non-assertive text in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "incorrect", { feedback });
+  });
+
+  it.each([
+    "Check whether the expansion is valid or skips a necessary step.",
+    "Check whether the proof skips a necessary step and lacks justification.",
+    "Check whether the proof is accurate, but skips a necessary step when x=0.",
+    "If the proof skips a necessary step, add it.",
+    "请检查是否展开正确或者缺少理由。", "请检查是否跳步并且缺少理由。",
+  ])("6. keeps a coordinated indirect critique or conditional non-assertive in %s", feedback => {
+    expectOutcome("incorrect", incorrectEquality(identity), "unverified", { feedback });
+  });
+
+  it.each(["设", "先设", "现设", "暂且设", "反设", "假定", "先假定"])(
+    "7. opens a Chinese supposition using %s", assumption => {
+      const opening = assumption + " x+1=x。";
+      expectOutcome("correct", sequence(opening, "1=0", "由矛盾知原假设不成立。"), "correct");
+      expectOutcome("correct", sequence(opening, "1=0"), "unverified");
+    },
+  );
+
+  it.each(["设置", "设计", "设备", "设施", "设想", "设定为"])(
+    "7. does not treat %s as stating a supposition", prefix => {
+      expectOutcome("correct", sequence(prefix + " x+1=x。", "1=0", "由矛盾知原假设不成立。"), "unverified");
+    },
+  );
+
+  it.each([10, 20, 40])("8. reads transcription characters linearly for %s distinct misses", stepCount => {
+    const length = stepCount * 296;
+    const steps = sequence(...Array.from({ length: stepCount }, (_, index) => "x=" + index)).steps;
+    const originalPush = Array.prototype.push;
+    let characterReads = 0;
+    // Count reads of the unique transcription character without relying on a wall-clock threshold.
+    Array.prototype.push = function (this: unknown[], ...values: unknown[]) {
+      const end = Reflect.apply(originalPush, this, values) as number;
+      if (values.length === 1 && values[0] === "§") {
+        Object.defineProperty(this, end - 1, {
+          configurable: true,
+          get: () => { characterReads++; return "§"; },
+        });
+      }
+      return end;
+    };
+    try {
+      proofStepUsesRealScalar(steps, "§".repeat(length), []);
+    } finally {
+      Array.prototype.push = originalPush;
+    }
+    expect(characterReads).toBeGreaterThanOrEqual(length);
+    expect(characterReads).toBeLessThanOrEqual(2 * length);
+  });
+
+  it("8. consumes repeated transcribed claims in step order across a field switch", () => {
+    const steps = sequence("1+1=0", "1+1=0", "1+1=0").steps;
+    const usesReal = proofStepUsesRealScalar(steps, "Work over F₂. 11+1=0. $1+1=0$. Work over ℝ. 1+1=0. 1+1=0.", []);
+    expect(steps.map(step => usesReal.get(step))).toEqual([false, true, true]);
+  });
+
+  it("6. keeps an asserted proof role after an independent contrast", () => {
+    expectOutcome("correct", sequence("Assume x=0.", "1=0",
+      "Check whether this expansion is valid, but this is a contradiction."), "correct");
+    expectOutcome("correct", sequence("Assume x=0.", "1=0",
+      "Check whether the expansion is valid or gives a contradiction."), "unverified");
+  });
+
+  it("8. locates a mixed prose and math step when it has no fully unwrapped candidate", () => {
+    const steps = sequence("We obtain $x=0$.", "1+1=0").steps;
+    const transcription = "Work over F₂. We obtain $x=0$. Work over ℝ. 1+1=0.";
+    const usesReal = proofStepUsesRealScalar(steps, transcription, []);
+    expect(steps.map(step => usesReal.get(step))).toEqual([false, true]);
+  });
+
+  it("8. finds a valid suffix of another candidate without consuming its later occurrence", () => {
+    const steps = sequence("1+1=0", "Check 1+1=0").steps;
+    const transcription = "Work over F₂. Check 1+1=0. Work over ℝ. Check 1+1=0.";
+    const usesReal = proofStepUsesRealScalar(steps, transcription, []);
+    expect(steps.map(step => usesReal.get(step))).toEqual([false, true]);
+  });
+
+  it("retains deterministic teaching evaluation of a grouped equation", () => {
+    expect(check(algebra, choice(quadratic, "x^2+1"), "A", "A. " + quadratic)).toBe("correct");
+    expect(check(algebra, choice(quadratic, "x^2+1"), "A", "B. x^2+1")).toBe("incorrect");
   });
 });
 
