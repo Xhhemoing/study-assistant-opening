@@ -515,6 +515,7 @@ describe("symbolic proof feedback Round 19", () => {
 
   it.each([
     "For this step only, use F₂, then switch permanently to ℝ.",
+    "For this step only, use F₂, then switch to ℝ.",
     "Only in this step use F₂; afterwards work over ℝ.",
     "For this step only, use F₂, and thereafter work over ℝ.",
     "Use F₂ for this step only; work over ℝ from now on.",
@@ -530,6 +531,23 @@ describe("symbolic proof feedback Round 19", () => {
     expectOutcome("correct", transcribedSteps, "unverified", { transcription: transcribed });
     expect([...proofStepUsesRealScalar(transcribedSteps.steps, transcribed, []).values()]).toEqual([false, true, true]);
   });
+
+  it.each([
+    "Then use F₂ for this step only.",
+    "Then for this step only, use F₂.",
+    "Then, for this step only, use F₂.",
+    "Then use F₂, for this step only.",
+    "随后仅在本步中使用 F₂。",
+  ].flatMap(transition => [["step feedback", transition], ["transcription", transition]] as const))(
+    "restores the prior domain after a temporary transition in %s: %s", (source, transition) => {
+      const steps = sequence("2+2=4", "1+1=0", "1+1=0");
+      if (source === "step feedback") steps.steps[1]!.feedback = transition;
+      const transcription = "Work over ℝ. 2+2=4. " +
+        (source === "transcription" ? transition + " " : "") + "1+1=0. 1+1=0.";
+      expect.soft([...proofStepUsesRealScalar(steps.steps, transcription, []).values()]).toEqual([true, false, true]);
+      expectOutcome("correct", steps, "unverified", { transcription });
+    },
+  );
 
   it.each([
     ["After the final step, use F₂.", true], ["Following the last step, use F₂.", true],

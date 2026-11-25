@@ -1132,10 +1132,11 @@ function* proofDomainChanges(texts: readonly ScopedDomainText[]) {
     for (const [clauseIndex, { text: clause, separator }] of clauses.entries()) {
       const previous = clauses[clauseIndex - 1];
       const following = clauses[clauseIndex + 1];
-      const temporary = !PERMANENT_DOMAIN.test(clause) && !SEQUENTIAL_DOMAIN_TRANSITION.test(clause) &&
-        (inheritedTemporary || isTemporaryProofDomain(clause) ||
-          (isComma(previous?.separator) && temporaryQualifier(previous?.text)) ||
-          (isComma(separator) && temporaryQualifier(following?.text)));
+      const temporary = !PERMANENT_DOMAIN.test(clause) &&
+        (isTemporaryProofDomain(clause) ||
+          (isComma(separator) && temporaryQualifier(following?.text)) ||
+          (!SEQUENTIAL_DOMAIN_TRANSITION.test(clause) &&
+            (inheritedTemporary || (isComma(previous?.separator) && temporaryQualifier(previous?.text)))));
       const mentions = new Map<number, { end: number; domain: ScalarDomain }>();
       for (const { pattern, domain } of DOMAIN_MENTIONS) {
         for (const match of clause.matchAll(pattern)) {
