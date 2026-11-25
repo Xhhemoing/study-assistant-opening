@@ -186,7 +186,8 @@ function bracedArgument(text: string, offset: number): { start: number; end: num
 }
 
 function validateTexExpression(body: string, texMode: boolean): string | null {
-  if (/[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)+[\d.]|\d\.\d*\.|\.\d+\./.test(body) ||
+  if ((texMode && body.includes("_")) ||
+      /[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)+[\d.]|\d\.\d*\.|\.\d+\./.test(body) ||
       /[\d.](?:\s|\\[,;:! ]|\\(?:quad|qquad)(?![A-Za-z])|~)*\\[dt]?frac(?![A-Za-z])/.test(body)) return null;
   const argumentGroups = new Set<number>();
   const closers: string[] = [];
@@ -202,7 +203,7 @@ function validateTexExpression(body: string, texMode: boolean): string | null {
     } else if (token === "^") {
       const tail = body.slice(after);
       if (/^\s*[+\-−]/.test(tail) ||
-          (texMode && /^\s*(?:\\|[A-Za-z0-9]{2,}|\d\.\d|\((?!\s*[+\-−]\s*\d+\s*\)))/.test(tail))) return null;
+          (texMode && /^\s*(?:\\|[A-Za-z0-9]{2,}|\d\.\d|\()/.test(tail))) return null;
       const braced = bracedArgument(body, after);
       if (braced) argumentGroups.add(braced.start);
       const unbraced = /^\s*(?:\(\s*[+\-−]?\s*\d+\s*\)|[+\-−]?\s*[A-Za-z0-9]+)/.exec(tail)?.[0];
@@ -271,6 +272,11 @@ function hasDerivativeInterior(source: ParsedExpression, domain: Target["domain"
   const carrier = openDomainCarrier(source);
   const point = domain.intervals?.[0]?.left;
   if (point !== undefined) return verifyScalarEquivalence(carrier, ZERO, domain).status === "equivalent";
+
+  // Interior witnesses alone cannot rule out radicand zeros elsewhere in the source domain.
+  if (source.radicands.length && verifyScalarEquivalence(
+    carrier, withZeroValue(source.expr), domain,
+  ).status !== "equivalent") return false;
 
   let remaining = 2;
   const excluded = [...domain.excluded ?? []];
@@ -701,6 +707,23 @@ function scalarProofContradiction(left: ParsedExpression, right: ParsedExpressio
   return verifyScalarEquivalence(difference, sameDomainConstant, domain).status === "equivalent";
 }
 
+function integralChainContradiction(candidates: ParsedExpression[], variable: string): boolean {
+  const families = candidates.flatMap(candidate => {
+    const family = additiveConstant(candidate.expr, variable);
+    if (!family) return [];
+    return [{
+      coefficient: family.coefficient,
+      expression: {
+        ...candidate,
+        expr: family.expr,
+        variables: new Set([...candidate.variables].filter(name => name !== "C")),
+      },
+    }];
+  });
+  return families.some((left, index) => families.slice(index + 1).some(right =>
+    equalRational(left.coefficient, right.coefficient) && scalarProofContradiction(left.expression, right.expression)));
+}
+
 function calculusProofContradiction(candidate: ParsedExpression, target: Target, result: VerificationResult): boolean {
   if (!isValueRefutation(result)) return false;
   if (result.reason === "missing_additive_constant") return true;
@@ -745,6 +768,15 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
     if (!target) return unverified;
     if (target.kind === "scalar" && target.source.variables.size === 0 && variable) target.domain.variable = variable;
     const results = candidates.map(candidate => compareToTarget(candidate, target));
+    if (target.kind === "indefinite-integral" && candidates.length > 1) {
+      if (integralChainContradiction(candidates, target.domain.variable)) return { status: "inequivalent", unconditional: false };
+      if (candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent")) {
+        // Candidate equality can depend on x or C even when one side fails as an antiderivative.
+        return results.some(result => result.reason === "missing_additive_constant")
+          ? { status: "inequivalent", unconditional: false }
+          : unverified;
+      }
+    }
     if (results.some(result => result.status !== "equivalent")) {
       const sides = [target.source, ...candidates];
       const contradiction = target.kind === "scalar"
@@ -752,8 +784,6 @@ export function verifyStandaloneProofEquationClaim(claim: string): ProofClaimVer
         : candidates.some((candidate, index) => calculusProofContradiction(candidate, target, results[index]!));
       return contradiction ? { status: "inequivalent", unconditional: false } : unverified;
     }
-    if (target.kind === "indefinite-integral" &&
-        candidates.slice(1).some(candidate => compareExpressions(candidate, candidates[0]!, target) !== "equivalent")) return unverified;
     const unconditional = [target.source, ...candidates].every(expression => !expression.hasDenominator &&
       (!expression.mayRestrictDomain || verifyScalarEquivalence(
         withZeroValue(expression.expr), ZERO, target.domain,

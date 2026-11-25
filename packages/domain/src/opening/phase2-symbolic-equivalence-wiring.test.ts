@@ -220,10 +220,27 @@ describe("symbolic Markdown boundaries", () => {
     expect(check("Evaluate $sqrt(4)$", numeric, "2", expression)).toBe("unparseable");
   });
 
+  it.each([["(+2)", "4"], ["(-2)", "1/4"]])("requires TeX braces around the exponent %s", (exponent, result) => {
+    const unbraced = "2^" + exponent;
+    const braced = "$2^{" + exponent + "}$";
+    expect(check("Evaluate $" + unbraced + "$", numeric, result, result)).toBeNull();
+    expect(check("Evaluate " + braced, numeric, result, result)).toBe("correct");
+    expect(check("Evaluate " + unbraced, numeric, result, result)).toBe("correct");
+    expect(verifyStandaloneProofEquationClaim("$" + unbraced + " = " + result + "$"))
+      .toEqual({ status: "unverified", unconditional: false });
+    expect(verifyStandaloneProofEquationClaim(braced + " = " + result).status).toBe("equivalent");
+  });
+
+  it("does not interpret a TeX subscript as a scalar expression", () => {
+    expect(check("Evaluate $2_(+2)$", numeric, "4", "4")).toBeNull();
+    expect(verifyStandaloneProofEquationClaim("$2_(+2)=4$"))
+      .toEqual({ status: "unverified", unconditional: false });
+  });
+
   it.each([
     [String.raw`\left(2+\left[3\right]\right)`, "5"], [String.raw`\left\|2-3\right\|+1`, "2"],
     [String.raw`\frac{\sqrt{4}}{2^{2}}`, "1/2"], [String.raw`\dfrac{\sqrt{4}}{3}`, "2/3"],
-    [String.raw`\tfrac{\sqrt{4}}{3}`, "2/3"], ["2^{-2}", "1/4"], ["2^(-2)", "1/4"],
+    [String.raw`\tfrac{\sqrt{4}}{3}`, "2/3"], ["2^{-2}", "1/4"],
     ["(2^2)^3", "64"],
   ])("keeps supported grouping in %s", (expression, result) => {
     expect(check(`Evaluate $${expression}$`, numeric, result, result)).toBe("correct");
@@ -268,6 +285,32 @@ function adjudicate(outcome: "correct" | "incorrect", proofFeedback: ProofFeedba
 }
 
 describe("symbolic proof feedback", () => {
+  it.each([
+    "x^2 + C = x^2 + C + 1",
+    "x^2 + C + 1 = x^2 + x + C = x^2 + C",
+    "x^2 + C = (x+1)^2 - 2x + C",
+    "x^2 + C = x^2 + 2C = x^2 + 2C + 1",
+    "x^2 + C + 1/x = x^2 + C + 1/x + 1",
+  ])("vetoes a constant contradiction between integral candidates %s", chain => {
+    const claim = "\\int 2x\\,dx = " + chain;
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "inequivalent", unconditional: false });
+    expect(adjudicate("correct", proof(claim, "correct"))).toBe("unverified");
+  });
+
+  it.each(["x^2 + C = x^2 + 2C", "x^2 + C = x^2 + x + C"])(
+    "abstains when an integral equality chain could agree under an assumption %s", chain => {
+      const claim = "\\int 2x\\,dx = " + chain;
+      expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "unverified", unconditional: false });
+      expect(adjudicate("correct", proof(claim, "correct"))).toBe("correct");
+    },
+  );
+
+  it("corroborates an integral equality chain whose candidates agree for the same C", () => {
+    const claim = "\\int 2x\\,dx = (x+1)^2 + C - 2x - 1 = x^2 + C";
+    expect(verifyStandaloneProofEquationClaim(claim)).toEqual({ status: "equivalent", unconditional: true });
+    expect(adjudicate("incorrect", proof(claim, "incorrect"))).toBe("unverified");
+  });
+
   it.each([
     "x + 1 = x + 2", "(x+1)^2 = x^2 + 2x + 2", "Step 1: $$(x+1)^2 = x^2 + 2x + 1 = x^2 + 2x + 2$$",
     "1/x + 1 = 1/x + 2", "x^2 = x + 1 = x + 2", String.raw`x + \sqrt{2} = x`,
@@ -381,8 +424,34 @@ describe("structured symbolic steps", () => {
     expect(check("Differentiate $(1+sqrt(x))^0$ at $x=0$", numeric, "0", "0")).toBeNull();
   });
 
+  it("abstains when the source has an isolated point or includes a boundary point", () => {
+    const reference = "(1+sqrt(x^2(x-1)))^0";
+    const candidate = "0*sqrt(x^2(x-1))";
+    const stem = "Differentiate $" + reference + "$";
+    const correctLabel = "$" + candidate + "$";
+    const wrongLabel = "$1+" + candidate + "$";
+    const interaction = choice(correctLabel, wrongLabel);
+    expect(check(stem, interaction, "A", "A. " + correctLabel)).toBeNull();
+    expect(check(stem, interaction, "A", "B. " + wrongLabel)).toBeNull();
+    expect(check("Differentiate " + reference, interaction, "A", "A. " + correctLabel)).toBeNull();
+    expect(check(stem + " for $x != 0$", interaction, "A", "A. " + correctLabel)).toBeNull();
+    expect(verifySymbolicStepEquivalence({ kind: "derivative", reference, student: candidate })).toBe("unverified");
+    expect(verifyStandaloneProofEquationClaim("$\\frac{d}{dx}(" + reference + ") = " + candidate + "$"))
+      .toEqual({ status: "unverified", unconditional: false });
+    for (const point of [0, 1]) expect(check(stem + " at $x=" + point + "$", numeric, "0", "0")).toBeNull();
+    expect(check(stem + " at $x=2$", numeric, "0", "0")).toBe("correct");
+    expect(check(stem + " at $x=2$", choice("0", "1"), "A", "A. 0")).toBe("correct");
+  });
+
+  it.each([
+    ["sqrt(x^2+1)", "x/sqrt(x^2+1)"],
+    ["1/sqrt(x)", "-1/(2*x*sqrt(x))"],
+  ])("checks derivatives on the open natural domain of %s", (reference, student) => {
+    expect(verifySymbolicStepEquivalence({ kind: "derivative", reference, student })).toBe("equivalent");
+  });
+
   it("finds rational interior witnesses away from the origin", () => {
-    const reference = "(1+sqrt(x-100))^0";
+    const reference = "(1+sqrt(x-10)/(x-10))^0";
     expect(verifySymbolicStepEquivalence({ kind: "derivative", reference, student: `0*${reference}` })).toBe("equivalent");
   });
 
