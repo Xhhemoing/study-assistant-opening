@@ -224,6 +224,17 @@ function assertTemporaryMemoryUnexpired(expiresAt: string | undefined) {
   }
 }
 
+function hasConsumedMisconceptionMemories(
+  resolvedMemoryIds: readonly string[],
+  historyMemoryIdsByCourse: ReadonlyMap<string | null, ReadonlySet<string>>,
+): boolean {
+  if (resolvedMemoryIds.length > 0) return true;
+  for (const ids of historyMemoryIdsByCourse.values()) {
+    if (ids.size > 0) return true;
+  }
+  return false;
+}
+
 async function assertConsumedMisconceptionMemoriesCurrentInTx(
   tx: TransactionSql,
   scope: OpeningScope,
@@ -1373,9 +1384,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
         await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
       }
-      const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
-        tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
-      );
+      const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+        ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+            tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+          )
+        : Infinity;
       const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
       await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
       assertHistoryMemoryUnexpired(historyExpiresAt);
@@ -1600,9 +1613,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
             await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
           }
-          const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
-            tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
-          );
+          const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+            ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+                tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+              )
+            : Infinity;
           const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
           await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
           try {
@@ -1762,9 +1777,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         if (context.misconceptionSnapshot || context.historyMisconceptionLineage || memoryMisconceptionLineage) {
           await assertBoundMisconceptions(tx, scope, courseId, context, memoryMisconceptionLineage);
         }
-        const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
-          tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
-        );
+        const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+          ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+              tx, scope, courseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+            )
+          : Infinity;
         const historyExpiresAt = Math.min(admittedHistoryExpiresAt, recheckedExpiry);
         await assertGlobalMemoriesUnexpiredInTx(tx, scope, resolvedMemoryIds, courseId);
         assertHistoryMemoryUnexpired(historyExpiresAt);
@@ -2036,9 +2053,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertBoundMisconceptions(tx, input.scope, boundCourseId,
             { misconceptionSnapshot: snapshot, historyMisconceptionLineage: suppliedLineage }, memoryMisconceptionLineage);
         }
-        const recheckedExpiry = await assertConsumedMisconceptionMemoriesCurrentInTx(
-          tx, input.scope, boundCourseId, resolvedMemoryIds, historyMemoryIdsByCourse,
-        );
+        const recheckedExpiry = hasConsumedMisconceptionMemories(resolvedMemoryIds, historyMemoryIdsByCourse)
+          ? await assertConsumedMisconceptionMemoriesCurrentInTx(
+              tx, input.scope, boundCourseId, resolvedMemoryIds, historyMemoryIdsByCourse,
+            )
+          : Infinity;
         historyExpiresAt = Math.min(historyExpiresAt, recheckedExpiry);
         const historyLineage = mergeTutorMisconceptionLineages(suppliedLineage, memoryMisconceptionLineage);
         if (suppliedLineage !== undefined || historyLineage || snapshot || resolvedMemoryIds.length) {

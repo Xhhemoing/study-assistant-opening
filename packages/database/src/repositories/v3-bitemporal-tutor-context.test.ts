@@ -9,8 +9,9 @@ import { admitTaskCandidate, assertTaskCandidateMemoryDependencies } from "./ope
 import { sqlSimulation, unexpected } from "./opening-resident-f11-sql-simulation";
 import { assertTutorAttemptContext, readTutorAttemptContext, tutorAttemptFence } from "./opening-tutor-attempt-context";
 import {
-  assertTutorLearnerMisconceptionSnapshot, readMemoryMisconceptionLineages, readTurnsWithInvalidMisconceptionMemories,
-  readTutorLearnerMisconceptionContext, sourceTurnsAllowMisconceptionMemory, turnUsesInactiveMisconception, type TutorMisconceptionSnapshot,
+  assertTutorLearnerMisconceptionSnapshot, readMemoryMisconceptionLineages, readTurnMisconceptionMemoryOrigins,
+  readTurnsWithInvalidMisconceptionMemories, readTutorLearnerMisconceptionContext, sourceTurnsAllowMisconceptionMemory,
+  turnUsesInactiveMisconception, type TutorMisconceptionSnapshot,
 } from "./v3-bitemporal-misconception-memory";
 
 const scope = { workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", ownerUserId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" };
@@ -1140,6 +1141,144 @@ it.skipIf(process.env.OPENING_PGLITE_PG16 !== "1")("executes saved misconception
       historyMisconceptionLineage: loadedMemoryCtx.misconceptionLineage,
     }, delayedStartSend)).rejects.toMatchObject({ code: "CONFLICT" });
     expect(delayedStartSend).not.toHaveBeenCalled();
+
+    // Round-9 Step-1 P2: 64 restored hashless assistant answers avoid quadratic prefix rescans across
+    // listTurns / readContinuityRows (conv_lineage Actual Loops = 1) and readTurnMisconceptionMemoryOrigins.
+    const bulkConv = "ae000000-0000-4000-8000-000000000000";
+    const bulkTurnIds = Array.from({ length: 64 }, (_, idx) =>
+      `ae000000-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`);
+    await db.query("INSERT INTO opening_conversations VALUES ($1,$2,$3,$4)",
+      [bulkConv, scope.workspaceId, scope.ownerUserId, courseId]);
+    const baseEpochSec = 1_760_000_000;
+    for (const [idx, id] of bulkTurnIds.entries()) {
+      await db.query(`INSERT INTO opening_turns (id,workspace_id,conversation_id,role,status,intent_hash,
+          context_source_refs,context_anchor,query_system,created_at,text)
+        VALUES ($1,$2,$3,'assistant','complete',NULL,'[]',$4,false,to_timestamp($5),$6)`,
+        [id, scope.workspaceId, bulkConv, JSON.stringify({ courseId }), baseEpochSec + idx, `Restored answer #${idx + 1}`]);
+    }
+    await db.exec("ANALYZE");
+    type ExplainPlanNode = {
+      "Node Type": string;
+      Alias?: string;
+      "Subplan Name"?: string;
+      "CTE Name"?: string;
+      "Total Cost": number;
+      "Actual Loops"?: number;
+      "Actual Rows"?: number;
+      "Relation Name"?: string;
+      Plans?: ExplainPlanNode[];
+    };
+    const collectNodes = (node: ExplainPlanNode): ExplainPlanNode[] => [
+      node,
+      ...(node.Plans ?? []).flatMap(collectNodes),
+    ];
+    let analyzeNextDisplayQueries = false;
+    const analyzedDisplayPlans: Array<{ query: string; root: ExplainPlanNode }> = [];
+    const origExecute = SqlFragment.prototype.execute;
+    SqlFragment.prototype.execute = async function (this: SqlFragment) {
+      if (analyzeNextDisplayQueries) {
+        const params: unknown[] = [];
+        const rendered = this.render(params).trim();
+        if (rendered.startsWith("SELECT t.id, t.conversation_id") || rendered.startsWith("SELECT t.id,t.role")) {
+          const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
+            "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
+          analyzedDisplayPlans.push({ query: rendered, root: analyzed.rows[0]!["QUERY PLAN"][0]!.Plan });
+        }
+      }
+      return origExecute.call(this);
+    };
+    try {
+      analyzeNextDisplayQueries = true;
+      const cleanTurns = await repo.listTurns(scope, bulkConv);
+      const cleanContinuity = await repo.loadContinuityTurns(scope, bulkConv);
+      analyzeNextDisplayQueries = false;
+      expect(cleanTurns.map(t => t.text)).toEqual(bulkTurnIds.map((_, idx) => `Restored answer #${idx + 1}`));
+      expect(cleanContinuity.map(t => t.text)).toEqual(bulkTurnIds.map((_, idx) => `Restored answer #${idx + 1}`));
+      expect(analyzedDisplayPlans).toHaveLength(2);
+      for (const { query: rendered, root } of analyzedDisplayPlans) {
+        expect(root["Total Cost"], rendered.slice(0, 80)).toBeLessThan(20_000);
+        const allNodes = collectNodes(root);
+        const convScanCte = allNodes.find(n => n["Subplan Name"] === "CTE conv_scan");
+        expect(convScanCte, "expected materialized CTE conv_scan in conv_lineage").toBeDefined();
+        expect(convScanCte!["Actual Loops"]).toBe(1);
+        expect(convScanCte!["Actual Rows"]).toBe(0);
+        const dtScan = allNodes.find(n => n["Relation Name"] === "opening_turns" && n.Alias === "dt");
+        expect(dtScan, "expected single-pass dt scan").toBeDefined();
+        expect(dtScan!["Actual Loops"]).toBe(1);
+        expect(dtScan!["Actual Rows"]).toBe(64);
+        const tScan = allNodes.find(n => n["Relation Name"] === "opening_turns" && n.Alias === "t");
+        expect(tScan, "expected outer t scan").toBeDefined();
+        expect(tScan!["Actual Loops"]).toBe(1);
+        expect(tScan!["Actual Rows"]).toBe(64);
+        for (const scan of allNodes.filter(n => n["Relation Name"] === "opening_turns")) {
+          expect((scan["Actual Loops"] ?? 0) * (scan["Actual Rows"] ?? 0)).toBeLessThanOrEqual(64);
+        }
+      }
+
+      // 1) Early withdrawn hashed answer at index 9 (10th turn) redacts turn #10 and subsequent hashless #11..#64,
+      // while keeping earlier hashless answers #1..#9 intact.
+      const earlyIdx = 9;
+      const earlyTurnId = bulkTurnIds[earlyIdx]!;
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=$1,status='retracted'", [courseId]);
+      await db.query("UPDATE opening_turns SET intent_hash=$1 WHERE id=$2", [JSON.stringify(exact), earlyTurnId]);
+      const afterWithdrawnHashed = await repo.listTurns(scope, bulkConv);
+      expect(afterWithdrawnHashed.slice(0, earlyIdx).map(t => t.text))
+        .toEqual(Array.from({ length: earlyIdx }, (_, idx) => `Restored answer #${idx + 1}`));
+      expect(afterWithdrawnHashed.slice(earlyIdx).every(t => t.text === unavailable)).toBe(true);
+      const continuityAfterHashed = await repo.loadContinuityTurns(scope, bulkConv);
+      expect(continuityAfterHashed.slice(0, earlyIdx).map(t => t.text))
+        .toEqual(Array.from({ length: earlyIdx }, (_, idx) => `Restored answer #${idx + 1}`));
+      expect(continuityAfterHashed.slice(earlyIdx).every(t => t.text === unavailable)).toBe(true);
+
+      // 2) Early withdrawn-misconception-memory-backed exchange at index 9 (intent_hash IS NULL, legacy memoryOnly ref)
+      // redacts #10..#64 (pos >= early_pos), keeps #1..#9 intact, and batches readTurnMisconceptionMemoryOrigins once!
+      const bulkLegacyMemory = "ae000000-0000-4000-8000-000000000999";
+      await db.query("UPDATE opening_conversations SET course_id=NULL WHERE id=ANY($1::uuid[])", [[originConversation, bulkConv]]);
+      await db.query("UPDATE v3_bitemporal_misconception_edges SET course_id=NULL,status='retracted'");
+      await db.query("UPDATE opening_turns SET intent_hash=$1,context_source_refs=$2,source_ids=ARRAY[$3]::uuid[] WHERE id=$4",
+        [JSON.stringify(usedLineage), JSON.stringify([{ sourceId, sourceVersion: 1 }]), sourceId, originId]);
+      await db.query("INSERT INTO opening_memories (id,workspace_id,course_id,source_turn_ids,kind,expires_at) VALUES ($1,$2,NULL,$3,'confirmed',NULL)",
+        [bulkLegacyMemory, scope.workspaceId, JSON.stringify([originId])]);
+      await db.query("UPDATE opening_turns SET context_anchor=NULL WHERE conversation_id=$1", [bulkConv]);
+      await db.query("UPDATE opening_turns SET intent_hash=NULL,context_source_refs=$1 WHERE id=$2",
+        [JSON.stringify([{ sourceId, sourceVersion: 1, memoryOnly: true }]), earlyTurnId]);
+      let backingResolveQueries = 0;
+      let originBatchQueries = 0;
+      SqlFragment.prototype.execute = async function (this: SqlFragment) {
+        const params: unknown[] = [];
+        const rendered = this.render(params).trim();
+        if (rendered.startsWith("SELECT t.id, ARRAY(")) {
+          originBatchQueries += 1;
+          const analyzed = await db.query<{ "QUERY PLAN": Array<{ Plan: ExplainPlanNode }> }>(
+            "EXPLAIN (ANALYZE, FORMAT JSON) " + rendered, params);
+          const priorAScan = collectNodes(analyzed.rows[0]!["QUERY PLAN"][0]!.Plan)
+            .find(n => n["Relation Name"] === "opening_turns" && n.Alias === "prior_a");
+          expect(priorAScan, "expected single-pass prior_a scan").toBeDefined();
+          expect(priorAScan!["Actual Loops"]).toBe(1);
+        }
+        if (rendered.startsWith("SELECT saved.id,")) backingResolveQueries += 1;
+        return origExecute.call(this);
+      };
+      const afterWithdrawnMemory = await repo.listTurns(scope, bulkConv);
+      expect(afterWithdrawnMemory.slice(0, earlyIdx).map(t => t.text))
+        .toEqual(Array.from({ length: earlyIdx }, (_, idx) => `Restored answer #${idx + 1}`));
+      expect(afterWithdrawnMemory.slice(earlyIdx).every(t => t.text === unavailable)).toBe(true);
+      expect(originBatchQueries).toBe(1);
+      expect(backingResolveQueries).toBe(1);
+
+      const batchedMap = await readTurnMisconceptionMemoryOrigins(sql, scope, bulkTurnIds.slice(earlyIdx));
+      expect(batchedMap.size).toBe(64 - earlyIdx);
+      expect(batchedMap.get(earlyTurnId)?.[0]).toMatchObject({ id: earlyTurnId, historical: false, backings: [[memoryId, bulkLegacyMemory]] });
+      for (const followId of bulkTurnIds.slice(earlyIdx + 1)) {
+        expect(batchedMap.get(followId)).toEqual([
+          expect.objectContaining({ id: earlyTurnId, assistantTurnId: earlyTurnId, historical: true, backings: [[memoryId, bulkLegacyMemory]] }),
+        ]);
+      }
+      expect(originBatchQueries).toBe(2);
+      expect(backingResolveQueries).toBe(2);
+    } finally {
+      SqlFragment.prototype.execute = origExecute;
+    }
 
     expect(plans.length).toBeGreaterThan(0);
   } finally {

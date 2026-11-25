@@ -6,7 +6,10 @@ import { readOpeningSavedTurnRetry, savedTurnRetryAssistantId, savedTurnRetryMat
 export { readOpeningSavedTurnRetry, savedTurnRetryAssistantId } from "./opening-conversation-retry";
 import type { Sql, TransactionSql } from "postgres";
 import { turnUsesDeletedSource } from "./opening-source-actions-privacy";
-import { readTurnsWithInvalidMisconceptionMemories, turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception } from "./v3-bitemporal-misconception-memory";
+import {
+  conversationMisconceptionLineage, conversationTurnHasMisconceptionMemories, conversationTurnInactiveMisconception,
+  readTurnsWithInvalidMisconceptionMemories, turnHasMisconceptionMemoryDependencies, turnUsesInactiveMisconception,
+} from "./v3-bitemporal-misconception-memory";
 import { systemQueryReceiptSchema } from "@aistudy/contracts";
 import { tutorFailureForDisplay, TUTOR_FAILURE_MESSAGE, TUTOR_UNKNOWN_MESSAGE, TUTOR_CANCELLED_MESSAGE, PAGE_CITATION_CLARIFY_MESSAGE } from "@aistudy/domain";
 import type {
@@ -147,6 +150,8 @@ async function redactMemoryMisconceptions<T extends Record<string, unknown>>(
 
 const memoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='assistant'
   AND NOT display_authority.inactive_misconception AND ${turnHasMisconceptionMemoryDependencies(db)} THEN t.id END`;
+const batchedMemoryDisplayTurnId = (db: Sql | TransactionSql) => db`CASE WHEN t.role='assistant'
+  AND NOT display_authority.inactive_misconception AND display_authority.has_memory_dependencies THEN t.id END`;
 
 async function readContinuityRows(
   db: Sql | TransactionSql, scope: OpeningConversationScope, conversationId: string, question?: ContinuityQuestion,
@@ -159,7 +164,7 @@ async function readContinuityRows(
         AND t.context_anchor->>'contentVersion'=${question.contentVersion == null ? null : String(question.contentVersion)}`;
   const rows = await db`
     SELECT t.id,t.role,t.status,j.status AS job_status,j.error AS job_error,
-      ${memoryDisplayTurnId(db)} AS misconception_memory_turn_id,
+      ${batchedMemoryDisplayTurnId(db)} AS misconception_memory_turn_id,
       ${visibleTurnText(db)} AS text,
       CASE WHEN ${hiddenTurnDetails(db)} THEN '[]'::jsonb ELSE t.citations END AS citations,
       CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE t.system_query END AS system_query
@@ -170,9 +175,14 @@ async function readContinuityRows(
         ELSE '{}'::uuid[] END AS pending_exposure_ids` : db``}
     FROM opening_turns t
     JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id AND c.owner_user_id=${scope.ownerUserId}
-    CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
-      ${turnUsesInactiveMisconception(db)} AS inactive_misconception OFFSET 0) display_authority
+    CROSS JOIN ${conversationMisconceptionLineage(db, scope.workspaceId, conversationId)}
     LEFT JOIN opening_tutor_jobs j ON j.assistant_turn_id=t.id AND j.workspace_id=t.workspace_id AND j.conversation_id=t.conversation_id
+    LEFT JOIN opening_turns paired_u ON t.role='assistant' AND paired_u.id=j.user_turn_id
+      AND paired_u.workspace_id=t.workspace_id AND paired_u.conversation_id=t.conversation_id
+      AND paired_u.role='user' AND paired_u.status='complete'
+    CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
+      ${conversationTurnInactiveMisconception(db, () => db`c.course_id`, () => db`c.owner_user_id`)} AS inactive_misconception,
+      ${conversationTurnHasMisconceptionMemories(db)} AS has_memory_dependencies OFFSET 0) display_authority
     WHERE t.conversation_id=${conversationId} AND t.workspace_id=${scope.workspaceId}
       AND t.status IN ('complete', 'pending')
       ${questionFilter}
@@ -337,20 +347,25 @@ export function createOpeningConversationRepository(sql: Sql) {
       await this.getOwned(scope, conversationId);
       const readTurns = (db: Sql | TransactionSql) => db`
         SELECT t.id, t.conversation_id, t.role,
-          ${memoryDisplayTurnId(db)} AS misconception_memory_turn_id,
+          ${batchedMemoryDisplayTurnId(db)} AS misconception_memory_turn_id,
           ${visibleTurnText(db)} AS text,
           t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,
           CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt,
           CASE WHEN ${hiddenTurnDetails(db)} THEN NULL ELSE t.system_query END AS system_query,
           CASE WHEN ${hiddenTurnDetails(db)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
-        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
-          ${turnUsesInactiveMisconception(db)} AS inactive_misconception OFFSET 0) display_authority
+        CROSS JOIN ${conversationMisconceptionLineage(db, scope.workspaceId, conversationId)}
         LEFT JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id
           AND h.exposure_origin='assistant' AND h.release_key IS NOT NULL
         LEFT JOIN opening_tutor_jobs j
           ON j.workspace_id = t.workspace_id AND j.conversation_id = t.conversation_id
           AND (j.user_turn_id = t.id OR j.assistant_turn_id = t.id)
+        LEFT JOIN opening_turns paired_u ON t.role = 'assistant' AND j.assistant_turn_id = t.id
+          AND paired_u.id = j.user_turn_id AND paired_u.workspace_id = t.workspace_id
+          AND paired_u.conversation_id = t.conversation_id AND paired_u.role = 'user' AND paired_u.status = 'complete'
+        CROSS JOIN LATERAL (SELECT ${turnUsesDeletedSource(db)} AS deleted_source,
+          ${conversationTurnInactiveMisconception(db)} AS inactive_misconception,
+          ${conversationTurnHasMisconceptionMemories(db)} AS has_memory_dependencies OFFSET 0) display_authority
         WHERE t.conversation_id = ${conversationId}
           AND t.workspace_id = ${scope.workspaceId}
         -- Both turns share the transaction timestamp. Keep each job's pair

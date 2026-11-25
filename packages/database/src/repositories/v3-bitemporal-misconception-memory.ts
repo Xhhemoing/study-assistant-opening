@@ -93,8 +93,12 @@ function savedTurnUsesInactiveMisconception(db: Db, alias: TurnAlias, allowedCou
   ) ELSE false END`;
 }
 
+function hasSavedMemoryReferences(db: Db, refs: FragmentFactory) {
+  return db`(${turnHasMemoryDependencies(db, refs)} OR ${refs()} @? '$[*].memoryDependencyIds')`;
+}
+
 /** Earlier answers may have been consumed when a restored answer has no exact lineage. */
-function savedMisconceptionOrigins(db: Db, alias: TurnAlias) {
+function savedMisconceptionOrigins(db: Db, alias: TurnAlias, filter: "hashed" | "memory") {
   const turn = () => savedTurn(db, alias);
   return db`SELECT (${turn()}).*
     UNION ALL
@@ -116,12 +120,14 @@ function savedMisconceptionOrigins(db: Db, alias: TurnAlias) {
       AND prior_a.workspace_id = (${turn()}).workspace_id AND prior_a.conversation_id = (${turn()}).conversation_id
       AND prior_a.role = 'assistant' AND prior_a.status = 'complete' AND NOT prior_a.query_system
       AND prior_a.system_query IS NULL
+      ${filter === "hashed" ? db`AND prior_a.intent_hash IS NOT NULL` : db``}
     LEFT JOIN opening_tutor_jobs prior_j ON prior_j.assistant_turn_id = prior_a.id
       AND prior_j.workspace_id = prior_a.workspace_id AND prior_j.conversation_id = prior_a.conversation_id
     LEFT JOIN opening_turns prior_u ON prior_u.id = prior_j.user_turn_id
       AND prior_u.workspace_id = prior_a.workspace_id AND prior_u.conversation_id = prior_a.conversation_id
       AND prior_u.role = 'user' AND prior_u.status = 'complete'
-    WHERE CASE WHEN prior_u.id IS NOT NULL
+    WHERE ${filter === "memory" ? db`(${hasSavedMemoryReferences(db, () => db`prior_a.context_source_refs`)}
+        OR (prior_u.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`prior_u.context_source_refs`)})) AND ` : db``}CASE WHEN prior_u.id IS NOT NULL
       THEN (prior_u.created_at, prior_u.id) < (own_pos.created_at, own_pos.turn_id)
       ELSE (prior_a.created_at, prior_a.id) < (own_pos.created_at, own_pos.turn_id) END`;
 }
@@ -131,17 +137,13 @@ export function turnUsesInactiveMisconception(db: Db, alias: TurnAlias = "t", ..
   const turn = () => savedTurn(db, alias);
   return db`CASE WHEN (${turn()}).role = 'assistant' THEN EXISTS (
     SELECT 1 FROM LATERAL (SELECT ${turnLineageCourse(db, alias)} AS id OFFSET 0) own_course
-    CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, alias)}) dt
+    CROSS JOIN LATERAL (${savedMisconceptionOrigins(db, alias, "hashed")}) dt
     WHERE ${savedTurnUsesInactiveMisconception(db, "dt", [() => db`own_course.id`, ...courses])}
   ) ELSE false END`;
 }
 
-function hasSavedMemoryReferences(db: Db, refs: FragmentFactory) {
-  return db`(${turnHasMemoryDependencies(db, refs)} OR ${refs()} @? '$[*].memoryDependencyIds')`;
-}
-
 export function turnHasMisconceptionMemoryDependencies(db: Db, alias: TurnAlias = "t") {
-  return db`EXISTS (SELECT 1 FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
+  return db`EXISTS (SELECT 1 FROM LATERAL (${savedMisconceptionOrigins(db, alias, "memory")}) origin
     LEFT JOIN opening_turns tu ON origin.role = 'assistant'
       AND tu.id = (${pairedUserTurnId(db, () => db`origin`)})
       AND tu.workspace_id = origin.workspace_id AND tu.conversation_id = origin.conversation_id
@@ -150,9 +152,103 @@ export function turnHasMisconceptionMemoryDependencies(db: Db, alias: TurnAlias 
       OR (tu.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`tu.context_source_refs`)}))`;
 }
 
+/** Single-pass per-conversation lineage summary so multi-turn display queries avoid quadratic prefix rescans. */
+export function conversationMisconceptionLineage(db: Db, workspaceId: string, conversationId: string) {
+  return db`(
+    WITH conv_scan AS MATERIALIZED (
+      SELECT COALESCE(du.created_at, dt.created_at) AS pos_at,
+        COALESCE(du.id, dt.id) AS pos_id,
+        COALESCE(dt_hash.is_invalid, false) AS is_invalid,
+        dt_hash.valid_course_id,
+        (${hasSavedMemoryReferences(db, () => db`dt.context_source_refs`)}
+          OR (du.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`du.context_source_refs`)})) AS has_mem
+      FROM opening_turns dt
+      LEFT JOIN opening_tutor_jobs dj ON dj.assistant_turn_id = dt.id
+        AND dj.workspace_id = dt.workspace_id AND dj.conversation_id = dt.conversation_id
+      LEFT JOIN opening_turns du ON du.id = dj.user_turn_id
+        AND du.workspace_id = dt.workspace_id AND du.conversation_id = dt.conversation_id
+        AND du.role = 'user' AND du.status = 'complete'
+      LEFT JOIN LATERAL (
+        SELECT status.is_invalid,
+          CASE WHEN NOT status.is_invalid AND input.valid AND jsonb_typeof(payload.value) = 'object'
+            THEN ${lineageUuid(db, () => db`payload.value->>'courseId'`)} END AS valid_course_id
+        FROM (SELECT pg_input_is_valid(dt.intent_hash, 'json')
+          AND pg_input_is_valid(dt.intent_hash, 'jsonb') AS valid OFFSET 0) input
+        CROSS JOIN LATERAL (SELECT CASE WHEN input.valid THEN dt.intent_hash::jsonb END AS value OFFSET 0) payload
+        CROSS JOIN LATERAL (SELECT ${savedTurnUsesInactiveMisconception(db, "dt", [])} AS is_invalid OFFSET 0) status
+        OFFSET 0
+      ) dt_hash ON dt.intent_hash IS NOT NULL
+      WHERE dt.workspace_id = ${workspaceId} AND dt.conversation_id = ${conversationId}
+        AND dt.role = 'assistant' AND dt.status = 'complete'
+        AND NOT dt.query_system AND dt.system_query IS NULL
+        AND (dt.intent_hash IS NOT NULL
+          OR ${hasSavedMemoryReferences(db, () => db`dt.context_source_refs`)}
+          OR (du.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`du.context_source_refs`)}))
+    )
+    SELECT first_inv.pos_at AS first_invalid_at, first_inv.pos_id AS first_invalid_id,
+      first_sc.pos_at AS first_scoped_at, first_sc.pos_id AS first_scoped_id,
+      first_sc.valid_course_id AS first_scoped_course_id,
+      second_sc.pos_at AS second_scoped_at, second_sc.pos_id AS second_scoped_id,
+      first_mem.pos_at AS first_memory_at, first_mem.pos_id AS first_memory_id
+    FROM (SELECT 1) one
+    LEFT JOIN LATERAL (
+      SELECT pos_at, pos_id FROM conv_scan WHERE is_invalid ORDER BY pos_at ASC, pos_id ASC LIMIT 1
+    ) first_inv ON true
+    LEFT JOIN LATERAL (
+      SELECT pos_at, pos_id, valid_course_id FROM conv_scan
+      WHERE valid_course_id IS NOT NULL ORDER BY pos_at ASC, pos_id ASC LIMIT 1
+    ) first_sc ON true
+    LEFT JOIN LATERAL (
+      SELECT pos_at, pos_id FROM conv_scan
+      WHERE valid_course_id IS NOT NULL AND valid_course_id <> first_sc.valid_course_id
+      ORDER BY pos_at ASC, pos_id ASC LIMIT 1
+    ) second_sc ON first_sc.valid_course_id IS NOT NULL
+    LEFT JOIN LATERAL (
+      SELECT pos_at, pos_id FROM conv_scan WHERE has_mem ORDER BY pos_at ASC, pos_id ASC LIMIT 1
+    ) first_mem ON true
+    OFFSET 0
+  ) conv_lineage`;
+}
+
+export function conversationTurnInactiveMisconception(
+  db: Db, conversationCourse?: FragmentFactory, ownerUserId?: FragmentFactory,
+) {
+  const ownCourse = () => turnLineageCourse(db, "t", conversationCourse, ownerUserId);
+  const ownPosAt = () => db`COALESCE(paired_u.created_at, t.created_at)`;
+  const ownPosId = () => db`COALESCE(paired_u.id, t.id)`;
+  return db`CASE
+    WHEN t.role <> 'assistant' THEN false
+    WHEN t.intent_hash IS NULL AND NOT t.query_system AND t.system_query IS NULL THEN
+      (conv_lineage.first_invalid_id IS NOT NULL
+        AND (conv_lineage.first_invalid_at, conv_lineage.first_invalid_id) < (${ownPosAt()}, ${ownPosId()}))
+      OR (conv_lineage.second_scoped_id IS NOT NULL
+        AND (conv_lineage.second_scoped_at, conv_lineage.second_scoped_id) < (${ownPosAt()}, ${ownPosId()}))
+      OR (conv_lineage.first_scoped_id IS NOT NULL
+        AND (conv_lineage.first_scoped_at, conv_lineage.first_scoped_id) < (${ownPosAt()}, ${ownPosId()})
+        AND ${ownCourse()} IS DISTINCT FROM conv_lineage.first_scoped_course_id)
+    WHEN t.intent_hash IS NOT NULL THEN EXISTS (
+      SELECT 1 FROM (SELECT t.*) dt
+      CROSS JOIN LATERAL (SELECT ${ownCourse()} AS id OFFSET 0) own_course
+      WHERE ${savedTurnUsesInactiveMisconception(db, "dt", [() => db`own_course.id`])}
+    )
+    ELSE false END`;
+}
+
+export function conversationTurnHasMisconceptionMemories(db: Db) {
+  const ownHasMem = () => db`(${hasSavedMemoryReferences(db, () => db`t.context_source_refs`)}
+    OR (paired_u.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`paired_u.context_source_refs`)}))`;
+  return db`CASE
+    WHEN t.role <> 'assistant' THEN false
+    WHEN t.intent_hash IS NULL AND NOT t.query_system AND t.system_query IS NULL THEN
+      ${ownHasMem()}
+      OR (conv_lineage.first_memory_id IS NOT NULL
+        AND (conv_lineage.first_memory_at, conv_lineage.first_memory_id) < (COALESCE(paired_u.created_at, t.created_at), COALESCE(paired_u.id, t.id)))
+    ELSE ${ownHasMem()} END`;
+}
+
 export function savedTutorMisconceptionHashes(db: Db, alias: TurnAlias) {
   return db`ARRAY(
-    SELECT origin.intent_hash FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
+    SELECT origin.intent_hash FROM LATERAL (${savedMisconceptionOrigins(db, alias, "hashed")}) origin
     WHERE origin.role = 'assistant' AND NOT origin.query_system AND origin.system_query IS NULL AND origin.intent_hash IS NOT NULL
   )`;
 }
@@ -164,38 +260,45 @@ type SavedMemoryOrigin = {
 };
 type TurnMemoryOrigin = SavedMemoryOrigin & { ids: string[]; backings: string[][] };
 
+function directMemoryOriginSide(
+  db: Db, origin: FragmentFactory, pairedUser: FragmentFactory, course: FragmentFactory,
+  owner: FragmentFactory, historical: FragmentFactory,
+) {
+  return db`SELECT jsonb_build_object('id', ${origin()}.id, 'assistantTurnId', ${origin()}.id,
+      'courseId', (SELECT ${turnLineageCourse(db, "dt", undefined, owner)} FROM (SELECT ${origin()}.*) dt OFFSET 0),
+      'consumerCourseId', ${course()},
+      'materialUse', (SELECT ${turnMaterialUse(db, "a")} FROM (SELECT ${origin()}.*) a OFFSET 0),
+      'refs', ${origin()}.context_source_refs, 'standalone', CASE
+        WHEN ${origin()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        THEN ${turnHasStandaloneSessions(db, owner, origin)} ELSE false END,
+      'historical', ${historical()},
+      'jobBacked', ${pairedUser()}.id IS NOT NULL,
+      'isPairedUser', false) AS payload
+    WHERE ${hasSavedMemoryReferences(db, () => db`${origin()}.context_source_refs`)}
+    UNION ALL
+    SELECT jsonb_build_object('id', ${pairedUser()}.id, 'assistantTurnId', ${origin()}.id,
+      'courseId', (SELECT ${turnLineageCourse(db, "u", undefined, owner)} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
+      'consumerCourseId', ${course()},
+      'materialUse', (SELECT ${turnMaterialUse(db, "u")} FROM (SELECT ${pairedUser()}.*) u OFFSET 0),
+      'refs', ${pairedUser()}.context_source_refs, 'standalone', CASE
+        WHEN ${pairedUser()}.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
+        THEN ${turnHasStandaloneSession(db, pairedUser, owner)} ELSE false END,
+      'historical', ${historical()},
+      'jobBacked', true,
+      'isPairedUser', true) AS payload
+    WHERE ${pairedUser()}.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`${pairedUser()}.context_source_refs`)}`;
+}
+
 function memoryOriginEvidence(db: Db, alias: "t" | "dt", course: FragmentFactory, owner: FragmentFactory) {
   const root = () => savedTurn(db, alias);
   return db`SELECT side.payload
-    FROM LATERAL (${savedMisconceptionOrigins(db, alias)}) origin
+    FROM LATERAL (${savedMisconceptionOrigins(db, alias, "memory")}) origin
     LEFT JOIN opening_turns tu ON origin.role = 'assistant'
       AND tu.id = (${pairedUserTurnId(db, () => db`origin`)})
       AND tu.workspace_id = origin.workspace_id AND tu.conversation_id = origin.conversation_id
       AND tu.role = 'user' AND tu.status = 'complete'
     CROSS JOIN LATERAL (
-      SELECT jsonb_build_object('id', origin.id, 'assistantTurnId', origin.id,
-        'courseId', (SELECT ${turnLineageCourse(db, "dt", undefined, owner)} FROM (SELECT origin.*) dt OFFSET 0),
-        'consumerCourseId', ${course()},
-        'materialUse', (SELECT ${turnMaterialUse(db, "t")} FROM (SELECT origin.*) t OFFSET 0),
-        'refs', origin.context_source_refs, 'standalone', CASE
-          WHEN origin.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-          THEN ${turnHasStandaloneSessions(db, owner, () => db`origin`)} ELSE false END,
-        'historical', origin.id <> (${root()}).id,
-        'jobBacked', tu.id IS NOT NULL,
-        'isPairedUser', false) AS payload
-      WHERE ${hasSavedMemoryReferences(db, () => db`origin.context_source_refs`)}
-      UNION ALL
-      SELECT jsonb_build_object('id', tu.id, 'assistantTurnId', origin.id,
-        'courseId', (SELECT ${turnLineageCourse(db, "u", undefined, owner)} FROM (SELECT tu.*) u OFFSET 0),
-        'consumerCourseId', ${course()},
-        'materialUse', (SELECT ${turnMaterialUse(db, "u")} FROM (SELECT tu.*) u OFFSET 0),
-        'refs', tu.context_source_refs, 'standalone', CASE
-          WHEN tu.context_source_refs @> '[{"memoryOnly":true}]'::jsonb
-          THEN ${turnHasStandaloneSession(db, () => db`tu`, owner)} ELSE false END,
-        'historical', origin.id <> (${root()}).id,
-        'jobBacked', true,
-        'isPairedUser', true) AS payload
-      WHERE tu.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`tu.context_source_refs`)}
+      ${directMemoryOriginSide(db, () => db`origin`, () => db`tu`, course, owner, () => db`origin.id <> (${root()}).id`)}
     ) side`;
 }
 
@@ -215,25 +318,149 @@ async function resolveMemoryOriginRefs(db: Db, scope: OpeningScope, rows: SavedM
   });
 }
 
-/** Read inherited memory-bearing turns independently of restored tutor jobs. */
+type ConversationPrefixMemoryOrigin = {
+  posUs: string;
+  posId: string;
+  origin: SavedMemoryOrigin;
+};
+
+/** Read inherited memory-bearing turns once per conversation independently of restored tutor jobs. */
 export async function readTurnMisconceptionMemoryOrigins(
   db: Db, scope: OpeningScope, turnIds: readonly string[],
 ): Promise<Map<string, (TurnMemoryOrigin | null)[]>> {
   if (!turnIds.length) return new Map();
-  const course: FragmentFactory = () => db`own_course.id`;
-  const rows = await db<{ id: string; origins: SavedMemoryOrigin[] }[]>`
-    SELECT t.id, ARRAY(${memoryOriginEvidence(db, "t", course, () => db`c.owner_user_id`)}) AS origins
-    FROM opening_turns t
-    JOIN opening_conversations c ON c.id=t.conversation_id AND c.workspace_id=t.workspace_id
-    CROSS JOIN LATERAL (SELECT ${turnLineageCourse(db, "t", () => db`c.course_id`, () => db`c.owner_user_id`)} AS id OFFSET 0) own_course
-    WHERE t.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId} AND t.id=ANY(${[...turnIds]}::uuid[])`;
-  const resolved = await resolveMemoryOriginRefs(db, scope, rows.flatMap(row => row.origins));
+  const owner: FragmentFactory = () => db`${scope.ownerUserId}::uuid`;
+  const rows = await db<{
+    id: string;
+    origins: SavedMemoryOrigin[];
+    conversation_id?: string;
+    consumer_course_id?: string | null;
+    pos_us?: string;
+    pos_id?: string;
+    inherits_prefix?: boolean;
+    conv_origins?: ConversationPrefixMemoryOrigin[] | null;
+  }[]>`
+    SELECT t.id, ARRAY(
+      ${directMemoryOriginSide(db, () => db`t`, () => db`own_u`, () => db`t.own_course_id`, owner, () => db`false`)}
+    ) AS origins,
+      t.conversation_id,
+      t.own_course_id AS consumer_course_id,
+      t.pos_us,
+      t.pos_id,
+      t.inherits_prefix,
+      t.conv_origins
+    FROM (
+      WITH target_turns AS MATERIALIZED (
+        SELECT base.*,
+          row_number() OVER (PARTITION BY base.conversation_id ORDER BY base.id) AS conv_rn
+        FROM (
+          SELECT saved.*,
+            ${turnLineageCourse(db, "t", () => db`c.course_id`, owner)} AS own_course_id,
+            own_j.user_turn_id AS own_user_turn_id,
+            (extract(epoch FROM COALESCE(own_u.created_at, saved.created_at)) * 1000000)::bigint::text AS pos_us,
+            COALESCE(own_u.id, saved.id)::text AS pos_id,
+            (saved.role = 'assistant' AND saved.intent_hash IS NULL
+              AND NOT saved.query_system AND saved.system_query IS NULL) AS inherits_prefix
+          FROM opening_turns saved
+          JOIN opening_conversations c ON c.id = saved.conversation_id AND c.workspace_id = saved.workspace_id
+          CROSS JOIN LATERAL (SELECT saved.*) t
+          LEFT JOIN opening_tutor_jobs own_j ON saved.role = 'assistant'
+            AND own_j.assistant_turn_id = saved.id AND own_j.workspace_id = saved.workspace_id
+            AND own_j.conversation_id = saved.conversation_id
+          LEFT JOIN opening_turns own_u ON own_u.id = own_j.user_turn_id
+            AND own_u.workspace_id = saved.workspace_id AND own_u.conversation_id = saved.conversation_id
+            AND own_u.role = 'user' AND own_u.status = 'complete'
+          WHERE saved.workspace_id = ${scope.workspaceId} AND c.owner_user_id = ${scope.ownerUserId}
+            AND saved.id = ANY(${[...turnIds]}::uuid[])
+        ) base
+      ), conv_mem AS MATERIALIZED (
+        SELECT conv.conversation_id,
+          COALESCE(
+            (SELECT jsonb_agg(jsonb_build_object(
+              'posUs', (extract(epoch FROM COALESCE(prior_u.created_at, prior_a.created_at)) * 1000000)::bigint::text,
+              'posId', COALESCE(prior_u.id, prior_a.id)::text,
+              'origin', side.payload
+            ) ORDER BY COALESCE(prior_u.created_at, prior_a.created_at) ASC, COALESCE(prior_u.id, prior_a.id) ASC)
+            FROM opening_turns prior_a
+            LEFT JOIN opening_tutor_jobs prior_j ON prior_j.assistant_turn_id = prior_a.id
+              AND prior_j.workspace_id = prior_a.workspace_id AND prior_j.conversation_id = prior_a.conversation_id
+            LEFT JOIN opening_turns prior_u ON prior_u.id = prior_j.user_turn_id
+              AND prior_u.workspace_id = prior_a.workspace_id AND prior_u.conversation_id = prior_a.conversation_id
+              AND prior_u.role = 'user' AND prior_u.status = 'complete'
+            CROSS JOIN LATERAL (
+              ${directMemoryOriginSide(db, () => db`prior_a`, () => db`prior_u`, () => db`NULL::uuid`, owner, () => db`true`)}
+            ) side
+            WHERE prior_a.workspace_id = ${scope.workspaceId} AND prior_a.conversation_id = conv.conversation_id
+              AND prior_a.role = 'assistant' AND prior_a.status = 'complete'
+              AND NOT prior_a.query_system AND prior_a.system_query IS NULL
+              AND (${hasSavedMemoryReferences(db, () => db`prior_a.context_source_refs`)}
+                OR (prior_u.id IS NOT NULL AND ${hasSavedMemoryReferences(db, () => db`prior_u.context_source_refs`)}))),
+            '[]'::jsonb
+          ) AS origins
+        FROM (SELECT DISTINCT conversation_id FROM target_turns WHERE inherits_prefix) conv
+      )
+      SELECT tt.*, cm.origins AS conv_origins
+      FROM target_turns tt
+      LEFT JOIN conv_mem cm ON tt.conv_rn = 1 AND cm.conversation_id = tt.conversation_id
+      OFFSET 0
+    ) t
+    LEFT JOIN opening_turns own_u ON t.own_user_turn_id IS NOT NULL
+      AND own_u.id = t.own_user_turn_id AND own_u.workspace_id = t.workspace_id
+      AND own_u.conversation_id = t.conversation_id AND own_u.role = 'user' AND own_u.status = 'complete'`;
+  if (rows.every(row => row.conv_origins === undefined && row.inherits_prefix === undefined)) {
+    const resolved = await resolveMemoryOriginRefs(db, scope, rows.flatMap(row => row.origins));
+    let offset = 0;
+    return new Map(rows.map(row => {
+      const end = offset + row.origins.length;
+      const origins = resolved.slice(offset, end);
+      offset = end;
+      return [row.id, origins];
+    }));
+  }
+  const convEntries = [...rows]
+    .filter((row): row is typeof row & { conversation_id: string; conv_origins: ConversationPrefixMemoryOrigin[] } =>
+      typeof row.conversation_id === "string" && Array.isArray(row.conv_origins));
+  const allToResolve: SavedMemoryOrigin[] = [
+    ...rows.flatMap(row => row.origins),
+    ...convEntries.flatMap(entry => entry.conv_origins.map(item => item.origin)),
+  ];
+  const allResolved = await resolveMemoryOriginRefs(db, scope, allToResolve);
   let offset = 0;
-  return new Map(rows.map(row => {
+  const directByTurn = new Map<string, (TurnMemoryOrigin | null)[]>();
+  for (const row of rows) {
     const end = offset + row.origins.length;
-    const origins = resolved.slice(offset, end);
+    directByTurn.set(row.id, allResolved.slice(offset, end));
     offset = end;
-    return [row.id, origins];
+  }
+  const convById = new Map<string, Array<{ posUs: bigint; posId: string; origin: SavedMemoryOrigin; resolved: TurnMemoryOrigin | null }>>();
+  for (const entry of convEntries) {
+    const end = offset + entry.conv_origins.length;
+    const slice = allResolved.slice(offset, end);
+    offset = end;
+    convById.set(entry.conversation_id, entry.conv_origins.map((item, idx) => ({
+      posUs: BigInt(item.posUs),
+      posId: item.posId.toLowerCase(),
+      origin: item.origin,
+      resolved: slice[idx]!,
+    })));
+  }
+  return new Map(rows.map(row => {
+    const out = [...(directByTurn.get(row.id) ?? [])];
+    if (row.inherits_prefix && row.conversation_id && row.pos_us !== undefined && row.pos_id !== undefined) {
+      const ownPosUs = BigInt(row.pos_us);
+      const ownPosId = row.pos_id.toLowerCase();
+      const prefix = convById.get(row.conversation_id) ?? [];
+      for (const item of prefix) {
+        if (item.posUs > ownPosUs || (item.posUs === ownPosUs && item.posId >= ownPosId)) break;
+        if (item.origin.assistantTurnId === row.id) continue;
+        out.push(item.resolved === null ? null : {
+          ...item.resolved,
+          consumerCourseId: row.consumer_course_id ?? null,
+          historical: true,
+        });
+      }
+    }
+    return [row.id, out];
   }));
 }
 
@@ -267,10 +494,10 @@ export function mergeTutorMisconceptionLineages(
 
 type MemoryEvidence = {
   memoryId: string; hashes: string[]; courseId?: string | null; expiresAt?: string | Date | null;
-  statusActive?: boolean; active?: boolean; origins?: SavedMemoryOrigin[];
+  statusActive?: boolean; active?: boolean; rootActive?: boolean; origins?: SavedMemoryOrigin[];
 };
 type MemoryLineageNode = {
-  memoryCourseId: string | null; courseId: string | null; statusActive: boolean; active: boolean;
+  memoryCourseId: string | null; courseId: string | null; statusActive: boolean; active: boolean; rootActive: boolean;
   expiresAtMs: number; lineage: TutorMisconceptionLineage | undefined; origins: (TurnMemoryOrigin | null)[];
 };
 export type MemoryMisconceptionBinding = {
@@ -295,7 +522,6 @@ const courseAllows = (course: string | null, ...targets: (string | null)[]) => {
 
 async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[], asOf?: string) {
   const owner: FragmentFactory = () => db`request.owner_user_id`;
-  const at = () => asOf === undefined ? db`clock_timestamp()` : db`${asOf}::timestamptz`;
   return db<{ id: string | MemoryEvidence }[]>`
     SELECT id FROM opening_memories AS m(memory_id)
     JOIN (SELECT ${scope.workspaceId}::uuid AS workspace_id, ${ids}::uuid[] AS ids, ${scope.ownerUserId}::uuid AS owner_user_id) request
@@ -316,7 +542,8 @@ async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]
         ELSE jsonb_build_object('memoryId', m.memory_id, 'hashes', lineage.hashes, 'courseId', m.course_id,
           'expiresAt', CASE WHEN m.kind='temporary' THEN m.expires_at END,
           'statusActive', m.status='active',
-          'active', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > ${at()})),
+          'active', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp())),
+          ${asOf === undefined ? db`` : db`'rootActive', m.status='active' AND (m.kind='confirmed' OR (m.kind='temporary' AND m.expires_at IS NOT NULL AND m.expires_at > ${asOf}::timestamptz)),`}
           'origins', lineage.memory_origins) END AS id
       FROM LATERAL (SELECT ARRAY(
         SELECT DISTINCT hash FROM origins CROSS JOIN LATERAL unnest(origin_hashes) hash
@@ -330,6 +557,7 @@ async function readMemoryLineageBatch(db: Db, scope: OpeningScope, ids: string[]
 export type MemoryMisconceptionAuthorityOptions = boolean | {
   display?: boolean;
   asOf?: string;
+  asOfRootIds?: ReadonlySet<string>;
   allowCandidateRoots?: boolean;
 };
 
@@ -340,20 +568,23 @@ export async function readMemoryMisconceptionAuthorities(
 ): Promise<Map<string, MemoryMisconceptionAuthority>> {
   const display = typeof options === "boolean" ? options : options.display === true;
   const asOf = typeof options === "boolean" ? undefined : options.asOf;
+  const asOfRootIds = typeof options === "boolean" ? undefined : options.asOfRootIds;
   const allowCandidateRoots = typeof options === "boolean" ? false : options.allowCandidateRoots === true;
   const nodes = new Map<string, MemoryLineageNode>();
   const visited = new Set<string>();
   let frontier = [...new Set(memoryIds.map(id => id.toLowerCase()))];
+  let depth = 0;
   while (frontier.length) {
     for (const id of frontier) visited.add(id);
-    const rows = await readMemoryLineageBatch(db, scope, frontier, asOf);
+    const rows = await readMemoryLineageBatch(db, scope, frontier, depth === 0 ? asOf : undefined);
+    depth += 1;
     const origins = await resolveMemoryOriginRefs(db, scope, rows.flatMap(({ id }) => typeof id === "string" ? [] : id.origins ?? []));
     let offset = 0;
     const next = new Set<string>();
     for (const { id } of rows) {
       if (typeof id === "string") {
         nodes.set(id.toLowerCase(), {
-          memoryCourseId: null, courseId: null, statusActive: true, active: true,
+          memoryCourseId: null, courseId: null, statusActive: true, active: true, rootActive: true,
           expiresAtMs: Infinity, lineage: undefined, origins: [],
         });
         continue;
@@ -368,9 +599,10 @@ export async function readMemoryMisconceptionAuthorities(
       const lineage = mergeTutorMisconceptionLineages(...hashes.map(hash => hash ?? undefined));
       const memoryCourseId = normalizeCourse(id.courseId);
       const active = id.active ?? true;
+      const rootActive = id.rootActive ?? active;
       nodes.set(id.memoryId.toLowerCase(), {
         memoryCourseId, courseId: memoryCourseId ?? lineage?.courseId ?? null,
-        statusActive: id.statusActive ?? active, active, expiresAtMs, lineage, origins: current,
+        statusActive: id.statusActive ?? active, active, rootActive, expiresAtMs, lineage, origins: current,
       });
       for (const origin of current) {
         for (const dep of [...(origin?.ids ?? []), ...(origin?.backings.flat() ?? [])]) {
@@ -472,7 +704,8 @@ export async function readMemoryMisconceptionAuthorities(
     const id = rawId.toLowerCase();
     const node = nodes.get(id);
     const auth = resolved.get(id);
-    const rootActive = display || node?.active || (allowCandidateRoots && node?.statusActive);
+    const usesAsOf = asOf !== undefined && (asOfRootIds === undefined || asOfRootIds.has(id));
+    const rootActive = display || (usesAsOf ? node?.rootActive : node?.active) || (allowCandidateRoots && node?.statusActive);
     return node && rootActive && auth && courseAllows(node.memoryCourseId, targetCourseId)
       && courseAllows(auth.lineage?.courseId ?? null, targetCourseId) ? [[rawId, auth] as const] : [];
   }));

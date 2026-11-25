@@ -109,7 +109,7 @@ async function readMemoryContextInTx(
         min(dep_m.expires_at) FILTER (WHERE dep_m.kind = 'temporary') AS temporary_expires_at,
         bool_and(COALESCE(dep_m.id <> d.root_id AND dep_m.status = 'active'
           AND (dep_m.course_id IS NULL OR dep_course.id IS NOT NULL)
-          AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > ${asOf === undefined ? db`clock_timestamp()` : db`${asOf}::timestamptz`})), false)) AS all_active
+          AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp())), false)) AS all_active
       FROM mem_deps d
       LEFT JOIN opening_memories dep_m ON dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = ${scope.workspaceId}
       LEFT JOIN courses dep_course ON dep_course.id=dep_m.course_id AND dep_course.workspace_id=dep_m.workspace_id
@@ -131,12 +131,15 @@ async function readMemoryContextInTx(
   const materialRules = { excluded: excludedSourceIds, materialUse, allowClassifiedGlobal: materialUse !== "origin",
     includeSourceRefs: true };
   const origins = await lockAndReadMemoryOrigins(db, scope, originRows, materialRules, eligibleCourseId);
+  const rootIds = new Set<string>();
   const authorityIds = [...new Set(originRows.flatMap(({ id }) => {
     const origin = origins.get(id);
-    return origin === null ? [] : [id, ...(origin?.ids ?? [])];
+    if (origin === null) return [];
+    rootIds.add(id.toLowerCase());
+    return [id, ...(origin?.ids ?? [])];
   }))];
   const misconceptionAuthorities = await readMemoryMisconceptionAuthorities(
-    db, scope, authorityIds, eligibleCourseId, { asOf, allowCandidateRoots: asOf === undefined },
+    db, scope, authorityIds, eligibleCourseId, { asOf, asOfRootIds: rootIds, allowCandidateRoots: asOf === undefined },
   );
   const normalizedEligibleCourse = eligibleCourseId?.toLowerCase() ?? null;
   return rows.flatMap(row => {
