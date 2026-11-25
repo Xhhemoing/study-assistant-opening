@@ -877,5 +877,290 @@ describe("material hybrid retrieval", () => {
       });
       expect(withEmptyGraph).toEqual(withoutGraph);
     });
+
+    it("propagates ## Answer Key and ## Hints visibility across multi-chunk Markdown splits and reopens at subsequent public headings", () => {
+      const mdSource = "md-course-notes";
+      const page1AnsHeading: SourceChunk = {
+        ...chunk("md-ans-heading", "# Chapter 1: Eigenvalues\n\nPublic intro.\n\n## Answer Key\n\n", 1),
+        sourceId: mdSource,
+      };
+      const page2AnsBody: SourceChunk = {
+        ...chunk(
+          "md-ans-cont",
+          "Confidential eigenvalue derivation step forty-two for spectral radius. ".repeat(60) + "\n\n",
+          2,
+        ),
+        sourceId: mdSource,
+      };
+      const page3HintHeading: SourceChunk = {
+        ...chunk("md-hint-heading", "## Hints\n\n", 3),
+        sourceId: mdSource,
+      };
+      const page4HintBody: SourceChunk = {
+        ...chunk(
+          "md-hint-cont",
+          "Factor the characteristic polynomial for spectral radius before substituting. ".repeat(54) + "\n\n",
+          4,
+        ),
+        sourceId: mdSource,
+      };
+      const page5PublicReopen: SourceChunk = {
+        ...chunk(
+          "md-reopen-public",
+          "## Public Chapter 2: Cayley-Hamilton\n\nEvery square matrix satisfies its own characteristic polynomial for spectral radius.\n",
+          5,
+        ),
+        sourceId: mdSource,
+      };
+      const unseededPrereq = chunk(
+        "prereq-det",
+        ":::definition Determinant\nAlternating multilinear form on columns.\n:::",
+        1,
+      );
+
+      expect(page2AnsBody.text.length).toBeGreaterThan(4100);
+      expect(page4HintBody.text.length).toBeGreaterThan(4100);
+
+      // Pass chunks intentionally out of page order so document reconstruction must sort by reading order.
+      const docChunks = [page4HintBody, page2AnsBody, page5PublicReopen, unseededPrereq, page1AnsHeading, page3HintHeading];
+
+      const makeGraph = (allowHintGated?: boolean): MaterialPedagogicalGraph => ({
+        concepts: [
+          { id: "c-det", label: "Determinant", evidenceChunkIds: ["prereq-det"], privacyEpoch: 7 },
+          { id: "c-ch", label: "Cayley-Hamilton", evidenceChunkIds: ["md-reopen-public"], privacyEpoch: 7 },
+          // Attempting to cite the cross-chunk answer continuation must be rejected!
+          { id: "c-ans-leak", label: "Leaked Answer", evidenceChunkIds: ["md-ans-cont"], privacyEpoch: 7 },
+        ],
+        edges: [
+          { from: "c-det", to: "c-ch", kind: "prerequisite", privacyEpoch: 7 },
+          { from: "c-ans-leak", to: "c-ch", kind: "prerequisite", privacyEpoch: 7 },
+        ],
+        authorization: {
+          admissibleSourceIds: [mdSource, unseededPrereq.sourceId],
+          admissibleSourceVersions: { [mdSource]: 1, [unseededPrereq.sourceId]: 1 },
+          expectedPrivacyEpoch: 7,
+          ...(allowHintGated !== undefined ? { allowHintGated } : {}),
+        },
+      });
+
+      const defaultRanked = rankMaterialContext({
+        chunks: docChunks,
+        query: "spectral radius characteristic polynomial",
+        maxCharacters: 20_000,
+        dense: [
+          { chunk: page2AnsBody, segmentIndex: 0 },
+          { chunk: page4HintBody, segmentIndex: 0 },
+        ],
+        pedagogicalGraph: makeGraph(false),
+      });
+
+      const defaultIds = defaultRanked.map(c => c.id);
+      expect(defaultIds).toContain("prereq-det");
+      expect(defaultIds).toContain("md-reopen-public");
+      expect(defaultIds).not.toContain("md-ans-cont");
+      expect(defaultIds).not.toContain("md-hint-heading");
+      expect(defaultIds).not.toContain("md-hint-cont");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Confidential eigenvalue derivation");
+      expect(JSON.stringify(defaultRanked)).not.toContain("Factor the characteristic polynomial");
+
+      // Granting allowHintGated admits the cross-chunk ## Hints continuation while keeping ## Answer Key sealed.
+      const withHintsRanked = rankMaterialContext({
+        chunks: docChunks,
+        query: "spectral radius characteristic polynomial",
+        maxCharacters: 20_000,
+        dense: [{ chunk: page2AnsBody, segmentIndex: 0 }],
+        pedagogicalGraph: makeGraph(true),
+      });
+      const withHintsIds = withHintsRanked.map(c => c.id);
+      expect(withHintsIds).toContain("md-hint-cont");
+      expect(withHintsIds).toContain("md-reopen-public");
+      expect(withHintsIds).not.toContain("md-ans-cont");
+      expect(JSON.stringify(withHintsRanked)).not.toContain("Confidential eigenvalue derivation");
+
+      // Fallback path (empty concepts/edges + preferChunkId/preferPage pointing at the sealed continuation) must ALSO stay sealed!
+      const fallbackRanked = rankMaterialContext({
+        chunks: [
+          { ...chunk("syn-ans-h", "## Answer Key", 1), sourceId: "syn-doc" },
+          { ...chunk("syn-ans-b", "Synthetic continuation secret 888 for spectral radius.", 2), sourceId: "syn-doc" },
+          { ...chunk("syn-pub", "## Next Topic\nPublic spectral radius theorem.", 3), sourceId: "syn-doc" },
+        ],
+        query: "spectral radius",
+        maxCharacters: 8000,
+        preferChunkId: "syn-ans-b",
+        preferPage: 2,
+        dense: [{ chunk: { ...chunk("syn-ans-b", "Synthetic continuation secret 888 for spectral radius.", 2), sourceId: "syn-doc" }, segmentIndex: 0 }],
+        pedagogicalGraph: {
+          concepts: [],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: ["syn-doc"],
+            admissibleSourceVersions: { "syn-doc": 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+      expect(fallbackRanked.map(c => c.id)).toEqual(["syn-pub"]);
+      expect(JSON.stringify(fallbackRanked)).not.toContain("Synthetic continuation secret 888");
+    });
+
+    it("rejects concepts and edges citing a mixed physical chunk when any segment of that chunk is quarantined", () => {
+      const publicDefLead =
+        ":::definition Inner Product\nPositive-definite symmetric bilinear form on V.\n:::\n" + "p".repeat(4400) + "\n";
+      const sealedSolTail =
+        "\\begin{solution}\n" + "Secret inner product solution step 77. ".repeat(65) + "\n\\end{solution}";
+      const mixedChunk = chunk("mixed-def-sol", publicDefLead + sealedSolTail, 2);
+
+      const mixedSegments = segmentMaterialChunks([mixedChunk]);
+      expect(mixedSegments).toHaveLength(2);
+      expect(Buffer.byteLength(mixedSegments[1]!.chunk.text, "utf8")).toBeGreaterThan(2048);
+      expect(mixedSegments[0]!.chunk.text).toContain("Positive-definite symmetric bilinear form");
+      expect(mixedSegments[1]!.chunk.text).toContain("\\begin{solution}");
+
+      const unseededByConcept = chunk(
+        "unseeded-by-mixed-concept",
+        ":::definition Gram Matrix\nDeterminant criterion for linear independence.\n:::",
+        1,
+      );
+      const unseededByEdge = chunk(
+        "unseeded-by-mixed-edge",
+        ":::definition Bessel Parseval Identity\nOrthonormal coefficient sum bound.\n:::",
+        1,
+      );
+      const seededThm = chunk(
+        "seeded-thm",
+        ":::theorem Cauchy-Schwarz Bound\nNorm bound for Cauchy-Schwarz inequality.\n:::",
+        5,
+      );
+
+      const allChunks = [mixedChunk, unseededByConcept, unseededByEdge, seededThm];
+      const graph: MaterialPedagogicalGraph = {
+        concepts: [
+          {
+            id: "c-tainted-concept",
+            label: "Tainted Concept",
+            evidenceChunkIds: ["unseeded-by-mixed-concept", "mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-only-mixed",
+            label: "Only Mixed",
+            evidenceChunkIds: ["mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-bessel",
+            label: "Bessel",
+            evidenceChunkIds: ["unseeded-by-mixed-edge"],
+            privacyEpoch: 3,
+          },
+          {
+            id: "c-cs",
+            label: "Cauchy-Schwarz",
+            evidenceChunkIds: ["seeded-thm"],
+            privacyEpoch: 3,
+          },
+        ],
+        edges: [
+          { from: "c-tainted-concept", to: "c-cs", kind: "prerequisite", privacyEpoch: 3 },
+          { from: "c-only-mixed", to: "c-cs", kind: "prerequisite", privacyEpoch: 3 },
+          {
+            from: "c-bessel",
+            to: "c-cs",
+            kind: "prerequisite",
+            supportingChunkIds: ["mixed-def-sol"],
+            privacyEpoch: 3,
+          },
+          { from: "mixed-def-sol", to: "seeded-thm", kind: "prerequisite", privacyEpoch: 3 },
+        ],
+        authorization: {
+          admissibleSourceIds: allChunks.map(c => c.sourceId),
+          admissibleSourceVersions: Object.fromEntries(allChunks.map(c => [c.sourceId, c.sourceVersion])),
+          expectedPrivacyEpoch: 3,
+        },
+      };
+
+      const ranked = rankMaterialContext({
+        chunks: allChunks,
+        query: "Cauchy-Schwarz inequality",
+        maxCharacters: 12_000,
+        pedagogicalGraph: graph,
+      });
+
+      // Tainted concept/edges referencing mixed-def-sol cannot promote unseeded chunks or leak the sealed segment!
+      expect(ranked.map(c => c.id)).toEqual(["seeded-thm"]);
+      expect(JSON.stringify(ranked)).not.toContain("Secret inner product solution");
+
+      // Public segment 0 of mixed-def-sol remains directly retrievable on its own lexical merit without leaking segment 1.
+      const directPublicMerit = rankMaterialContext({
+        chunks: allChunks,
+        query: "Positive-definite symmetric bilinear form",
+        maxCharacters: 12_000,
+        pedagogicalGraph: graph,
+      });
+      expect(directPublicMerit.map(c => c.id)).toContain("mixed-def-sol");
+      expect(JSON.stringify(directPublicMerit)).not.toContain("Secret inner product solution");
+    });
+
+    it("preserves exact ascending segmentIndex order when budgeting skips an oversized segment", () => {
+      const seg0Lead = "SEG0_FIRST: Preliminary vector space notation for spectral operators.\n";
+      const seg1OversizedMath = "\\[" + "z_1 + ".repeat(1080) + "w_1\\]"; // ~6,487 bytes (> 6,000B, <= 8,192B)
+      const seg2Hit =
+        "\n:::definition Spectral Operator\nSEG2_SECOND: Self-adjoint spectral operator diagonalization.\n:::\n";
+      const seg3OversizedFormula = "$$" + "x_1 + ".repeat(1240) + "y_1$$"; // ~7,447 bytes (> 6,000B, <= 8,192B)
+      const multiChunk = chunk("multi-seg-budget", seg0Lead + seg1OversizedMath + seg2Hit + seg3OversizedFormula, 1);
+
+      const segs = segmentMaterialChunks([multiChunk]);
+      expect(segs).toHaveLength(4);
+      const seg0 = segs[0]!;
+      const seg2 = segs[2]!;
+      const segOversized = segs[3]!;
+      expect(seg0.chunk.text).toContain("SEG0_FIRST");
+      expect(seg2.chunk.text).toContain("SEG2_SECOND");
+      expect(segOversized.chunk.text).toContain("x_1 + ");
+      expect(seg0.segmentIndex).toBeLessThan(seg2.segmentIndex);
+      expect(seg2.segmentIndex).toBeLessThan(segOversized.segmentIndex);
+      expect(segOversized.chunk.text.length).toBeGreaterThan(7000);
+
+      // Also verify the 3-segment [seg0, oversized middle formula, seg2] shape directly:
+      const middleOversizedChunk = chunk(
+        "mid-oversized",
+        ":::definition Invariant Subspace\nMID_SEG0: spectral operator invariant subspace intro.\n:::\n"
+          + seg3OversizedFormula
+          + "\nMID_SEG2: spectral operator diagonalization corollary.",
+        2,
+      );
+      const midSegs = segmentMaterialChunks([middleOversizedChunk]);
+      expect(midSegs).toHaveLength(3);
+
+      const ranked = rankMaterialContext({
+        chunks: [multiChunk, middleOversizedChunk],
+        query: "spectral operator diagonalization",
+        maxCharacters: 1800,
+        // Definition segments fit first; >7KB display_math segments rank ahead of prose seg0 and get skipped by budget!
+        dense: [segOversized, midSegs[1]!],
+        pedagogicalGraph: {
+          concepts: [
+            { id: "c-multi", label: "Spectral", evidenceChunkIds: ["multi-seg-budget", "mid-oversized"], privacyEpoch: 1 },
+          ],
+          edges: [],
+          authorization: {
+            admissibleSourceIds: ["multi-seg-budget", "mid-oversized"],
+            admissibleSourceVersions: { "multi-seg-budget": 1, "mid-oversized": 1 },
+            expectedPrivacyEpoch: 1,
+          },
+        },
+      });
+
+      const mergedMulti = ranked.find(c => c.id === "multi-seg-budget");
+      expect(mergedMulti).toBeDefined();
+      expect(mergedMulti!.text).not.toContain("x_1 + ");
+      expect(mergedMulti!.text).toBe(`${seg0.chunk.text}\n[…]\n${seg2.chunk.text}`);
+
+      const mergedMid = ranked.find(c => c.id === "mid-oversized");
+      expect(mergedMid).toBeDefined();
+      expect(mergedMid!.text).toBe(
+        `${midSegs[0]!.chunk.text}\n[…]\n${midSegs[2]!.chunk.text}`,
+      );
+    });
   });
 });

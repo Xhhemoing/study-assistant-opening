@@ -198,7 +198,12 @@ export function createOpeningMaterialRetriever(
 ): ScopedMaterialRetriever {
   const purposes = createOpeningCourseReadySourcesRepository(sql);
   const repository = createOpeningSourceEmbeddingsRepository(sql);
-  const hasSqlClient = typeof sql === "function" || typeof (sql as { begin?: unknown } | null)?.begin === "function";
+  const hasSqlClient = Boolean(
+    sql && (
+      typeof (sql as { begin?: unknown }).begin === "function"
+      || typeof (sql as { savepoint?: unknown }).savepoint === "function"
+    ),
+  );
   const knowledge = hasSqlClient ? createOpeningKnowledgeRepository(sql) : null;
   return async (scope, input) => {
     if (!input.courseContext || (input.courseContext.courseId !== null

@@ -570,33 +570,57 @@ function classifyPlainLeadKind(line: string, isHeading: boolean): PedagogicalBlo
   return null;
 }
 
+function headingMarkdownLevel(block: PedagogicalAstBlock): number | null {
+  if (block.kind !== "heading") return null;
+  const atx = /^[ \t]{0,3}(#{1,6})(?:[ \t]|$)/.exec(block.text);
+  if (atx) return atx[1]!.length;
+  const html = /^<h([1-6])(?=[\t\n\f\r />])/i.exec(block.text.trimStart());
+  if (html) return Number(html[1]);
+  if (/\r?\n[ \t]*=+[ \t]*$/.test(block.text)) return 1;
+  if (/\r?\n[ \t]*-+[ \t]*$/.test(block.text)) return 2;
+  return 1;
+}
+
 function splitChunkDiscourseBlocks(text: string): PedagogicalAstBlock[] {
   const rawBlocks = parsePedagogicalAst(text);
   const refined: PedagogicalAstBlock[] = [];
   let inWorkedExample = false;
+  let workedExampleHeadingLevel: number | null = null;
 
   for (const block of rawBlocks) {
     if (block.visibility === "sealed") {
+      if (block.kind === "heading") {
+        inWorkedExample = false;
+        workedExampleHeadingLevel = null;
+      }
       refined.push(block);
       continue;
     }
     if (block.kind === "example") {
       inWorkedExample = true;
+      workedExampleHeadingLevel = null;
       refined.push(block);
       continue;
     }
     if (block.kind === "heading") {
+      const level = headingMarkdownLevel(block) ?? 1;
       const headingKind = block.visibility === "public"
         ? classifyPlainLeadKind(block.label ?? block.text, true)
         : null;
-      if (headingKind === "example") inWorkedExample = true;
-      else if (headingKind) inWorkedExample = false;
+      if (headingKind === "example") {
+        inWorkedExample = true;
+        workedExampleHeadingLevel = level;
+      } else if (headingKind || workedExampleHeadingLevel === null || level <= workedExampleHeadingLevel) {
+        inWorkedExample = false;
+        workedExampleHeadingLevel = null;
+      }
       refined.push(headingKind ? { ...block, kind: headingKind } : block);
       continue;
     }
     if (block.kind !== "prose") {
       if (block.kind === "exercise" || block.kind === "theorem" || block.kind === "definition" || block.kind === "lemma") {
         inWorkedExample = false;
+        workedExampleHeadingLevel = null;
       }
       refined.push(block);
       continue;
@@ -627,9 +651,12 @@ function splitChunkDiscourseBlocks(text: string): PedagogicalAstBlock[] {
         lineVis = block.visibility === "public" ? "hint_gated" : block.visibility;
       } else if (block.visibility === "public") {
         lineKind = classifyPlainLeadKind(line, false);
-        if (lineKind === "example") inWorkedExample = true;
-        else if (lineKind === "exercise" || lineKind === "theorem" || lineKind === "definition" || lineKind === "lemma") {
+        if (lineKind === "example") {
+          inWorkedExample = true;
+          workedExampleHeadingLevel = null;
+        } else if (lineKind === "exercise" || lineKind === "theorem" || lineKind === "definition" || lineKind === "lemma") {
           inWorkedExample = false;
+          workedExampleHeadingLevel = null;
         }
       }
 
@@ -703,11 +730,30 @@ function stableSegmentOrder(a: MaterialSegment, b: MaterialSegment): number {
 }
 
 function mergePedagogicalBudgetedSegments(selected: readonly MaterialSegment[], maxCharacters: number): SourceChunk[] {
-  const budgeted = budgetRankedMaterial(selected.map(segment => segment.chunk), maxCharacters);
+  if (maxCharacters <= 0) return [];
+  const budgeted: MaterialSegment[] = [];
+  let used = 0;
+  for (const segment of selected) {
+    const { chunk } = segment;
+    const separator = budgeted.length ? 1 : 0;
+    const fullLength = renderContext([chunk]).length + separator;
+    const remaining = maxCharacters - used;
+    if (fullLength <= remaining) {
+      budgeted.push(segment);
+      used += fullLength;
+    } else if (budgeted.length === 0) {
+      const textLength = remaining - renderContext([{ ...chunk, text: "" }]).length;
+      if (textLength > 0) {
+        const text = chunk.text.slice(0, textLength).replace(/[\uD800-\uDBFF]$/u, "");
+        if (text || chunk.imageObjectKey) {
+          budgeted.push({ chunk: { ...chunk, text }, segmentIndex: segment.segmentIndex });
+        }
+        break;
+      }
+    }
+  }
   const grouped = new Map<string, { base: SourceChunk; parts: Array<{ segmentIndex: number; text: string }> }>();
-  for (let i = 0; i < budgeted.length; i++) {
-    const chunk = budgeted[i]!;
-    const segmentIndex = selected[i]?.segmentIndex ?? i;
+  for (const { chunk, segmentIndex } of budgeted) {
     const existing = grouped.get(chunk.id);
     if (existing) {
       existing.parts.push({ segmentIndex, text: chunk.text });
@@ -886,13 +932,145 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
 
   chunksById ??= new Map(input.chunks.map(chunk => [chunk.id, chunk]));
   const allPhysicalChunkIds = new Set(input.chunks.map(chunk => chunk.id));
-  const astBlocksByChunkId = new Map<string, PedagogicalAstBlock[]>();
+
+  type DocChunkItem = { chunk: SourceChunk; inputIndex: number };
+  type IndexedDocAst = {
+    blocks: readonly PedagogicalAstBlock[];
+    prefixMaxEnd: Float64Array;
+  };
+  type ChunkDocSpan = {
+    docKey: string;
+    docStart: number;
+    docEnd: number;
+    chunkHasProtectedAst: boolean;
+  };
+
+  const isProtectedAstBlock = (b: PedagogicalAstBlock): boolean =>
+    b.visibility === "sealed" || (b.visibility === "hint_gated" && !allowHintGated);
+
+  const sliceOverlappingAstBlocks = (
+    docAst: IndexedDocAst,
+    rangeStart: number,
+    rangeEnd: number,
+  ): PedagogicalAstBlock[] => {
+    const { blocks, prefixMaxEnd } = docAst;
+    if (blocks.length === 0 || rangeEnd <= rangeStart) return [];
+    let lo = 0;
+    let hi = blocks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (prefixMaxEnd[mid]! <= rangeStart) lo = mid + 1;
+      else hi = mid;
+    }
+    const result: PedagogicalAstBlock[] = [];
+    for (let i = lo; i < blocks.length; i++) {
+      const block = blocks[i]!;
+      if (block.startOffset >= rangeEnd) break;
+      if (block.endOffset > rangeStart) result.push(block);
+    }
+    return result;
+  };
+
+  const findPrecedingAstBlock = (
+    docAst: IndexedDocAst,
+    beforeOffset: number,
+  ): PedagogicalAstBlock | undefined => {
+    const { blocks } = docAst;
+    let lo = 0;
+    let hi = blocks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (blocks[mid]!.startOffset < beforeOffset) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo > 0 ? blocks[lo - 1] : undefined;
+  };
+
+  const docGroups = new Map<string, DocChunkItem[]>();
+  const seenDocChunkIds = new Set<string>();
+  for (let idx = 0; idx < input.chunks.length; idx++) {
+    const rawChunk = input.chunks[idx]!;
+    if (seenDocChunkIds.has(rawChunk.id)) continue;
+    seenDocChunkIds.add(rawChunk.id);
+    const canonical = chunksById.get(rawChunk.id) ?? rawChunk;
+    if (!canonical.text.trim()) continue;
+    const docKey = `${canonical.sourceId}\0${canonical.sourceVersion}`;
+    const group = docGroups.get(docKey);
+    if (group) group.push({ chunk: canonical, inputIndex: idx });
+    else docGroups.set(docKey, [{ chunk: canonical, inputIndex: idx }]);
+  }
+
+  const docAstByKey = new Map<string, IndexedDocAst>();
+  const chunkDocSpanById = new Map<string, ChunkDocSpan>();
+  for (const [docKey, group] of docGroups) {
+    group.sort(
+      (a, b) =>
+        (a.chunk.page ?? Number.MAX_SAFE_INTEGER) - (b.chunk.page ?? Number.MAX_SAFE_INTEGER)
+        || (a.chunk.startMs ?? Number.MAX_SAFE_INTEGER) - (b.chunk.startMs ?? Number.MAX_SAFE_INTEGER)
+        || a.inputIndex - b.inputIndex,
+    );
+    const parts: string[] = [];
+    const spans: Array<{ chunkId: string; docStart: number; docEnd: number }> = [];
+    let offset = 0;
+    let prevText = "";
+    for (let i = 0; i < group.length; i++) {
+      const currText = group[i]!.chunk.text;
+      if (i > 0) {
+        const hasBoundaryNewline =
+          prevText.endsWith("\n") || prevText.endsWith("\r")
+          || currText.startsWith("\n") || currText.startsWith("\r");
+        if (!hasBoundaryNewline) {
+          parts.push("\n\n");
+          offset += 2;
+        }
+      }
+      const docStart = offset;
+      parts.push(currText);
+      offset += currText.length;
+      spans.push({ chunkId: group[i]!.chunk.id, docStart, docEnd: offset });
+      prevText = currText;
+    }
+    const docText = parts.join("");
+    const blocks = splitChunkDiscourseBlocks(docText)
+      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+    const prefixMaxEnd = new Float64Array(blocks.length);
+    let maxEnd = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      if (blocks[i]!.endOffset > maxEnd) maxEnd = blocks[i]!.endOffset;
+      prefixMaxEnd[i] = maxEnd;
+    }
+    const indexedAst: IndexedDocAst = { blocks, prefixMaxEnd };
+    docAstByKey.set(docKey, indexedAst);
+    for (const span of spans) {
+      const chunkBlocks = sliceOverlappingAstBlocks(indexedAst, span.docStart, span.docEnd);
+      chunkDocSpanById.set(span.chunkId, {
+        docKey,
+        docStart: span.docStart,
+        docEnd: span.docEnd,
+        chunkHasProtectedAst: chunkBlocks.some(isProtectedAstBlock),
+      });
+    }
+  }
+
+  const fallbackChunkAstById = new Map<string, IndexedDocAst>();
+  const getIndexedAstBlocks = (text: string): IndexedDocAst => {
+    const blocks = splitChunkDiscourseBlocks(text)
+      .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+    const prefixMaxEnd = new Float64Array(blocks.length);
+    let maxEnd = 0;
+    for (let i = 0; i < blocks.length; i++) {
+      if (blocks[i]!.endOffset > maxEnd) maxEnd = blocks[i]!.endOffset;
+      prefixMaxEnd[i] = maxEnd;
+    }
+    return { blocks, prefixMaxEnd };
+  };
 
   const pedagogicalChunks: PedagogicalChunk[] = [];
   const admissibleSegments: MaterialSegment[] = [];
   const fallbackSegments: MaterialSegment[] = [];
   const admissibleSegmentKeys = new Set<string>();
   const quarantinedSegmentKeys = new Set<string>();
+  const quarantinedPhysicalChunkIds = new Set<string>();
   const admissibleSegmentKeysByPhysicalChunkId = new Map<string, string[]>();
 
   for (const entry of entries) {
@@ -938,28 +1116,43 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
         else admissibleSegmentKeysByPhysicalChunkId.set(originalChunk.id, [segKey]);
       } else {
         quarantinedSegmentKeys.add(segKey);
+        quarantinedPhysicalChunkIds.add(originalChunk.id);
       }
       continue;
     }
 
-    let astBlocks = astBlocksByChunkId.get(originalChunk.id);
-    if (!astBlocks) {
-      astBlocks = splitChunkDiscourseBlocks(originalChunk.text);
-      astBlocksByChunkId.set(originalChunk.id, astBlocks);
+    const chunkSpan = chunkDocSpanById.get(originalChunk.id);
+    let docAst: IndexedDocAst;
+    let segDocStart: number;
+    let segDocEnd: number;
+    let chunkHasProtectedAst: boolean;
+    if (chunkSpan && entry.endOffset <= chunkSpan.docEnd - chunkSpan.docStart) {
+      docAst = docAstByKey.get(chunkSpan.docKey)!;
+      segDocStart = chunkSpan.docStart + entry.startOffset;
+      segDocEnd = chunkSpan.docStart + entry.endOffset;
+      chunkHasProtectedAst = chunkSpan.chunkHasProtectedAst;
+    } else {
+      let cached = fallbackChunkAstById.get(originalChunk.id);
+      if (!cached) {
+        cached = getIndexedAstBlocks(originalChunk.text);
+        fallbackChunkAstById.set(originalChunk.id, cached);
+      }
+      docAst = cached;
+      segDocStart = entry.startOffset;
+      segDocEnd = entry.endOffset;
+      chunkHasProtectedAst = docAst.blocks.some(isProtectedAstBlock);
     }
 
-    const overlapping = astBlocks.filter(
-      block => block.endOffset > entry.startOffset && block.startOffset < entry.endOffset,
-    );
+    const overlapping = sliceOverlappingAstBlocks(docAst, segDocStart, segDocEnd);
     if (overlapping.length === 0) {
-      const chunkHasProtectedAst = astBlocks.some(
-        b => b.visibility === "sealed" || (b.visibility === "hint_gated" && !allowHintGated),
-      );
+      const prevBlock = findPrecedingAstBlock(docAst, segDocEnd);
+      const segmentInProtectedScope = chunkHasProtectedAst || (prevBlock !== undefined && isProtectedAstBlock(prevBlock));
       const excludedByFamily = chunkFamilyId !== undefined && excludedItemFamilyIds.has(chunkFamilyId);
-      if (chunkAdmissible && !chunkHasProtectedAst && !excludedByFamily) {
+      if (chunkAdmissible && !segmentInProtectedScope && !excludedByFamily) {
         fallbackSegments.push(entry.segment);
       } else {
         quarantinedSegmentKeys.add(segKey);
+        quarantinedPhysicalChunkIds.add(originalChunk.id);
       }
       continue;
     }
@@ -1030,20 +1223,28 @@ export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceI
       else admissibleSegmentKeysByPhysicalChunkId.set(originalChunk.id, [segKey]);
     } else {
       quarantinedSegmentKeys.add(segKey);
+      quarantinedPhysicalChunkIds.add(originalChunk.id);
     }
   }
 
   const resolveAdmissibleChunkRef = (refId: string): readonly string[] | undefined => {
+    if (quarantinedPhysicalChunkIds.has(refId)) return undefined;
     const byPhysical = admissibleSegmentKeysByPhysicalChunkId.get(refId);
     if (byPhysical && byPhysical.length > 0) return byPhysical;
-    if (!allPhysicalChunkIds.has(refId) && admissibleSegmentKeys.has(refId)) return [refId];
+    if (!allPhysicalChunkIds.has(refId) && !quarantinedSegmentKeys.has(refId) && admissibleSegmentKeys.has(refId)) {
+      return [refId];
+    }
     return undefined;
   };
 
   const candidateConcepts: PedagogicalConceptNode[] = [];
   const rejectedConceptIds = new Set<string>();
   for (const concept of input.pedagogicalGraph.concepts) {
-    if (quarantinedSegmentKeys.has(concept.id) || admissibleSegmentKeys.has(concept.id)) {
+    if (
+      quarantinedPhysicalChunkIds.has(concept.id)
+      || quarantinedSegmentKeys.has(concept.id)
+      || admissibleSegmentKeys.has(concept.id)
+    ) {
       rejectedConceptIds.add(concept.id);
       continue;
     }

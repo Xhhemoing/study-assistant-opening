@@ -425,6 +425,25 @@ describe("shared material retriever", () => {
       });
       await expect(createOpeningMaterialRetriever(sql, budget, null)(scope, { ...input, signal: controller.signal }))
         .rejects.toThrow();
+
+      // Bare callable sql stub without .begin/.savepoint skips knowledge lookup instead of throwing, while savepoint-backed tx works.
+      mocks.getWithSync.mockClear();
+      const bareCallableSql = (() => Promise.resolve([])) as unknown as Parameters<typeof createOpeningMaterialRetriever>[0];
+      const fromBareSql = await createOpeningMaterialRetriever(bareCallableSql, budget, null)(scope, {
+        ...input,
+        query: "零空间",
+      });
+      expect(fromBareSql.chunks.map(c => c.id)).toEqual(["semantic"]);
+      expect(mocks.getWithSync).not.toHaveBeenCalled();
+
+      mocks.getWithSync.mockResolvedValueOnce(emptyKnowledgeRecord());
+      const savepointSql = { savepoint: vi.fn() } as unknown as Parameters<typeof createOpeningMaterialRetriever>[0];
+      const fromSavepointSql = await createOpeningMaterialRetriever(savepointSql, budget, null)(scope, {
+        ...input,
+        query: "零空间",
+      });
+      expect(fromSavepointSql.chunks.map(c => c.id)).toEqual(["semantic"]);
+      expect(mocks.getWithSync).toHaveBeenCalledOnce();
     });
   });
 });
