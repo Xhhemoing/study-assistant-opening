@@ -7,6 +7,7 @@ import {
   assertNativeNoteRestorePrivacy,
   filterNativeNotes,
   readNoteBackupProvenance,
+  retainNativeRestoreProvenance,
 } from "./native-note-privacy";
 const sourceId = "10000000-0000-4000-8000-000000000001";
 const turnId = "20000000-0000-4000-8000-000000000002";
@@ -221,5 +222,247 @@ describe("native linked note privacy", () => {
           .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("original workspace") });
       }
     }
+  });
+
+  it("rejects foreign and restricted restores targeting retained automatic cards resolved via teaching documents", async () => {
+    const autoCardId = "61000000-0000-4000-8000-000000000061";
+    const teachingDocId = "62000000-0000-4000-8000-000000000062";
+    const reviewId = "63000000-0000-4000-8000-000000000063";
+    const targetWorkspaceId = "64000000-0000-4000-8000-000000000064";
+    const foreignWorkspaceId = "65000000-0000-4000-8000-000000000065";
+
+    const dbForeignAutoCard = ((parts: TemplateStringsArray) => {
+      const query = parts.join("");
+      if (query.includes("FROM learning_events")) return [];
+      if (query.includes("FROM cards")) {
+        return [{
+          card_id: autoCardId,
+          source_document_id: null,
+          teaching_doc_id: teachingDocId,
+          document_id: teachingDocId,
+          has_opening_lineage: true,
+          origin_valid: true,
+          card_readable: true,
+          origin_admitted: true,
+          source_doc_teaching_admitted: true,
+          teaching_doc_active: true,
+          teaching_doc_spec_allowed: true,
+        }];
+      }
+      if (query.includes("FROM opening_note_provenance")) return [];
+      return [{ included: true }];
+    }) as unknown as Sql;
+
+    const foreignChildPacked = {
+      schemaManifest: { latestMigrationId: "0085_cards_fsrs.sql" },
+      sourceWorkspaceId: foreignWorkspaceId,
+      records: { events: [{ id: reviewId, type: "review", contentId: autoCardId }] },
+    } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
+    await expect(assertNativeNoteRestorePrivacy(dbForeignAutoCard, targetWorkspaceId, foreignChildPacked))
+      .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("original workspace") });
+
+    for (const invalidRow of [
+      { origin_valid: false },
+      { card_readable: false },
+      { origin_admitted: false },
+      { teaching_doc_active: false },
+      { teaching_doc_spec_allowed: false },
+    ]) {
+      const dbUnavailableAutoCard = ((parts: TemplateStringsArray) => {
+        const query = parts.join("");
+        if (query.includes("FROM learning_events")) return [];
+        if (query.includes("FROM cards")) {
+          return [{
+            card_id: autoCardId,
+            source_document_id: null,
+            teaching_doc_id: null,
+            document_id: null,
+            has_opening_lineage: true,
+            origin_valid: true,
+            card_readable: true,
+            origin_admitted: true,
+            source_doc_teaching_admitted: true,
+            teaching_doc_active: true,
+            teaching_doc_spec_allowed: true,
+            ...invalidRow,
+          }];
+        }
+        if (query.includes("FROM opening_note_provenance")) return [];
+        return [{ included: true }];
+      }) as unknown as Sql;
+
+      const sameWorkspacePacked = {
+        schemaManifest: { latestMigrationId: "0085_cards_fsrs.sql" },
+        sourceWorkspaceId: targetWorkspaceId,
+        records: { events: [{ id: reviewId, type: "review", contentId: autoCardId }] },
+      } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
+      await expect(assertNativeNoteRestorePrivacy(dbUnavailableAutoCard, targetWorkspaceId, sameWorkspacePacked))
+        .rejects.toMatchObject({ code: "VALIDATION" });
+    }
+  });
+
+  it("rejects foreign-workspace and deleted-document publicationCardIds provenance links", async () => {
+    const candidateCardId = "71000000-0000-4000-8000-000000000071";
+    const pubDocId = "72000000-0000-4000-8000-000000000072";
+    const targetWorkspaceId = "73000000-0000-4000-8000-000000000073";
+    const foreignWorkspaceId = "74000000-0000-4000-8000-000000000074";
+    const capturedQueries: string[] = [];
+
+    const dbForeignPub = ((parts: TemplateStringsArray) => {
+      const query = parts.join("");
+      capturedQueries.push(query);
+      if (query.includes("FROM cards")) return [];
+      if (query.includes("FROM opening_note_provenance")) {
+        return [{
+          document_id: pubDocId,
+          workspace_id: foreignWorkspaceId,
+          context_source_refs: [{ publicationCardIds: [candidateCardId] }],
+          matched_by_publication_card: true,
+          doc_exists_anywhere: true,
+          doc_active: false,
+        }];
+      }
+      return [{ included: true }];
+    }) as unknown as Sql;
+
+    const cardPacked = {
+      schemaManifest: { latestMigrationId: "0085_cards_fsrs.sql" },
+      sourceWorkspaceId: targetWorkspaceId,
+      records: { cards: [{ id: candidateCardId, sourceIds: [] }] },
+    } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
+    await expect(assertNativeNoteRestorePrivacy(dbForeignPub, targetWorkspaceId, cardPacked))
+      .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("unknown") });
+    expect(capturedQueries.some(q => q.includes("FROM opening_note_provenance") && !q.includes("WHERE (p.workspace_id="))).toBe(true);
+
+    const dbSoftDeletedPub = Object.assign(
+      ((parts: TemplateStringsArray) => {
+        const query = parts.join("");
+        if (query.includes("FROM cards")) return [];
+        if (query.includes("FROM opening_note_provenance")) {
+          return [{
+            document_id: pubDocId,
+            workspace_id: targetWorkspaceId,
+            context_source_refs: [{ publicationCardIds: [candidateCardId] }],
+            matched_by_publication_card: true,
+            doc_exists_anywhere: true,
+            doc_active: false,
+          }];
+        }
+        return [{ included: true }];
+      }) as unknown as Sql,
+      { json: (val: unknown) => val },
+    ) as unknown as Sql;
+    await expect(assertNativeNoteRestorePrivacy(dbSoftDeletedPub, targetWorkspaceId, cardPacked))
+      .rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("deleted, excluded, or unavailable") });
+  });
+
+  it("walks stored learning_events chains for incoming corrections and colliding skipped reviews", async () => {
+    const cleanCardId = "81000000-0000-4000-8000-000000000081";
+    const hiddenCardId = "82000000-0000-4000-8000-000000000082";
+    const collidingReviewId = "83000000-0000-4000-8000-000000000083";
+    const correctionId = "84000000-0000-4000-8000-000000000084";
+    const workspaceId = "85000000-0000-4000-8000-000000000085";
+
+    const dbEventChain = ((parts: TemplateStringsArray) => {
+      const query = parts.join("");
+      if (query.includes("WITH RECURSIVE event_chain")) {
+        return [{ content_id: hiddenCardId }];
+      }
+      if (query.includes("FROM cards")) {
+        return [{
+          card_id: hiddenCardId,
+          source_document_id: null,
+          teaching_doc_id: null,
+          document_id: null,
+          has_opening_lineage: true,
+          origin_valid: true,
+          card_readable: false,
+          origin_admitted: true,
+          source_doc_teaching_admitted: true,
+          teaching_doc_active: true,
+          teaching_doc_spec_allowed: true,
+        }];
+      }
+      if (query.includes("FROM opening_note_provenance")) return [];
+      return [{ included: true }];
+    }) as unknown as Sql;
+
+    const skipCollisionPacked = {
+      schemaManifest: { latestMigrationId: "0085_cards_fsrs.sql" },
+      sourceWorkspaceId: workspaceId,
+      records: {
+        events: [
+          { id: collidingReviewId, type: "review", contentId: cleanCardId },
+          { id: correctionId, type: "correction", correctsEventId: collidingReviewId },
+        ],
+      },
+    } as Parameters<typeof assertNativeNoteRestorePrivacy>[2];
+    await expect(assertNativeNoteRestorePrivacy(dbEventChain, workspaceId, skipCollisionPacked))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
+  it("normalizes uppercase UUID spellings across same-workspace note, card, and provenance retention checks", async () => {
+    const workspaceId = "91000000-0000-4000-8000-000000000091";
+    const ownerUserId = "92000000-0000-4000-8000-000000000092";
+    const cardId = "93000000-0000-4000-8000-000000000093";
+    const obsId = "94000000-0000-4000-8000-000000000094";
+    const teachingDocId = "95000000-0000-4000-8000-000000000095";
+
+    const dbSameWorkspaceUpper = Object.assign(
+      ((parts: TemplateStringsArray) => {
+        const query = parts.join("");
+        if (query.includes("FROM opening_learning_observations")) return [{ id: obsId }];
+        if (query.includes("SELECT source_ids,origin_observation_root_id,source_document_id")) {
+          return [{ source_ids: [sourceId], origin_observation_root_id: obsId, source_document_id: docId }];
+        }
+        if (query.includes("FROM cards")) return [];
+        if (query.includes("FROM opening_note_provenance")) {
+          return [{
+            document_id: docId,
+            workspace_id: workspaceId,
+            context_source_refs: [{ sourceId, sourceVersion: 1 }],
+            matched_by_publication_card: false,
+            doc_exists_anywhere: true,
+            doc_active: true,
+          }];
+        }
+        if (query.includes("FROM library_documents")) return [{ id: docId }];
+        return [{ included: true }];
+      }) as unknown as Sql,
+      { json: (val: unknown) => val },
+    ) as unknown as Sql;
+
+    const upperPacked = {
+      schemaManifest: { latestMigrationId: "0085_cards_fsrs.sql" },
+      sourceWorkspaceId: workspaceId.toUpperCase(),
+      records: {
+        documents: [{
+          id: docId.toUpperCase(),
+          openingProvenance: { contextSourceRefs: [{ sourceId: sourceId.toUpperCase(), sourceVersion: 1 }] },
+        }],
+        cards: [{
+          id: cardId.toUpperCase(),
+          ownerUserId: ownerUserId.toUpperCase(),
+          sourceIds: [sourceId.toUpperCase()],
+          originObservationRootId: obsId.toUpperCase(),
+          sourceDocumentId: docId.toUpperCase(),
+          originTeachingDocumentIds: [teachingDocId.toUpperCase()],
+        }],
+      },
+    } as unknown as Parameters<typeof assertNativeCardRestorePrivacy>[2];
+
+    await expect(assertNativeNoteRestorePrivacy(dbSameWorkspaceUpper, workspaceId, upperPacked)).resolves.toBeUndefined();
+    await expect(assertNativeCardRestorePrivacy(
+      dbSameWorkspaceUpper,
+      workspaceId,
+      upperPacked,
+      { cards: [cardId] } as Parameters<typeof assertNativeCardRestorePrivacy>[3],
+    )).resolves.toBeUndefined();
+    await expect(retainNativeRestoreProvenance(
+      dbSameWorkspaceUpper,
+      workspaceId,
+      upperPacked,
+      { cards: [cardId] } as Parameters<typeof retainNativeRestoreProvenance>[3],
+    )).resolves.toBeUndefined();
   });
 });
