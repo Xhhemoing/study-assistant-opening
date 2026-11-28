@@ -66,7 +66,7 @@ const firstPage = await mockQuery(fixtures, {
 | `GET /api/opening/courses/:id/shared-skills` | 区分 candidates 与已建立的 links，并区分关系当前是否有效。 | 同名知识点留作不同节点，跨课证据沿显式且当前有效的共享关系引用，保留来源课程、要求和观察身份。[共享技能投影](../../packages/database/src/repositories/opening-course-shared-skill-projection.ts) |
 | `GET /api/opening/sources/:id/content?version=…&page=…`、`GET /api/opening/observations/:id/history` | 正文、作答沿革的交付有各自的授权和曝光规则。现有材料接口支持物理页；chunk ID 本身不保证能跳至段内或高亮字符。 | 只在用户主动阅读时沿现有入口交付。来源引用固定版本和可核验的物理页。版本失效则说明旧出处不可定位，保留可读的历史事实。[材料内容](../../apps/web/src/app/api/opening/sources/[id]/content/route.ts) · [作答沿革](../../apps/web/src/app/api/opening/observations/[id]/history/route.ts) |
 
-卡片、今日安排、考前模拟与作品分期接入。卡片的复习记录描述卡片回忆；正式复测有独立的题目、时间与有效作答条件。考试保留题和答案不进入图的候选邻居。作品首期采用已有版本化文档；统一作品实体、量规和跨作品迁移评价仍需业务设计。[正式复测与验证](../../packages/contracts/src/opening/course-route.ts) · [作品学习目标](../plans/2026-07-21-lifelong-learning-design.md)
+卡片、今日安排、考前模拟与作品分期接入。卡片的复习记录描述卡片回忆；正式复测有独立的题目、时间与有效作答条件。考试保留题和答案不进入图的候选邻居。作品首期采用已有版本化文档；统一作品实体、量规和跨作品迁移评价仍需业务设计。[正式复测与验证](../../packages/contracts/src/opening/course-route.ts) · [作品学习目标](../product/LEARNING_THEORY.md)
 
 ## 3. 候选查询协议
 

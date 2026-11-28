@@ -1,61 +1,18 @@
 # Brainstorm 索引
 
-本表是项目研究和候选决策的唯一登记入口。状态含义见 [README](README.md)。
+本表是项目专题研究与在役接口草案的登记入口。状态含义见 [README](README.md)。
 
-## 活跃研究
+> 2026-11-28 文档清理中，2026-07 至 2026-11 间已被正式吸收或过时的 20 份历史研究笔记已移除（原文保存在 Git 历史中）；其中有效原则、决策、算法基线与架构边界已并入 [AI + 学习论](../product/LEARNING_THEORY.md)、[决策登记](../decisions/DECISIONS.md)、[架构开发计划](../roadmap/ARCHITECTURE_PLAN.md)、[算法开发计划](../roadmap/ALGORITHM_PLAN.md) 与 [ADR-v3](../decisions/ADR-v3-open-core-and-engine-boundaries.md)。
+
+## 现役专题与契约
 
 | 日期 | 主题 | 状态 | 指向板块 | 主要结论 | 正式落点 |
 |---|---|---|---|---|---|
-| 2026-11-19 | [AIstudy 架构定界、第三代学习原生 Super-agent 升级与国内外全流程商业化总蓝图（v2.1）](2026-11-19-product-framework-and-commercialization-synthesis.md) | validated | Kernel v2→v3 架构定界、双室隔离与教学卡带 SPI、幕僚长首屏与五大裂变引擎、国内外全流程商业化 | 经五视角多轮自驱深研定稿并完成创始人四项执行拍板（v2.1）：①架构两层裁决（内核层采用 DeepSeek Super-agent 运行时演进为 Kernel v3，体验层走「幕僚长三问首屏+专业工坊」+零新表 7 天影子周）；②提出双室认知主权物理隔离、神经符号可区分探针、可证伪离线巩固与 `L1–L4` 教学卡带 SPI（**第二旗舰卡带锁定雅思 `ielts-writing-speaking-v1`** 并与 408 并列推进；**默认关闸冻结 `@aistudy/senseweave`、升格 `@aistudy/jingwei`，保护已外部接线的 `v3/motion/*`、`v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`（10 个直接引用入口 / 23 个非测试 `.ts/.tsx` 源码文件及含 `split-view.test.ts` 在内的 3 个回归测试），白名单保留待复活的 `v3/start/start-composer.tsx`、`v3/learning/session-summary.tsx`（2 个文件），并冻结其余 24 个未引用非测试 `.ts/.tsx` 孤儿源码文件**；修复 Prefix Cache 倒置预期压降推理成本至国内 ¥0.85–¥1.25/生，继续在 `OPENING_BACKUP_TABLES` 中排除 `0109` 三表并新增拟议的 fail-closed 禁导/禁恢黑名单强断言）；③设计外部 AI 收编站、网课课代表卡、笨学弟擂台与无状态签名分享出口；④构建公域可盈利三级价值阶梯（`¥9.9→¥49→¥199` + `¥1,299/月` 督学室 B2B；海外 `$19/$39→$99/年`）、Paddle/Stripe+微信虚拟支付双轨三账本、2026-11-01 自然人 VAT 扣缴合规与 AGPL+CLA 创作者市场（商业化与宣发归档为 Phase 1+ 增长蓝图，当前 100% 集中推进 Phase 0 护栏、VibeDesign UI 协同收口与地图收敛交付） | 四项创始人决策已拍板（Phase 0 / UI 收口 / 地图收敛优先）；商业化与宣发归档为 Phase 1+ 增长蓝图，获批子项分阶段提升至 [PRD](../product/PRD.md)、[UX 与 AI 政策](../product/UX_AND_AI_POLICY.md) 与具体切片计划 |
-| 2026-11-19 | [知识地图收束与学习内核协同研究](2026-11-19-map-and-kernel-convergence.md) | promoted | Opening 知识地图、考前冲刺、课程路线、延迟复测与多工具工作流 | 选定 1A（复用 `learning-route` 全课程分母，到期复测优先于普通纠错判定并强制绑定 `taskId + expectedTaskVersion` 或走 Today 入口，普通练习预填 15 分钟学习意图）与 2A（`sessionStorage` 跨地图/冲刺台共享的可撤销纸上复习勾选，不改学习证据）；自由画布并入 `#450` 单一 `AssetGraphWorkspace`；按客户端显式协商零迁移透出知识边 `knowledgeStatus` 与重验出处（兼容已打开旧 `.strict()` 标签页）；边追问默认临时、两步微探针留在级数沙盒以保护复测独立资格，同步拆分续学首屏加载 | [知识地图收束与学习内核协同实施计划](../plans/2026-11-19-map-and-kernel-convergence-plan.md) |
-| 2026-11-18 | [学习 Agent 内核修订设计](2026-11-18-learning-agent-kernel-v2.md) · [首稿与审阅意见](2026-11-18-learning-agent-kernel-review.md) | proposed | 课程知识、数学复测、跨活动规划、无课程写作 | 课程追踪实际覆盖输入，限时与跨日改排分开提交，按需生成帮助，让当前安排和上次作品分别可达 | 审阅后决定是否纳入产品场景与实施计划 |
-| 2026-11-18 | [个人知识资产图的数据与接口对接](2026-11-18-knowledge-assets-api.md) | promoted | Opening、课程要求、资料、笔记、学习证据与探索 | 以有界只读投影支持双向展开和切换视角，动作走原业务入口；二期落地跨课共享技能证据投影（`sharedAttribution` / `scopeFingerprint` 游标失效，跨课同名节点保持独立），附 [21 条合成请求与响应样例](2026-11-18-knowledge-assets-examples.json)（含 Case 21） | [契约](../../packages/contracts/src/opening/asset-graph.ts)、[只读仓储](../../packages/database/src/repositories/opening-asset-graph.ts)、[查询路由](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 与 [知识地图前端](../../apps/web/src/features/opening/asset-graph/asset-graph-workspace.tsx)（一期 `#438`–`#441`、二期 `#443`/`#445` 已合主干，UI 待用户浏览器验收） |
-| 2026-11-18 | [长效学习 Agent 的候选架构](2026-11-18-long-running-learning-agent.md) | exploring | 多周学习委托、自由探索、动态知识与跨活动恢复 | 共享跨周内核与独立活动空间，事件协调复用数据库与队列，按委托主动准备可逆草案；已先落地 Track 2B 课程资料变更合并知识同步（`#443`/`#446`）与 Track 2A 无课程多稿写作工作区及跨活动恢复（`#443`/`#444`），多周委托调度仍在探索 | 产品场景与实施计划（待讨论）；已落地切片：[知识同步契约](../../packages/contracts/src/opening/knowledge.ts)、[课程知识同步仓储](../../packages/database/src/repositories/opening-knowledge.ts)、[构图作业](../../apps/worker/src/jobs/build-course-knowledge.ts)、[写作活动契约](../../packages/contracts/src/opening/writing-activity.ts)、[写作工作区仓储](../../packages/database/src/repositories/opening-writing-workspace.ts)、[跨活动恢复](../../packages/database/src/repositories/opening-current-learning-activity.ts) 与 [多稿写作面板](../../apps/web/src/features/opening/editor/writing-variants-panel.tsx)（UI 待用户浏览器验收） |
-| 2026-10-17 | [长短期目标驱动的学习架构与最小前置补习](2026-10-17-goal-driven-learning.md) | promoted | Goals、Opening 规划/教学、知识图谱、学习证据、BKT | 目标优先与两层决策；首批兼容扩展现有课程 JSON，贯通排序/预算和教学；正式目标桥接、稳定技能、条件前置与照片步骤评分分阶段推进，不新增第三套目标或宣称全部完成 | [目标驱动学习框架与改进计划](../plans/2026-10-17-goal-driven-learning-framework.md) |
-| 2026-10-06 | [框架与算法优化调研](2026-10-06-framework-algorithm-optimization-research.md) | exploring | Opening 全栈框架、AI/检索/规划算法、连接器、可靠性 | 保持 PostgreSQL 事实源与 AI 治理骨架；优先解决 web/worker 边界、可评测检索、AI 失败恢复和回调幂等，复杂算法按证据再升级 | 框架/runtime、检索评测、AI retry、DingTalk callback、worker queue ADR、后续功能切片 |
-| 2026-09-30 | [开学版专家问题与本地实验队列](../quality/opening-plan-research-backlog.md) | exploring | Opening、Parser、Provider、检索、学习证据、规划、隐私、恢复与性能 | 保留 8 项待研问题；本轮补充自动路由的评价目标、供应商/密钥管理、今日信息取舍和分学科课程学习路径，区分保守实现与待验证决策；尚未调用外部专家 | 原 I02/T01/I03/M02/Q02/Q03 落点，以及 Settings/Today/Course 的后续决策；不自动批准新算法、网页密钥管理或学习效果承诺 |
-| 2026-09-06 | [对标 DeepStudent 的产品与架构研究](2026-09-06-deepstudent-benchmark.md) | exploring | 产品定位、Learn、Explore、Library、Practice、Review、AI 治理、分发 | 不要复制 DeepStudent 桌面工作台；闭合服务端权威学习闭环。Learn 主读仍 Mock 是最大缺口；保留 AI 候选+审核，不跟随 Craft/AGPL/FSRS | 仅作研究笔记；不自动改 PRD。后续只服务 P0：Learn 主读、Goals/plan-state、门禁、开源治理 |
-| 2026-08-06 | [Notion 导入兼容、自由笔记编辑与简洁界面调研](2026-08-06-notion-import-and-freeform-editor-research.md) | exploring | Library、Editor、Portability、View | 采用 Notion HTML ZIP 保真导入 + MD/CSV 有损备路径，输出 ImportReport 并保留原始导出为证据；数据库视图首期降级表格；画布投影与数据库引擎暂不采用 | 笔记本产品设计、Portability 契约、Notion 导入器任务、编辑工作台设计 |
-| 2026-08-05 | [学习型笔记本的界面、智能编排、AI、分享与格式兼容](2026-08-05-learning-notebook-interface-and-capability-design.md) | exploring | Library、Editor、AI、Learn、Review、Portability、Publishing | 推荐“安静画布 + 上下文抽屉 + 内容/视图/学习版本分离”；AI 读取版本化块上下文并只提交 proposal；用 LearningEdition 引用原文形成教材闭环；原生备份无损、其他格式显式报告损失 | 笔记本产品设计与实施计划、内容/视图/教材/发布 ADR、Context/Sharing/Portability 契约 |
-| 2026-08-03 | [自主学习学生的成果驱动自动驾驶体验与验证指标](2026-08-03-self-directed-student-artifact-autopilot.md) | proposed | Onboarding、Learn、Explore、Planner、Assessment、Artifact、自动化治理 | 面向带着目标和资料的自主学习学生，以版本化作品为主结果，将资料审计、首个真实任务、低负担反馈、可撤销计划和 1/7/30 天独立验证整合为自动驾驶旅程；高影响变化仍须确认 | PRD 首个价值楔子与指标、UX/AI 权限政策、Learn/Explore/Planner/Assessment 设计、Goal/Artifact/Decision/Outcome 契约 |
-| 2026-08-03 | [延迟学习成果的测量、实验与因果有效性](2026-08-03-adaptive-learning-measurement-and-experiment-validity.md) | proposed | Assessment、Learn、Experiment、Worker、ConstructMap | 路由和策略优化前先运行纯测量试点；分离政策题与独立探针，以构念版本、平行题组、缺失敏感性、MDE 和策略束级 ITT 验证 7/30 天北极星是否可用 | PRD 指标、Assessment/Experiment 设计、测量与实验 ADR、Probe/Outcome 契约 |
-| 2026-08-02 | [自适应学习决策、记忆与持续校准系统](2026-08-02-adaptive-learning-decision-governance.md) | proposed | Learn、Planner、Assessment、AI、Worker、数据治理 | 采用受治理混合架构；先验证 7/30 天测量，再经 PII 前置、耐久账本、动态预算、缓存、帕累托计划和分级门禁持续校准 | PRD 指标、Planner/Assessment/Memory/AI 设计、事件与决策契约、实验治理 ADR |
-| 2026-08-05 | [Variation Theory、知识追踪与跨学科诊断论文审查](2026-08-05-variation-theory-knowledge-tracing-review.md) | exploring | Learn、Practice、Assessment、Course、Task 21–25 | 先补多维任务/作答/证据语义；VT 成对探针与层级模型须经过真实纵向对照再升级；暂不采用统一阈值、响应时间硬分类或跨学科共享参数 | Task 21/22/24 研究门、后续 knowledge-tracing spike 与评估协议 |
-| 2026-07-30 | [项目设定调研总图与实施决策门](2026-07-30-project-research-agenda-and-decision-gates.md) | proposed | 产品定位、大学/终身学习、AI、学习证据、数据治理、可靠性、生态 | Task 9–11 可继续；Task 14/21/24 前分别完成 AI 数据边界、事件/作品语义和能力评价研究；高级能力按证据触发 | PRD/场景、AI 与数据治理设计、学习事件/评价契约、实施计划研究门 |
-| 2026-07-30 | [Migration Registry 的可验证升级与并发安全](2026-07-30-migration-registry-reliability.md) | promoted | Database migration、CI、发布运维、Gate 0.2 | PostgreSQL registry 状态机、numeric parser、checksum、advisory lock 与唯一 canonical runner | Phase 1 Gate 0.2、runner、CLI 与运维手册 |
-| 2026-07-30 | [身份迁移的数据保全与预检策略](2026-07-30-identity-migration-safety.md) | promoted | Workspace ownership、Database migration、Gate 0.1 | 以确定性 fail-closed 预检和可审计人工映射保证零删除、零误归属 | Phase 1 Gate 0.1、迁移运维文档与 preflight 实现 |
-| 2026-07-29 | [外部学习触发、采集与跟踪闭环](2026-07-29-external-learning-capture-and-follow-through.md) | proposed | 全局捕获、Explore、Learn、Library | 用 `Source → LearningIntent → Task → Artifact/Evidence` 连接多源收藏与真实学习结果 | 待新增采集闭环设计并修订实施计划 |
-| 2026-07-29 | [学习记忆系统与插件化多源处理](2026-07-29-learning-memory-and-plugin-ingestion.md) | proposed | Source、AI、Worker、搜索、学习事件、插件 | 正式领域对象与可重建记忆投影分离；连接器协议化、增量化和隔离运行 | 待新增记忆设计、插件协议与 ADR |
-| 2026-07-29 | [项目算法与做法地图](ALGORITHM_MAP.md) | exploring | 全项目 | 为每个板块定义基线、升级路径、指标和回退条件 | 持续提升到各设计、ADR 和任务 |
-
-## 待调研队列
-
-这些主题影响面较大，应按实施依赖逐项研究，不代表已经选择某种算法。
-
-| 优先级 | 主题 | 决策问题 | 前置数据/任务 | 预期落点 |
-|---|---|---|---|---|
-| P0 | AI 支架与 Provider 数据边界 | 不同 AI 角色何时促进学习、何时污染证据；哪些数据可发送和保留 | Task 14 前的角色原型、数据流与小型交叉实验 | AI 权限/数据治理设计、Task 14 验收门 |
-| P0 | 学习事件、复杂作品与验证语义 | 阅读、翻译、提示、提交、论文、代码、实验和团队贡献分别能证明什么 | Task 21 前的真实任务样本与领域工作坊 | Event/Artifact/Feedback/Verification 契约 |
-| P0 | 能力构念、公平性与不确定性 | 四档状态何时有意义，何时必须 unknown/disabled/suppressed | Task 24 前的事件资格表、人工金标与切片回放 | Assessment 设计、Task 24 验收门 |
-| P0 | 数据用途、保留、删除与未成年人 | 事件、来源、AI 提示、供应商日志和备份如何满足目的限制与删除 | Task 14/21 前的数据流、条款与法务/隐私审查 | 数据治理政策、Provider/Retention 契约 |
-| P1 | 首个价值楔子与真实学习旅程 | 考试、外部学习闭环和长期知识工作台哪个应成为首个可验证场景 | 用户访谈、两周日记研究、可交付原型 | PRD、首个试点与成功指标 |
-| P1 | 计划压力、无障碍与学习者差异 | 计划、风险和提醒怎样帮助执行而不制造压力或排除用户 | Task 19/25 前的纵向日志与辅助技术测试 | UX/指导模式/Planner 设计 |
-| P1 | 来源权利、锚点与多模态忠实度 | 哪些来源可保存、解析、发送 AI、导出；结构和引用如何降级 | 受控语料、法务矩阵和威胁模型 | Source/Parser/Reader 设计 |
-| P0 | 来源去重与版本识别 | URL、文件、仓库和社交内容何时视为同一来源或新版本 | Source/Snapshot 契约 | 来源基础设计 |
-| P2 | 多路混合检索与重排 | 关键词、语义、关系、时间和权限怎样融合 | 全文基线、可评测的检索语料和查询集 | 搜索设计/ADR |
-| P1 | Task 与 PlanItem 排序 | 如何在自由度、期限、风险和时间预算间排序 | LearningIntent/Task 契约稳定，Task 25 前完成回放与负担评估 | Learn/Planner 设计 |
-| P1 | 复习调度 | 规则基线、FSRS 或其他调度何时优于现有策略 | Review/Attempt 事件和回放集 | SRS Spike/ADR |
-| P1 | 能力证据与状态校准 | 如何按能力切片给出可解释、校准的状态 | 高质量 Attempt/Artifact/Feedback | 预测模型设计 |
-| P1 | 内容和任务推荐 | 如何优化实际学习结果而非点击或停留 | 可靠反馈和反事实评估策略 | 推荐设计 |
-| P1 | 主题聚类与知识关系候选 | 如何控制重复、漂移和错误关系 | 多源内容集与人工标注 | Library/AI 设计 |
-| P2 | 时间知识图谱 | 何时关系表不足，值得引入图存储或图投影 | 路径查询和规模基准 | 架构 ADR |
-| P2 | 离线同步与冲突合并 | 不同资产类型分别采用何种合并策略 | 客户端与离线需求批准 | 同步 ADR |
-| P2 | 平台专用连接器 | GitHub、Zotero、社交平台怎样处理权限和增量同步 | 通用插件协议稳定 | Connector 设计 |
+| 2026-11-18 | [个人知识资产图的数据与接口对接](2026-11-18-knowledge-assets-api.md) | promoted | Opening、课程要求、资料、笔记、学习证据与探索 | 以有界只读投影支持双向展开和切换视角，动作走原业务入口；二期落地跨课共享技能证据投影，附 [21 条合成请求与响应样例](2026-11-18-knowledge-assets-examples.json)（供 `asset-graph` 单测直接读取，路径保持稳定） | `packages/contracts/src/opening/asset-graph.ts`、`packages/database/src/repositories/opening-asset-graph.ts`、`apps/web/src/features/opening/asset-graph/` |
 
 ## 使用规则
 
 - 新增研究先复制 [研究记录模板](templates/research-note.md)，再在本索引登记。
 - 一个记录必须指向具体产品流程、领域对象、代码边界或计划任务。
 - `proposed` 只能表示“建议批准”，不能被当成正式规格。
-- 提升到正式文档后改为 `promoted`，并补充目标链接。
-- 研究被推翻时使用 `rejected` 或 `superseded`，保留原因和替代链接。
+- 提升到正式文档后改为 `promoted`，并补充目标链接；已被正式文档完整吸收后按周期清理，不长期堆积重复计划。

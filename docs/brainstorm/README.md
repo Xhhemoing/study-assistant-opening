@@ -17,12 +17,12 @@ Brainstorm 文档不是已批准需求，也不是实现规范。
 - `brainstorm` 可以保留互相竞争的方案、未验证假设和失败方向。
 - 进入实现前，结论必须明确提升到对应的 `plans` 或 `decisions` 文档。
 - Brainstorm 不得静默改变 PRD、已批准设计、ADR 或当前实施顺序。
-- 已被新研究取代的文档不删除，标记 `superseded` 并链接替代文档。
+- 已被正式文档完整吸收或取代的历史研究，定期清理（原文留在 Git 历史中）并在 `INDEX.md` 注明去向。
 
 ## 2. 目录内容
 
 - `INDEX.md`：研究登记表、状态和正式落点。
-- `ALGORITHM_MAP.md`：项目各板块的目标、基线算法、扩展路径和评估指标。
+- 算法地图与演进路径已并入 [算法开发计划](../roadmap/ALGORITHM_PLAN.md)。
 - `templates/research-note.md`：新增研究记录的统一模板。
 - `YYYY-MM-DD-<topic>.md`：一次对话或专题调研的结论。
 
