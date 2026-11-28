@@ -30,4 +30,4 @@
 - `docs/quality/` — 历史审计与评测参考
 - `docs/archive/` — 历史证据归档（见 [archive/README.md](archive/README.md)）
 
-> 2026-11-28 文档清理中移除的70 份已过时/已吸收历史计划、研究笔记与旧修复记录均完整保存在 Git 历史中，核心有效内容已并入 `LEARNING_THEORY.md`、`DECISIONS.md`、`roadmap/` 与 `operations/`。
+> 2026-11-28 文档清理中移除的 69 份已过时/已吸收历史计划、研究笔记与旧修复记录（另 1 份 SenseWeave 手册迁至 `docs/operations/senseweave-beta.md` 并在原路径留迁移指引）均完整保存在 Git 历史中，核心有效内容已并入 `LEARNING_THEORY.md`、`DECISIONS.md`、`roadmap/` 与 `operations/`。
