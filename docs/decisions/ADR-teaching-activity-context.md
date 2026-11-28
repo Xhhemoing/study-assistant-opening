@@ -168,7 +168,7 @@ AI 主讲学习 v2 需要「可自由开始」的学习活动：不强制先建�
 
 ## 参考
 
-- 章程：`docs/plans/2026-10-11-ai-led-learning-v2.md`（G3/G6/G8、Paula 嵌入、facts ledger）
+- 决策与原则：`docs/decisions/DECISIONS.md` 与 `docs/product/LEARNING_THEORY.md`（原 `2026-10-11-ai-led-learning-v2.md` 已并入，原文在 Git 历史）
 - 计划：`docs/superpowers/plans/ai-led-learning-v2/plan.md` §6.1、V2-03
 - 契约：`packages/contracts/src/opening/learning.ts`（L100、L173、L182、L201 等）
 - 迁移：`0017_opening_conversations.sql`、`0019_opening_learning.sql`、`0028_opening_learning_attempts.sql`、`0037_opening_learning_history_snapshot.sql`、`0049_opening_skill_evidence.sql`、`0001_library.sql`、`0010_revision_proposals.sql`

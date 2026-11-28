@@ -2,7 +2,7 @@
 
 > T3 或 Antigravity 连续推进项目时，从[自动推进技能](../../.agents/skills/aistudy-autopilot/SKILL.md)进入。风险分级、角色写权、资源准入和交付权限以本文及当前明确授权为准。
 
-本规则取代 [codex-team.md](../archive/operations/codex-team.md) 与 [project-lead-prompt.md](../archive/operations/project-lead-prompt.md) 中的旧角色、模型路由和派单流程；两者仅作历史。与根 `AGENTS.md` 共同约束执行，不因任务小或文档风险低豁免正式 PR 审查。最新明确授权优先，但本文不能覆盖平台或更高层仍有效的执行配额。
+本规则取代历史上归档的旧角色、模型路由和派单流程（旧文档已清理，原文保存在 Git 历史）。与根 `AGENTS.md` 共同约束执行，不因任务小或文档风险低豁免正式 PR 审查。最新明确授权优先，但本文不能覆盖平台或更高层仍有效的执行配额。
 
 ## 职责与车道
 
@@ -37,7 +37,7 @@ v2 审查流水线独立限流：稳定候选交回后安排独立 GPT，最多 
 |---|---|
 | 规划会话（主控 PM 的规划部分） | 只读调查、拆卡、核接口，把完整任务卡写进仓库外的卡片目录 `ready/`；公共接口起草后交集成者确认。计划范围内产品细则由 PM 按既定规则设默认值；必须由用户决定的问题集中提出，每 12 小时最多一次。不派单、不实现；除非出现具体故障，不开流程类 PR。 |
 | 派单与审查会话（主控 PM 的调度部分） | 从 `ready/` 取已满足依赖、接口确认和写集合／资源条件的卡并移到 `active/`，建 Cursor worktree、派实现者，对 PR 发起对应审查；候选交唯一集成者，不自行合入 integration。也可起草卡，接口确认标准相同；完成状态须按实际合入和交付事实记录。 |
-| 集成会话（唯一集成者） | 唯一合入 `integration/opening` 和 `feat/opening-release`：L、提升与 H 均按下文 v2 门禁。独占 STATUS、共享接口确认、公共契约、依赖锁文件、schema／迁移编号，按实际 PR 事实批量同步总计划附录 F，不重做已交卡。不含迁移的主线版本仍须满足既有部署授权；含迁移的版本部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
+| 集成会话（唯一集成者） | 唯一合入 `integration/opening` 和 `feat/opening-release`：L、提升与 H 均按下文 v2 门禁。独占 STATUS、共享接口确认、公共契约、依赖锁文件、schema／迁移编号，按实际 PR 事实同步 [STATUS.md](../STATUS.md) 与 [roadmap/OVERVIEW.md](../roadmap/OVERVIEW.md)，不重做已交卡。不含迁移的主线版本仍须满足既有部署授权；含迁移的版本部署、迁移执行、生产配置、真实数据操作、破坏性迁移和定样仍逐次审批。 |
 | 实现 worker | 派单与审查会话先用 `git worktree add` 建好独立 worktree 与卡片分支，再派发遵循 `.cursor/agents/aistudy-lane-worker.md` 的子 Agent 在其中实现；同时运行不超过 5 个。`best-of-n-runner` 在本机 IDE 中不提供隔离，不用于实现。迁移、事务、跨包卡仍按 2026-10-28 决策表交 Codex CLI（gpt-6.1-terra xhigh）实现，改由 Cursor 子 Agent 承接须用户决定。跨包卡指改变任一 `packages/*` 中被其他包消费的公开契约、类型或函数签名的卡（例如 `packages/contracts` 的 schema 与工具定义，或 domain/database 被应用消费的导出），由写卡会话起草、集成者确认后在卡里界定并写明实现者。 |
 | 只读调查 | `.cursor/agents/aistudy-explorer.md` 或内置 explore，不占实现名额。 |
 | 指定 Opus 审查 | 模型为 Claude Opus 5.5 high；H 合入前通过，L 合入后补审。Cursor 中由 `.cursor/agents/aistudy-pr-reviewer.md` 执行（类型不可用时，获准的 `generalPurpose` 按同一说明执行并注明，模型要求不变）；其他工具只用当前获准渠道，不以工具名替代模型批准。 |
@@ -110,7 +110,7 @@ GitHub 同一提交上的失败作业重跑沿用原 run ID，并递增 attempt�
 
 ## 连续实施与验证准入
 
-实现者在 allowlist 内连续完成一个可用结果，不为每个内部函数另建卡、PR 或评审。只加载当前所需文件与技能；恢复时核原卡、工作区、最新差异和直接缺验，不反复读长 STATUS／总计划。STATUS 由唯一集成者按实际交付更新，普通 worker 只读必要行。
+实现者在 allowlist 内连续完成一个可用结果，不为每个内部函数另建卡、PR 或评审。只加载当前所需文件与技能；恢复时核原卡、工作区、最新差异和直接缺验，不反复读长 STATUS／历史计划（当前路线见 [roadmap/OVERVIEW.md](../roadmap/OVERVIEW.md)）。STATUS 由唯一集成者按实际交付更新，普通 worker 只读必要行。
 
 - 实际隔离的文件与运行资源可并行编码／验证；共享环境重验证必须经现有 `run-heavy` 串行，不能只靠“不同 worktree”并跑数据库、类型或构建。不得停止或抢占其他任务。
 - 轻量源码、语法、diff 与现成近邻检查先行；隔离 worktree 内只跑最接近的 1–3 个测试文件、所属包 `typecheck` 与改动文件 `eslint`，禁止在子工作树全量跑整包测试套件，并在验证结束交回前仅清理本 worker 在独占 worktree 内本轮安装且确认无在途进程占用的 `node_modules`。Windows `pwsh` 下优先使用单引号 here-string（`@'...'@`）或 `node -e`，避免双引号内联 `python -c` 转义错误。纯文档只审实际 diff 和规则一致性，不跑业务测试或服务。

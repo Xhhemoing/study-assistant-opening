@@ -41,7 +41,7 @@ OPENING_CHAT_SENSEWEAVE=shadow
 
 1. 由用户本人和“QA测试”账号分别使用自己的已登录会话访问 `GET /api/auth/me`，私下确认响应中的 `user.id`，再交部署负责人写入 `OPENING_CHAT_SENSEWEAVE_BETA_USERS`。不能根据显示名猜 ID、复用其他账号或运行 `opening-create-owner` 创建替代账号。不把 ID、完整身份响应、邮箱、Cookie、令牌或环境文件内容写进仓库和验收记录。接口依据见 [当前身份读取](../../apps/web/src/app/api/auth/me/route.ts)。
 2. 核对待验目标提交及其 CI 后，在受控私有环境中保留原配置，设置 `OPENING_CHAT_PROSE=1`、`OPENING_CHAT_SENSEWEAVE=on`，白名单只包含上述两个已确认 ID。没有完成这些步骤前保持 shadow；不新增通配符或扩大账号范围。
-3. 部署负责人准备仅重启 Web 的安全步骤：沿用现有部署锁、未完成激活检查、当前 release/进程身份与健康核对，并保护原服务和配置的恢复路径。现有 [受管发布说明](../operations/hermes-deployment.md) 中的 `restart` 调用 [restart_services](../../infra/deploy/hermes-release.sh)，在 Worker 需要运行时会同时重启 Worker，**不等于本项要求的 Web-only 重启**。实际私有配置位置、现场服务状态和 Web-only 执行步骤仍待部署负责人核实；此处不直接执行或推荐替代性裸重启。
+3. 部署负责人准备仅重启 Web 的安全步骤：沿用现有部署锁、未完成激活检查、当前 release/进程身份与健康核对，并保护原服务和配置的恢复路径。现有 [受管发布说明](hermes-deployment.md) 中的 `restart` 调用 [restart_services](../../infra/deploy/hermes-release.sh)，在 Worker 需要运行时会同时重启 Worker，**不等于本项要求的 Web-only 重启**。实际私有配置位置、现场服务状态和 Web-only 执行步骤仍待部署负责人核实；此处不直接执行或推荐替代性裸重启。
 4. 重启完成后，由用户分别在两个内测账号登录态下读取 `GET /api/opening/capabilities`：`chatProse` 应为 `true`、`chatSenseWeave` 应为 `on`；已登录的非白名单账号应仍为 `shadow`，匿名访问应为 `off`。关闭 prose 时也应为 `off`。保留实际观测值；仅 HTTP 200、配置文件已写入或服务 active 均不足以证明灰度生效。接口与规则见 [capabilities](../../apps/web/src/app/api/opening/capabilities/route.ts)、[服务端开关解析](../../packages/config/src/server-config.ts)。
 
 ### WP0.6：固定十题与人工核对点（全部待用户运行）

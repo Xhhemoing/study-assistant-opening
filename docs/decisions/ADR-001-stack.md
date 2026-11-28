@@ -1,11 +1,11 @@
 # ADR-001: Initial Platform Stack
 
-**Status:** Accepted  
-**Date:** 2026-07-22  
-**Deciders:** AIstudy implementers (session approval of architecture rethink)  
-**Related:**  
-- `docs/plans/2026-07-22-system-architecture-rethink-design.md`  
-- `docs/plans/2026-07-21-lifelong-learning-implementation.md` Task 1  
+**Status:** Accepted
+**Date:** 2026-07-22
+**Deciders:** AIstudy implementers (session approval of architecture rethink)
+**Related:**
+- `docs/architecture/ARCHITECTURE.md` (current architecture)
+- `docs/decisions/DECISIONS.md` (decision register; 2026-07-22 rethink gates merged below)
 - `spikes/**`
 
 ## Context
@@ -40,11 +40,23 @@ Adopt the following stack for Phase 0–MVP:
 
 ### Architecture invariants locked with this ADR
 
-1. **Primary backend language is TypeScript.**  
-2. **Processes:** `apps/web` (sync API/UI) + `apps/worker` (async).  
-3. **Heterogeneous workers (e.g. Python)** only after the extension gate in the architecture rethink design; they must use versioned job contracts and must not own formal domain writes.  
-4. **AI writes candidates only**; formal content requires human accept/edit/reject.  
+1. **Primary backend language is TypeScript.**
+2. **Processes:** `apps/web` (sync API/UI) + `apps/worker` (async).
+3. **Heterogeneous workers (e.g. Python)** only after the extension gate below; they must use versioned job contracts and must not own formal domain writes.
+4. **AI writes candidates only**; formal content requires human accept/edit/reject.
 5. **Learning events are append-only**; assessments/plans are versioned derived projections.
+
+
+### Heterogeneous worker extension gate & degradation (merged from 2026-07-22 architecture rethink)
+
+Introduce a dedicated Python (or other) worker only with profiling or stability evidence, satisfying all five rules:
+1. Job schemas are versioned in `packages/contracts`.
+2. Outputs pass schema validation before entering the TypeScript domain pipeline.
+3. Sidecars never UPDATE formal asset or event tables directly.
+4. Sidecar failures never block synchronous learning paths.
+5. Self-hosting docs are updated alongside.
+
+Degradation defaults: AI unavailable → notes/drafts/practice/rule queue stay usable; queue unavailable → write DB/outbox and retry; vector unavailable → metadata/full-text fallback; storage unavailable → never claim upload succeeded; assessment failure → last known result or rule baseline.
 
 ## Alternatives considered
 
@@ -60,18 +72,18 @@ Adopt the following stack for Phase 0–MVP:
 
 ## Self-hosting constraints
 
-- Node `>=20` required.  
-- PostgreSQL 16+ recommended (JSONB, `gen_random_uuid()`).  
-- Redis required for BullMQ workers.  
-- S3-compatible storage endpoint must support path-style addressing for MinIO-like targets (`forcePathStyle: true` in spike).  
-- Playwright browser binaries are a **dev/CI** dependency, not a runtime dependency of the product containers.  
+- Node `>=20` required.
+- PostgreSQL 16+ recommended (JSONB, `gen_random_uuid()`).
+- Redis required for BullMQ workers.
+- S3-compatible storage endpoint must support path-style addressing for MinIO-like targets (`forcePathStyle: true` in spike).
+- Playwright browser binaries are a **dev/CI** dependency, not a runtime dependency of the product containers.
 - Install note: shells with `NODE_ENV=production` omit devDependencies; repo `.npmrc` sets `include=dev` for local/spike installs. Production images should still install only runtime deps explicitly.
 
 ## Upgrade policy
 
-1. Pin exact versions in workspace `package.json` files; commit `package-lock.json`.  
-2. Minor/patch upgrades require green `npm test --workspaces --if-present` plus later monorepo lint/typecheck/build gates.  
-3. Major upgrades (Next, Drizzle, BullMQ, Playwright) require a new spike or ADR amendment.  
+1. Pin exact versions in workspace `package.json` files; commit `package-lock.json`.
+2. Minor/patch upgrades require green `npm test --workspaces --if-present` plus later monorepo lint/typecheck/build gates.
+3. Major upgrades (Next, Drizzle, BullMQ, Playwright) require a new spike or ADR amendment.
 4. Do not introduce a second business backend language without meeting the extension gate and writing ADR-00x.
 
 ## Spike results (2026-07-22)
@@ -84,24 +96,24 @@ npm test --workspaces --if-present
 
 Result: **PASS** for all six spikes:
 
-- `@aistudy/spike-web` — App Router `GET` health JSON  
-- `@aistudy/spike-database` — JSONB insert in transaction; forced rollback isolation  
-- `@aistudy/spike-queue` — duplicate `jobId` executes once  
-- `@aistudy/spike-auth` — signed session + object-level deny  
-- `@aistudy/spike-storage` — presigned PUT/GET URL shape  
+- `@aistudy/spike-web` — App Router `GET` health JSON
+- `@aistudy/spike-database` — JSONB insert in transaction; forced rollback isolation
+- `@aistudy/spike-queue` — duplicate `jobId` executes once
+- `@aistudy/spike-auth` — signed session + object-level deny
+- `@aistudy/spike-storage` — presigned PUT/GET URL shape
 - `@aistudy/spike-test-tooling` — Vitest + Playwright Chromium
 
 ## Consequences
 
-- Task 2 may scaffold `apps/*` and `packages/*` on this stack without re-debating language.  
-- Production auth library, compose services, and CI matrix remain follow-up tasks (not unblocked product domain work beyond stack choice).  
+- Task 2 may scaffold `apps/*` and `packages/*` on this stack without re-debating language.
+- Production auth library, compose services, and CI matrix remain follow-up tasks (not unblocked product domain work beyond stack choice).
 - Spikes stay in-repo as executable regression for stack assumptions until replaced by monorepo integration tests.
 
 ## Official sources consulted
 
-- Next.js App Router docs (Route Handlers, self-hosting Node server)  
-- Drizzle ORM PostgreSQL docs  
-- BullMQ jobId / deduplication docs  
-- PostgreSQL JSONB and transaction docs  
-- AWS SDK v3 S3 presigner docs  
-- Vitest + Playwright docs  
+- Next.js App Router docs (Route Handlers, self-hosting Node server)
+- Drizzle ORM PostgreSQL docs
+- BullMQ jobId / deduplication docs
+- PostgreSQL JSONB and transaction docs
+- AWS SDK v3 S3 presigner docs
+- Vitest + Playwright docs
