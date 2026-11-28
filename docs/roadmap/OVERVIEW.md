@@ -27,7 +27,7 @@
 整理前 `docs/` 下有数百份历史文档，多份旧计划互相声明“以我为准”。本次整理（纯文档改动，原文全部留在 Git 历史）：
 - **确立唯一真源**：新增 [AI + 学习论](../product/LEARNING_THEORY.md)、重写 [PRD v1.0](../product/PRD.md)、新增 [决策登记与测量口径](../decisions/DECISIONS.md)、重写 [系统架构现状](../architecture/ARCHITECTURE.md)。
 - **开发计划分两层三份**：给你看的 [易懂版（本文）](OVERVIEW.md)，给开发看的 [架构开发计划](ARCHITECTURE_PLAN.md) 与 [算法开发计划](ALGORITHM_PLAN.md)。
-- **清理 69 份过时或已被吸收的旧文档，并迁移 1 份运维手册**（16 份历史计划清除，`2026-10-24-senseweave-beta.md` 迁入 `operations/senseweave-beta.md` 并在原路径留迁移指引；20 份已吸收研究笔记、5 份已完成的一次性修复单、2 份旧前端审查、1 份冲突提案、1 份旧开源商业稿、1 份旧基线与 23 份非 `superpowers` 旧归档清除）。
+- **清理 63 份过时或已被吸收的旧文档，并将 7 份被受保护历史文档或包 README 引用的旧路径替换为简短迁移指引**（`2026-10-24-senseweave-beta.md` 正文迁入 `operations/senseweave-beta.md`；其余受引用的历史计划与地图在原路径留跳转指引，正文完整保留在 Git 历史中）。
 - **保持 CI 与测试依赖路径稳定**：`docs/superpowers/`、`docs/quality/`、`docs/archive/superpowers/`、`docs/brainstorm/2026-11-18-knowledge-assets-*` 均有脚本或测试读取，原样保留；`docs/STATUS.md` 由唯一集成者独占维护。
 
 ---
